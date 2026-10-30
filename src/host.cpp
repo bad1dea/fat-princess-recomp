@@ -905,29 +905,56 @@ extern "C" unsigned long fp_run_frame_clock(void (*present)(void)) {
     }
 }
 
-#if defined(__linux__)   // the sampler uses SIGPROF and ucontext
+#if defined(__linux__) || (defined(__APPLE__) && TARGET_OS_IOS && defined(__aarch64__))   // SIGPROF and ucontext
 // FP_PROF=path: SIGPROF sampling of the instruction pointer per host thread, written to
 // `path` every 15 s as (tid, rip) pairs. Resolve offline with tools/resolve_prof.py.
+// On iOS `path.maps` holds the main image's load address and the thread names instead of /proc/self/maps.
 #include <csignal>
 #include <sys/time.h>
-#include <sys/syscall.h>
 #include <unistd.h>
+#if defined(__linux__)
+#include <sys/syscall.h>
 #include <ucontext.h>
+#else
+#include <sys/ucontext.h>
+#include <pthread.h>
+#include <mach-o/dyld.h>
+#endif
 namespace {
 constexpr size_t prof_capacity = 1u << 22;
 struct ProfSample { uint32_t tid; uint32_t us; uint64_t rip; };   // us: steady clock microseconds, low 32 bits
 ProfSample* prof_samples;
 std::atomic<size_t> prof_count{0};
+#if defined(__linux__)
+uint32_t prof_tid() { return uint32_t(syscall(SYS_gettid)); }
+uint64_t prof_pc(void* uc) { return uint64_t(static_cast<ucontext_t*>(uc)->uc_mcontext.gregs[REG_RIP]); }
+#else
+// Thread names are taken the first time a thread is sampled; the writer saves them next to the samples.
+constexpr int prof_names_max = 256;
+struct ProfName { std::atomic<uint32_t> tid; char name[32]; };
+ProfName prof_names[prof_names_max];
+uint32_t prof_tid() {
+    uint64_t id = 0; pthread_threadid_np(nullptr, &id);
+    const uint32_t tid = uint32_t(id);
+    for (auto& n : prof_names) {
+        const uint32_t have = n.tid.load(std::memory_order_acquire);
+        if (have == tid) break;
+        uint32_t empty = 0;
+        if (have == 0 && n.tid.compare_exchange_strong(empty, tid)) { pthread_getname_np(pthread_self(), n.name, sizeof n.name); break; }
+    }
+    return tid;
+}
+uint64_t prof_pc(void* uc) { return uint64_t(static_cast<ucontext_t*>(uc)->uc_mcontext->__ss.__pc); }
+#endif
 void prof_handler(int, siginfo_t*, void* uc) {
     const size_t i = prof_count.fetch_add(1, std::memory_order_relaxed);
     if (i >= prof_capacity) return;
     timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
-    prof_samples[i] = {uint32_t(syscall(SYS_gettid)), uint32_t(ts.tv_sec * 1000000ull + ts.tv_nsec / 1000),
-        uint64_t(static_cast<ucontext_t*>(uc)->uc_mcontext.gregs[REG_RIP])};
+    prof_samples[i] = {prof_tid(), uint32_t(ts.tv_sec * 1000000ull + ts.tv_nsec / 1000), prof_pc(uc)};
 }
-__attribute__((constructor)) void prof_start() {
+void prof_start() {
     const char* path = std::getenv("FP_PROF");
-    if (!path || !*path) return;
+    if (!path || !*path || prof_samples) return;
     prof_samples = static_cast<ProfSample*>(calloc(prof_capacity, sizeof(ProfSample)));
     struct sigaction sa{};
     sa.sa_sigaction = prof_handler; sa.sa_flags = SA_SIGINFO | SA_RESTART;
@@ -944,6 +971,14 @@ __attribute__((constructor)) void prof_start() {
                 std::fwrite(prof_samples, sizeof(ProfSample), n, f);
                 std::fclose(f);
                 std::rename(tmp.c_str(), out.c_str());
+#if defined(__APPLE__)
+                if (FILE* m = std::fopen((out + ".maps").c_str(), "w")) {
+                    std::fprintf(m, "base %llx slide %llx\n", (unsigned long long)(uintptr_t)_dyld_get_image_header(0),
+                                 (unsigned long long)_dyld_get_image_vmaddr_slide(0));
+                    for (auto& t : prof_names) if (uint32_t tid = t.tid.load()) std::fprintf(m, "thread %u %s\n", tid, t.name);
+                    std::fclose(m);
+                }
+#endif
                 if (FILE* in = std::fopen("/proc/self/maps", "r")) {
                     if (FILE* m = std::fopen((out + ".maps").c_str(), "w")) {
                         char buf[4096]; size_t got;
@@ -956,7 +991,14 @@ __attribute__((constructor)) void prof_start() {
         }
     }).detach();
 }
+#if defined(__linux__)
+__attribute__((constructor)) void prof_start_at_load() { prof_start(); }
+#endif
 }
+// iOS reads its environment from the app's documents after load, so the launcher starts the sampler.
+extern "C" void fp_prof_start(void) { prof_start(); }
+#else
+extern "C" void fp_prof_start(void) {}
 #endif
 
 #if defined(__linux__)

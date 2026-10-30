@@ -123,6 +123,8 @@ void import_zip(const std::string& docs) {
 }
 }
 
+extern "C" void fp_prof_start(void);
+
 extern "C" void fp_ios_prepare(int* argc, char*** argv) {
     const char* home = std::getenv("HOME");
     if (!home) return;
@@ -153,7 +155,23 @@ extern "C" void fp_ios_prepare(int* argc, char*** argv) {
         {"PS3RECOMP_VK_WINDOW", "1"}, {"PS3RECOMP_VK_GUEST_PROGRAMS", "1"}, {"AUDIO_RATE", "1"},
         {"FP_PRESENT_TIMING", "1"}, {"FP_GAME_DIR", d + "/game/USRDIR"}, {"FP_CONFIG", d + "/settings.ini"},
     };
+    // env.txt in the documents folder (KEY=VALUE per line) overrides and adds settings, for testing over USB.
+    if (FILE* f = std::fopen((docs + "/env.txt").c_str(), "r")) {
+        char line[1024];
+        while (std::fgets(line, sizeof line, f)) {
+            std::string l(line);
+            while (!l.empty() && (l.back() == '\n' || l.back() == '\r' || l.back() == ' ')) l.pop_back();
+            const size_t eq = l.find('=');
+            if (l.empty() || l[0] == '#' || eq == std::string::npos) continue;
+            std::string value = l.substr(eq + 1);
+            if (value.rfind("./", 0) == 0) value = docs + value.substr(1);
+            setenv(l.substr(0, eq).c_str(), value.c_str(), 1);
+            std::fprintf(stderr, "[ios] env.txt: %s\n", l.substr(0, eq).c_str());
+        }
+        std::fclose(f);
+    }
     for (const auto& e : env) setenv(e.key, e.value.c_str(), 0);
+    fp_prof_start();
     // SDL's window only finds MoltenVK through an explicit path; it ships inside the app bundle.
     char exe[1024];
     uint32_t len = sizeof exe;
