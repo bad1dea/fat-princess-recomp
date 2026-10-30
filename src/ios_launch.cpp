@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <dirent.h>
+#include <mach-o/dyld.h>
 #include <string>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -153,6 +154,14 @@ extern "C" void fp_ios_prepare(int* argc, char*** argv) {
         {"FP_PRESENT_TIMING", "1"}, {"FP_GAME_DIR", d + "/game/USRDIR"}, {"FP_CONFIG", d + "/settings.ini"},
     };
     for (const auto& e : env) setenv(e.key, e.value.c_str(), 0);
+    // SDL's window only finds MoltenVK through an explicit path; it ships inside the app bundle.
+    char exe[1024];
+    uint32_t len = sizeof exe;
+    if (_NSGetExecutablePath(exe, &len) == 0) {
+        std::string dir(exe);
+        dir.resize(dir.rfind('/'));
+        setenv("SDL_VULKAN_LIBRARY", (dir + "/Frameworks/MoltenVK.framework/MoltenVK").c_str(), 0);
+    }
     if (*argc < 2) {
         static char* args[3] = {(*argv)[0], const_cast<char*>("elf/retail-game-verified.elf"), nullptr};
         *argc = 2;
