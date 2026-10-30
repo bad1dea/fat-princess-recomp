@@ -41,3 +41,16 @@ jobs:
           grep -hE "error:" build.log | sed -E 's#^.*/(third_party|src|private)/#\1/#' | sort | uniq -c | sort -rn | head -80 || true
           echo "--- linker ---"
           grep -E "Undefined symbols|referenced from|undefined reference|ld: |duplicate symbol|  \"_" build.log | sort -u | head -150 || true
+      - name: Package
+        if: success()
+        run: |
+          exe=$(find build/mac -name fp_native -type f -perm -u+x | head -1)
+          mkdir -p out && cp "$exe" out/fp_native && strip -S out/fp_native
+          printf '%s\n' 'Needs the Vulkan loader and MoltenVK: brew install vulkan-loader molten-vk' \
+            'Run from your game folder (game/ and elf/retail-game-verified.elf next to it).' > out/README.txt
+      - uses: actions/upload-artifact@v5
+        if: success()
+        with:
+          name: fat-princess-macos-arm64
+          path: out/
+          retention-days: 14
