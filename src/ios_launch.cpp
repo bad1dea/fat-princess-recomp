@@ -1,12 +1,126 @@
 // iOS start-up: there is no launcher script or command line, so do what run.sh does on the desktop. Game files
-// live in the app's Documents folder (shared through the Files app): game/, elf/ and data/ as in the desktop
-// package. The log goes to Documents/play.log.
+// live in the app's Documents folder (shared through the Files app): game/ and elf/ as in the desktop package,
+// or one .zip of them dropped there (or opened with the app), which is unpacked on the next launch.
+// The log goes to Documents/play.log.
 #include <TargetConditionals.h>
 #if TARGET_OS_IOS
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <dirent.h>
 #include <string>
+#include <sys/stat.h>
 #include <unistd.h>
+#include <vector>
+#include <zlib.h>
+
+namespace {
+bool exists(const std::string& p) { struct stat st; return stat(p.c_str(), &st) == 0; }
+
+void make_dirs(const std::string& path) {
+    for (size_t i = 1; i <= path.size(); ++i)
+        if (i == path.size() || path[i] == '/') mkdir(path.substr(0, i).c_str(), 0755);
+}
+
+uint32_t le32(const unsigned char* p) { return p[0] | p[1] << 8 | p[2] << 16 | uint32_t(p[3]) << 24; }
+uint16_t le16(const unsigned char* p) { return uint16_t(p[0] | p[1] << 8); }
+
+// Stored and deflated entries of an ordinary (non-Zip64) archive, which covers the game folder.
+bool unzip(const std::string& zip, const std::string& dest) {
+    FILE* f = std::fopen(zip.c_str(), "rb");
+    if (!f) return false;
+    std::fseek(f, 0, SEEK_END);
+    const long size = std::ftell(f);
+    const long tail = size < 65557 ? size : 65557;
+    std::vector<unsigned char> end(static_cast<size_t>(tail));
+    std::fseek(f, size - tail, SEEK_SET);
+    if (std::fread(end.data(), 1, end.size(), f) != end.size()) { std::fclose(f); return false; }
+    long eocd = -1;
+    for (long i = tail - 22; i >= 0; --i)
+        if (le32(&end[size_t(i)]) == 0x06054b50) { eocd = i; break; }
+    if (eocd < 0) { std::fclose(f); return false; }
+    const uint16_t count = le16(&end[size_t(eocd) + 10]);
+    long cd = long(le32(&end[size_t(eocd) + 16]));
+    std::vector<unsigned char> in(1 << 16), out(1 << 16);
+    unsigned done = 0;
+    for (uint16_t n = 0; n < count; ++n) {
+        unsigned char h[46];
+        std::fseek(f, cd, SEEK_SET);
+        if (std::fread(h, 1, 46, f) != 46 || le32(h) != 0x02014b50) break;
+        const uint16_t method = le16(h + 10), name_len = le16(h + 28), extra = le16(h + 30), comment = le16(h + 32);
+        const uint32_t csize = le32(h + 20), local = le32(h + 42);
+        std::string name(name_len, '\0');
+        if (std::fread(name.data(), 1, name_len, f) != name_len) break;
+        cd += 46 + name_len + extra + comment;
+        if (name.empty() || name[0] == '/' || name.find("..") != std::string::npos || name.rfind("__MACOSX", 0) == 0)
+            continue;
+        const std::string target = dest + "/" + name;
+        if (name.back() == '/') { make_dirs(target); continue; }
+        make_dirs(target.substr(0, target.rfind('/')));
+        unsigned char lh[30];
+        std::fseek(f, long(local), SEEK_SET);
+        if (std::fread(lh, 1, 30, f) != 30 || le32(lh) != 0x04034b50) break;
+        std::fseek(f, long(local) + 30 + le16(lh + 26) + le16(lh + 28), SEEK_SET);
+        FILE* o = std::fopen(target.c_str(), "wb");
+        if (!o) break;
+        bool ok = true;
+        if (method == 0) {
+            for (uint32_t left = csize; left && ok;) {
+                const size_t take = left < in.size() ? left : in.size();
+                ok = std::fread(in.data(), 1, take, f) == take && std::fwrite(in.data(), 1, take, o) == take;
+                left -= uint32_t(take);
+            }
+        } else if (method == 8) {
+            z_stream z{};
+            ok = inflateInit2(&z, -MAX_WBITS) == Z_OK;
+            int rc = Z_OK;
+            for (uint32_t left = csize; ok && rc != Z_STREAM_END;) {
+                if (z.avail_in == 0 && left) {
+                    const size_t take = left < in.size() ? left : in.size();
+                    if (std::fread(in.data(), 1, take, f) != take) { ok = false; break; }
+                    z.next_in = in.data(); z.avail_in = unsigned(take); left -= uint32_t(take);
+                }
+                z.next_out = out.data(); z.avail_out = unsigned(out.size());
+                rc = inflate(&z, Z_NO_FLUSH);
+                if (rc != Z_OK && rc != Z_STREAM_END) ok = false;
+                const size_t have = out.size() - z.avail_out;
+                if (have && std::fwrite(out.data(), 1, have, o) != have) ok = false;
+                if (!left && z.avail_in == 0 && rc == Z_OK && have == 0) ok = false;
+            }
+            inflateEnd(&z);
+        } else {
+            ok = false;
+        }
+        std::fclose(o);
+        if (!ok) { std::fclose(f); return false; }
+        ++done;
+    }
+    std::fclose(f);
+    std::fprintf(stderr, "[ios] unpacked %u files from %s\n", done, zip.c_str());
+    return done > 0;
+}
+
+// Unpack the first .zip in Documents or Documents/Inbox (where "Open in" puts files) when the game is missing.
+void import_zip(const std::string& docs) {
+    if (exists(docs + "/elf/retail-game-verified.elf")) return;
+    for (const std::string& dir : {docs, docs + "/Inbox"}) {
+        DIR* d = opendir(dir.c_str());
+        if (!d) continue;
+        std::string found;
+        while (dirent* e = readdir(d)) {
+            const std::string n = e->d_name;
+            if (n.size() > 4 && strcasecmp(n.c_str() + n.size() - 4, ".zip") == 0) { found = dir + "/" + n; break; }
+        }
+        closedir(d);
+        if (found.empty()) continue;
+        std::fprintf(stderr, "[ios] importing %s\n", found.c_str());
+        if (unzip(found, docs)) std::remove(found.c_str());
+        else std::fprintf(stderr, "[ios] could not unpack %s\n", found.c_str());
+        return;
+    }
+}
+}
 
 extern "C" void fp_ios_prepare(int* argc, char*** argv) {
     const char* home = std::getenv("HOME");
@@ -17,6 +131,17 @@ extern "C" void fp_ios_prepare(int* argc, char*** argv) {
     std::freopen((docs + "/play.log").c_str(), "a", stdout);
     setvbuf(stderr, nullptr, _IONBF, 0);
     setvbuf(stdout, nullptr, _IONBF, 0);
+    std::fprintf(stderr, "[ios] documents %s\n", docs.c_str());
+    import_zip(docs);
+    if (!exists(docs + "/elf/retail-game-verified.elf"))
+        std::fprintf(stderr, "[ios] no game files: copy game/ and elf/ (or a zip of them) into this folder\n");
+    // The same layout run.sh prepares on the desktop.
+    make_dirs(docs + "/data/dev_hdd0/game");
+    make_dirs(docs + "/firmware");
+    make_dirs(docs + "/shader-cache");
+    if (!exists(docs + "/data/PS3_GAME")) symlink("../game", (docs + "/data/PS3_GAME").c_str());
+    if (!exists(docs + "/data/dev_hdd0/game/NPUA80139"))
+        symlink("../../../game", (docs + "/data/dev_hdd0/game/NPUA80139").c_str());
     const std::string d = docs;
     struct { const char* key; std::string value; } env[] = {
         {"PS3_VFS_ROOT", d + "/data"}, {"PS3_HDD0_ROOT", d + "/data/dev_hdd0"}, {"PS3_NET_SOCKETS", "1"},
@@ -33,6 +158,5 @@ extern "C" void fp_ios_prepare(int* argc, char*** argv) {
         *argc = 2;
         *argv = args;
     }
-    std::fprintf(stderr, "[ios] documents %s\n", docs.c_str());
 }
 #endif
