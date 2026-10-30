@@ -37,4 +37,7 @@ jobs:
           ls build/mac/game/MyGameRecomp build/mac/MyGameRecomp 2>/dev/null | grep -q .
       - name: Error summary
         if: failure()
-        run: grep -hE "error:" build.log | sed -E 's#^.*/(third_party|src|private)/#\1/#' | sort | uniq -c | sort -rn | head -80 || true
+        run: |
+          grep -hE "error:" build.log | sed -E 's#^.*/(third_party|src|private)/#\1/#' | sort | uniq -c | sort -rn | head -80 || true
+          echo "--- linker ---"
+          grep -E "Undefined symbols|referenced from|undefined reference|ld: |duplicate symbol|  \"_" build.log | sort -u | head -150 || true
