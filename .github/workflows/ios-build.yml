@@ -67,6 +67,7 @@ jobs:
             -DPS3RECOMP_VULKAN_INCLUDE_DIR="$(brew --prefix vulkan-headers)/include" \
             -DSPU_DIR="$PWD/private/lift/spu" -DFP_OVERLAY_DIR="$PWD/private/lift/overlays"
           grep -c fp_ios_prepare build/ios/fp_boot_main.cpp
+          grep -c fp_ios_entry build/ios/fp_boot_main.cpp
       - name: Build
         run: |
           set -o pipefail
