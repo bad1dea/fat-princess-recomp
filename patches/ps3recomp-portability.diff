@@ -32,7 +32,7 @@ index 328da532..137caad2 100644
          "-framework Metal"
          "-framework QuartzCore"
 diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
-index 7da54660..2688f25d 100644
+index 7da54660..50621957 100644
 --- a/libs/audio/cellAudio.c
 +++ b/libs/audio/cellAudio.c
 @@ -240,7 +240,7 @@ static int audio_backend_init(void)
@@ -44,7 +44,24 @@ index 7da54660..2688f25d 100644
      want.samples  = CELL_AUDIO_BLOCK_SAMPLES * buf_blocks;
      want.callback = NULL; /* push mode: SDL_QueueAudio */
  #ifndef _WIN32
-@@ -1154,7 +1154,12 @@ static void* audio_mix_thread_func(void* arg)
+@@ -907,6 +907,8 @@ static void* audio_adapt_thread(void* arg)
+     }
+ }
+ 
++void cellVoice_mix_output(float* out, int frames);
++
+ static void SDLCALL audio_sdl_pull(void* userdata, Uint8* stream, int len)
+ {
+     (void)userdata;
+@@ -981,6 +983,7 @@ static void SDLCALL audio_sdl_pull(void* userdata, Uint8* stream, int len)
+             memset(dst, 0, (size_t)block_bytes);
+             underruns++;
+         }
++        cellVoice_mix_output(dst, CELL_AUDIO_BLOCK_SAMPLES);
+         if (wf) fwrite(dst, sizeof(float), CELL_AUDIO_BLOCK_SAMPLES * 2, wf);
+     }
+     if (len > n * block_bytes) memset(stream + n * block_bytes, 0, (size_t)(len - n * block_bytes));
+@@ -1154,7 +1157,12 @@ static void* audio_mix_thread_func(void* arg)
          if (due < last_mix + 3000000ll) due = last_mix + 3000000ll;   /* never two blocks within 3 ms */
          if (now < due) {
              struct timespec w; w.tv_sec = due / 1000000000ll; w.tv_nsec = due % 1000000000ll;
@@ -57,6 +74,53 @@ index 7da54660..2688f25d 100644
              continue;
          }
          last_mix = now;
+diff --git a/libs/audio/cellVoice.c b/libs/audio/cellVoice.c
+index 37c5ddb8..8877b431 100644
+--- a/libs/audio/cellVoice.c
++++ b/libs/audio/cellVoice.c
+@@ -311,6 +311,26 @@ static void play_callback(void* user, Uint8* stream, int len)
+     free(acc);
+ }
+ 
++/* Some hosts (iOS) offer one output device, already held by cellAudio. Voice then rides in the game mix:
++ * cellAudio calls this per output block and it adds 16 kHz voice upsampled to 48 kHz stereo. */
++static volatile int s_play_mixed;
++void cellVoice_mix_output(float* out, int frames)
++{
++    if (!s_play_mixed) return;
++    static int16_t buf[BLOCK_SAMPLES];
++    static int have, pos, phase;
++    static float prev, cur;
++    for (int i = 0; i < frames; i++) {
++        if (phase == 0) {
++            if (pos >= have) { play_callback(NULL, (Uint8*)buf, (int)sizeof buf); have = BLOCK_SAMPLES; pos = 0; }
++            prev = cur; cur = buf[pos++] / 32768.0f;
++        }
++        const float v = prev + (cur - prev) * (float)phase / 3.0f;
++        out[2 * i] += v; out[2 * i + 1] += v;
++        phase = (phase + 1) % 3;
++    }
++}
++
+ static void open_devices(void)
+ {
+     if (!SDL_WasInit(SDL_INIT_AUDIO)) SDL_InitSubSystem(SDL_INIT_AUDIO);
+@@ -323,6 +343,7 @@ static void open_devices(void)
+         s_play_dev = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
+         printf("[cellVoice] playback device %s\n", s_play_dev ? "open" : SDL_GetError());
+         if (s_play_dev) SDL_PauseAudioDevice(s_play_dev, 0);
++        s_play_mixed = !s_play_dev;
+     }
+     if (s_tone_hz > 0) {
+         if (!s_tone_thread) { s_tone_run = 1; s_tone_thread = SDL_CreateThread(tone_thread, "voice-tone", NULL); }
+@@ -341,6 +362,7 @@ static void close_devices(void)
+     if (s_cap_dev) { SDL_CloseAudioDevice(s_cap_dev); s_cap_dev = 0; }
+     if (s_tone_thread) { s_tone_run = 0; SDL_WaitThread(s_tone_thread, NULL); s_tone_thread = NULL; }
+     if (s_play_dev) { SDL_CloseAudioDevice(s_play_dev); s_play_dev = 0; }
++    s_play_mixed = 0;
+ }
+ 
+ /* ---- API ------------------------------------------------------------------------------------------------- */
 diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
 index f78742c2..4cb04d86 100644
 --- a/libs/video/rsx_vulkan_backend.c

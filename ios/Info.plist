@@ -23,6 +23,7 @@
 	<key>UISupportedInterfaceOrientations</key><array><string>UIInterfaceOrientationLandscapeLeft</string><string>UIInterfaceOrientationLandscapeRight</string></array>
 	<key>UISupportedInterfaceOrientations~ipad</key><array><string>UIInterfaceOrientationLandscapeLeft</string><string>UIInterfaceOrientationLandscapeRight</string></array>
 	<key>UIApplicationSupportsIndirectInputEvents</key><true/>
+	<key>NSMicrophoneUsageDescription</key><string>Voice chat with other players in online games.</string>
 	<key>UIFileSharingEnabled</key><true/>
 	<key>LSSupportsOpeningDocumentsInPlace</key><true/>
 	<key>GCSupportsControllerUserInteraction</key><true/>
