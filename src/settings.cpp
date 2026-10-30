@@ -173,7 +173,10 @@ void init_items() {
     add("AUDIO", "voice_volume", "VOICE CHAT VOLUME %", Kind::Choice, "100", {"0", "25", "50", "75", "100", "125", "150", "200", "300"});
     add("AUDIO", "mic_gain", "MICROPHONE GAIN %", Kind::Choice, "100", {"25", "50", "75", "100", "150", "200", "300", "400"});
     add("NETWORK", "online", "ONLINE (PSNR)", Kind::Toggle, "ON");
-    add("NETWORK", "server", "SERVER HOST:PORT", Kind::Text, "127.0.0.1:36100");
+#ifndef FP_DEFAULT_SERVER
+#define FP_DEFAULT_SERVER "127.0.0.1:36100"   // builds may set their own (-DFP_DEFAULT_SERVER=...)
+#endif
+    add("NETWORK", "server", "SERVER HOST:PORT", Kind::Text, FP_DEFAULT_SERVER);
     add("NETWORK", "name", "ONLINE NAME", Kind::Text, default_player_name(), {}, true);
     add("NETWORK", "p2p_port", "P2P PORT", Kind::Text, "3658");
     // The signed in account. Not on any tab: the menu shows its state on ACCOUNT, the ini keeps it.
@@ -340,6 +343,7 @@ void load() {
             if (i->kind != Kind::Submenu && i->kind != Kind::Runtime) i->value = line.substr(eq + 1);
     }
     if (find("stats")->value=="ON") find("stats")->value="DETAILED";
+    if (find("server")->value=="127.0.0.1:36100") find("server")->value=FP_DEFAULT_SERVER;   // the old loopback default
     if (Item* a = find("account_user")) if (!a->value.empty()) find("tmp_name")->value = a->value;
 }
 

@@ -52,6 +52,7 @@ if(FP_BUILD_GAME)
   # AVX2/FMA3 selects the vector SPU float helpers and SSE4.1 shufb. -ffp-contract=off keeps
   # separate multiplies and adds exactly as before FMA was available to the compiler.
   option(FP_X86_V3 "Compile the game for x86-64-v3 (AVX2, FMA3, BMI2)" ON)
+  set(FP_DEFAULT_SERVER "" CACHE STRING "Default online server (host:port) baked into the settings")
   if(FP_X86_V3 AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
     target_compile_options(MyGameRecomp PRIVATE -mavx2 -mfma -mbmi2 -mmovbe -msse4.1 -ffp-contract=off)
   endif()
@@ -129,6 +130,10 @@ if(FP_BUILD_GAME)
       option(FP_DEBUG_MENU "Settings menu DEBUG tab" ON)
       if(FP_DEBUG_MENU)
         set_property(SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/settings.cpp" TARGET_DIRECTORY MyGameRecomp APPEND PROPERTY COMPILE_DEFINITIONS FP_DEBUG_MENU=1)
+      endif()
+      if(FP_DEFAULT_SERVER)
+        set_property(SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/settings.cpp" TARGET_DIRECTORY MyGameRecomp APPEND PROPERTY
+          COMPILE_DEFINITIONS "FP_DEFAULT_SERVER=\"${FP_DEFAULT_SERVER}\"")
       endif()
       target_link_libraries(MyGameRecomp PRIVATE ZLIB::ZLIB SDL2::SDL2)
       string(REPLACE "rsx_null_backend_" "rsx_vulkan_backend_" FP_BOOT_MAIN "${FP_BOOT_MAIN}")
