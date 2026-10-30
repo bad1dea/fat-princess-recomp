@@ -152,7 +152,6 @@ extern "C" void fp_ios_prepare(int* argc, char*** argv) {
         {"PS3_BOOT_PATH", "/dev_hdd0/game/NPUA80139/USRDIR/GAME.self"}, {"PS3_TITLE", "Fat Princess"},
         {"PS3RECOMP_VK_WINDOW", "1"}, {"PS3RECOMP_VK_GUEST_PROGRAMS", "1"}, {"AUDIO_RATE", "1"},
         {"FP_PRESENT_TIMING", "1"}, {"FP_GAME_DIR", d + "/game/USRDIR"}, {"FP_CONFIG", d + "/settings.ini"},
-        {"FP_AUDIO_BUF_BLOCKS", "4"},   // iOS delivers audio callbacks in ~20 ms bursts; a 5 ms buffer runs dry
     };
     for (const auto& e : env) setenv(e.key, e.value.c_str(), 0);
     // SDL's window only finds MoltenVK through an explicit path; it ships inside the app bundle.
