@@ -435,6 +435,109 @@ index 11a74804..aa296266 100644
      if (name != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), name);
      if (kr != KERN_SUCCESS) return 0;             /* nothing at or above it */
      if ((uintptr_t)a > addr) { *next = (uintptr_t)a; return 0; }
+diff --git a/runtime/spu/spu_channels.c b/runtime/spu/spu_channels.c
+index 17c2a67d..28a8c273 100644
+--- a/runtime/spu/spu_channels.c
++++ b/runtime/spu/spu_channels.c
+@@ -252,6 +252,18 @@ int spu_run_with_halt(void (*entry)(spu_context*), spu_context* ctx)
+     const int outer_rz = g_spu_rz;
+     _mm_setcsr(outer_csr | 0xE040u);
+     g_spu_rz = 1;
++#elif defined(__aarch64__) && defined(__ARM_NEON) && !defined(SPU_SCALAR_HELPERS)
++    /* The same mode on ARM: FPCR RMode = round toward zero (bits 23:22 = 3), FZ (bit 24). FP_SPU_NATIVE_FLOAT=0
++     * keeps the exact double-precision path instead. */
++    static int native = -1;
++    if (native < 0) { const char* e = getenv("FP_SPU_NATIVE_FLOAT"); native = !(e && e[0] == '0'); }
++    uint64_t outer_fpcr;
++    __asm__ volatile("mrs %0, fpcr" : "=r"(outer_fpcr));
++    const int outer_rz = g_spu_rz;
++    if (native) {
++        __asm__ volatile("msr fpcr, %0" :: "r"(outer_fpcr | (3ull << 22) | (1ull << 24)));
++        g_spu_rz = 1;
++    }
+ #endif
+     switch (setjmp(s_spu_halt_env)) {
+     case 1:
+@@ -285,6 +297,9 @@ int spu_run_with_halt(void (*entry)(spu_context*), spu_context* ctx)
+ #if defined(__SSE__) || defined(_M_X64)
+     _mm_setcsr(outer_csr);
+     g_spu_rz = outer_rz;
++#elif defined(__aarch64__) && defined(__ARM_NEON) && !defined(SPU_SCALAR_HELPERS)
++    __asm__ volatile("msr fpcr, %0" :: "r"(outer_fpcr));
++    g_spu_rz = outer_rz;
+ #endif
+     yz_lockstep_unregister(ctx);   /* leave the ring; hand the token onward */
+     s_spu_halt_armed = outer_armed;
+diff --git a/runtime/spu/spu_helpers.h b/runtime/spu/spu_helpers.h
+index 5be8022e..71f25911 100644
+--- a/runtime/spu/spu_helpers.h
++++ b/runtime/spu/spu_helpers.h
+@@ -809,9 +809,7 @@ SPU__NV_INLINE u128 spu__nv_fa(u128 a, u128 b, uint32_t negb) {
+     if (!spu__nv_all4(ok)) r = spu__fa_fix(r, ok, xa, yb, negb);
+     return spu__nv_u128(r);
+ }
+-SPU__NV_INLINE u128 spu_fa(u128 a, u128 b) { return spu__nv_fa(a, b, 0); }
+-SPU__NV_INLINE u128 spu_fs(u128 a, u128 b) { return spu__nv_fa(a, b, 0x80000000u); }
+-SPU__NV_INLINE u128 spu_fm(u128 a, u128 b) {
++SPU__NV_INLINE u128 spu__nv_fm(u128 a, u128 b) {
+     const uint32x4_t x = vld1q_u32(a._u32), y = vld1q_u32(b._u32);
+     uint32x2_t oklo, okhi, zlo, zhi;
+     const float32x2_t lo = spu__nv_trunc0(vmulq_f64(spu__nv_lo(x), spu__nv_lo(y)), &oklo, &zlo, NULL);
+@@ -846,9 +844,51 @@ SPU__NV_INLINE u128 spu__nv_fma(u128 a, u128 b, u128 c, uint32_t negp, uint32_t
+     if (!spu__nv_all4(ok)) r = spu__fma_fix(r, ok, xa, y, zc, negp, negc);
+     return spu__nv_u128(r);
+ }
+-SPU__NV_INLINE u128 spu_fma(u128 a, u128 b, u128 c)  { return spu__nv_fma(a, b, c, 0, 0); }            /* a*b + c */
+-SPU__NV_INLINE u128 spu_fms(u128 a, u128 b, u128 c)  { return spu__nv_fma(a, b, c, 0, 0x80000000u); }  /* a*b - c */
+-SPU__NV_INLINE u128 spu_fnms(u128 a, u128 b, u128 c) { return spu__nv_fma(a, b, c, 0x80000000u, 0); }  /* c - a*b */
++/* Native single precision, as on x86: lifted code runs with FPCR set to round toward zero (RMode = 3) and
++ * flush-to-zero (FZ), which is SPU single precision except for its extended range and its +0. One native op
++ * then gives the exact SPU result unless an operand has biased exponent 255 (Inf/NaN to the host) or the result
++ * reaches 2^127 (round toward zero saturates at FLT_MAX): one test of the result exponent (>= 254) catches every
++ * such lane. A flushed or exact-zero result is returned as +0. Under that mode the TwoSum test of spu__nv_fma no
++ * longer holds, so a failed lane goes to the scalar helpers, whose double paths only need a correct truncation. */
++#if defined(_MSC_VER) && !defined(__clang__)
++extern __declspec(thread) int g_spu_rz;
++#else
++extern __thread int g_spu_rz __attribute__((tls_model("initial-exec")));
++#endif
++SPU__NV_INLINE int spu__nv_native(uint32x4_t* r) {
++    const uint32x4_t e = spu__nv_bexp(*r);
++    *r = vbicq_u32(*r, vceqzq_u32(e));
++    return vmaxvq_u32(vcgtq_u32(e, vdupq_n_u32(253))) == 0;
++}
++SPU__NV_INLINE u128 spu__nv_rz_fa(u128 a, u128 b, uint32_t negb) {
++    const uint32x4_t x = vld1q_u32(a._u32), yb = vld1q_u32(b._u32), y = veorq_u32(yb, vdupq_n_u32(negb));
++    uint32x4_t r = vreinterpretq_u32_f32(vaddq_f32(vreinterpretq_f32_u32(x), vreinterpretq_f32_u32(y)));
++    if (__builtin_expect(!spu__nv_native(&r), 0)) r = spu__fa_fix(r, vdupq_n_u32(0), x, yb, negb);
++    return spu__nv_u128(r);
++}
++SPU__NV_INLINE u128 spu__nv_rz_fm(u128 a, u128 b) {
++    const uint32x4_t x = vld1q_u32(a._u32), y = vld1q_u32(b._u32);
++    uint32x4_t r = vreinterpretq_u32_f32(vmulq_f32(vreinterpretq_f32_u32(x), vreinterpretq_f32_u32(y)));
++    if (__builtin_expect(!spu__nv_native(&r), 0)) r = spu__fm_fix(r, vdupq_n_u32(0), x, y);
++    return spu__nv_u128(r);
++}
++SPU__NV_INLINE u128 spu__nv_rz_fma(u128 a, u128 b, u128 c, uint32_t negp, uint32_t negc) {
++    const uint32x4_t xa = vld1q_u32(a._u32), y = vld1q_u32(b._u32), zc = vld1q_u32(c._u32);
++    const float32x4_t x = vreinterpretq_f32_u32(veorq_u32(xa, vdupq_n_u32(negp)));
++    const float32x4_t z = vreinterpretq_f32_u32(veorq_u32(zc, vdupq_n_u32(negc)));
++    uint32x4_t r = vreinterpretq_u32_f32(vfmaq_f32(z, x, vreinterpretq_f32_u32(y)));
++    if (__builtin_expect(!spu__nv_native(&r), 0)) r = spu__fma_fix(r, vdupq_n_u32(0), xa, y, zc, negp, negc);
++    return spu__nv_u128(r);
++}
++SPU__NV_INLINE u128 spu_fa(u128 a, u128 b) { return g_spu_rz ? spu__nv_rz_fa(a, b, 0) : spu__nv_fa(a, b, 0); }
++SPU__NV_INLINE u128 spu_fs(u128 a, u128 b) { return g_spu_rz ? spu__nv_rz_fa(a, b, 0x80000000u) : spu__nv_fa(a, b, 0x80000000u); }
++SPU__NV_INLINE u128 spu_fm(u128 a, u128 b) { return g_spu_rz ? spu__nv_rz_fm(a, b) : spu__nv_fm(a, b); }
++SPU__NV_INLINE u128 spu_fma(u128 a, u128 b, u128 c)  {                                                  /* a*b + c */
++    return g_spu_rz ? spu__nv_rz_fma(a, b, c, 0, 0) : spu__nv_fma(a, b, c, 0, 0); }
++SPU__NV_INLINE u128 spu_fms(u128 a, u128 b, u128 c)  {                                                  /* a*b - c */
++    return g_spu_rz ? spu__nv_rz_fma(a, b, c, 0, 0x80000000u) : spu__nv_fma(a, b, c, 0, 0x80000000u); }
++SPU__NV_INLINE u128 spu_fnms(u128 a, u128 b, u128 c) {                                                  /* c - a*b */
++    return g_spu_rz ? spu__nv_rz_fma(a, b, c, 0x80000000u, 0) : spu__nv_fma(a, b, c, 0x80000000u, 0); }
+ #elif defined(__AVX2__) && defined(__FMA__) && !defined(SPU_SCALAR_HELPERS)
+ /* x86 form of the NEON fast path above: four lanes widened to f64x4 (exact), operated on, the 29
+  * low significand bits cleared (truncation toward zero) and narrowed back (exact). A lane that is
 diff --git a/runtime/spu/spu_workload.c b/runtime/spu/spu_workload.c
 index 814bea01..bd2ee7ab 100644
 --- a/runtime/spu/spu_workload.c
@@ -450,6 +553,96 @@ index 814bea01..bd2ee7ab 100644
      int prc = EINVAL;
      if (pthread_attr_setstacksize(&attr, 256u << 20) == 0)
          prc = pthread_create(&th, &attr, spu_async_thread, j);
+diff --git a/runtime/spu/tests/test_spu_float_neon.c b/runtime/spu/tests/test_spu_float_neon.c
+index 3a717d21..cb41a65c 100644
+--- a/runtime/spu/tests/test_spu_float_neon.c
++++ b/runtime/spu/tests/test_spu_float_neon.c
+@@ -1,6 +1,8 @@
+ /* The NEON spu_fa/fs/fm/fma/fms/fnms must be bit-identical to the scalar
+  * references (spu_*_ref) for every input: random words, ordinary floats, the
+  * normal/extended-range boundaries, zeros and denormals, mixed per lane.
++ * Runs twice: with the host's default FPCR, and in the mode lifted code runs in (round toward zero +
++ * flush-to-zero, g_spu_rz = 1), where the helpers use native single precision.
+  * Prints a rough speed comparison too. Build on arm64:
+  *   cc -O2 -I.. -I../.. -I../../.. test_spu_float_neon.c -o t && ./t */
+ #include "../spu_helpers.h"
+@@ -8,6 +10,9 @@
+ #include <stdlib.h>
+ #include <time.h>
+ 
++__thread int g_spu_rz;
++static int s_native;
++
+ static uint64_t s_rng = 0x9E3779B97F4A7C15ull;
+ static uint32_t rnd32(void)
+ {
+@@ -29,12 +34,8 @@ static uint32_t rnd_float(void)
+     return sign | (e << 23) | man;
+ }
+ 
+-int main(void)
++static int suite(void)
+ {
+-#if !defined(__ARM_NEON)
+-    puts("test_spu_float_neon: no NEON, nothing to compare");
+-    return 0;
+-#else
+     long bad = 0;
+     const long N = 4000000;
+     for (long it = 0; it < N; it++) {
+@@ -107,7 +108,7 @@ int main(void)
+         one._u32[0] = 0x3F800000u; tiny._u32[0] = 0x80000000u | ((127u - 60u) << 23);   /* -2^-60 */
+         const u128 r = spu_fma(one, one, tiny);
+         if (r._u32[0] != 0x3F7FFFFFu) { printf("fma(1, 1, -2^-60) = %08X, want 3F7FFFFF\n", r._u32[0]); bad++; }
+-        if (bad || !hits || !exact_sums) {
++        if (bad || (!s_native && (!hits || !exact_sums))) {
+             printf("test_spu_float_neon: boundary pass: %ld mismatches, %ld rounded-onto-boundary lanes, "
+                    "%ld exact sums\n", bad, hits, exact_sums);
+             return 1;
+@@ -160,8 +161,9 @@ int main(void)
+     }
+ 
+     /* The NEON paths leave the thread in round-toward-zero; double precision
+-     * must still round to nearest: 1 + (2^-53 + 2^-60) -> 1 + 2^-52. */
+-    {
++     * must still round to nearest: 1 + (2^-53 + 2^-60) -> 1 + 2^-52. (Not in the native mode, where the
++     * whole thread rounds toward zero, as on x86.) */
++    if (!s_native) {
+         u128 x, y; memset(&x, 0, 16); memset(&y, 0, 16);
+         x._u32[0] = 0x3FF00000u; y._u32[0] = 0x3CA02000u;          /* 1.0, 2^-53 + 2^-60 */
+         (void)spu_fa(x, y);                                          /* sets RZ */
+@@ -189,8 +191,30 @@ int main(void)
+     for (int i = 0; i < R; i++) { const u128* q = in[i & 255];
+         u128 r1 = spu_fma_ref(q[0], q[1], q[2]), r2 = spu_fm_ref(q[0], q[1]); acc += r1._u32[i & 3] ^ r2._u32[(i + 1) & 3]; }
+     clock_t t2 = clock();
+-    printf("fma+fm pair: neon %.1f ns, scalar %.1f ns (acc %u)\n",
++    printf("fma+fm pair: %s %.1f ns, scalar %.1f ns (acc %u)\n", s_native ? "native" : "neon",
+            (t1 - t0) * 1e9 / CLOCKS_PER_SEC / R, (t2 - t1) * 1e9 / CLOCKS_PER_SEC / R, acc);
+     return 0;
++}
++
++int main(void)
++{
++#if !defined(__ARM_NEON)
++    puts("test_spu_float_neon: no NEON, nothing to compare");
++    return 0;
++#else
++    puts("== default FPCR");
++    if (suite()) return 1;
++#if defined(__aarch64__)
++    puts("== round toward zero + flush to zero (lifted-code mode)");
++    uint64_t fpcr;
++    __asm__ volatile("mrs %0, fpcr" : "=r"(fpcr));
++    __asm__ volatile("msr fpcr, %0" :: "r"(fpcr | (3ull << 22) | (1ull << 24)));
++    g_spu_rz = 1; s_native = 1; s_rng = 0x2545F4914F6CDD1Dull;
++    const int rc = suite();
++    __asm__ volatile("msr fpcr, %0" :: "r"(fpcr));
++    return rc;
++#else
++    return 0;
++#endif
+ #endif
+ }
 diff --git a/runtime/syscalls/lv2_register.c b/runtime/syscalls/lv2_register.c
 index 53d452aa..1f6fa1b5 100644
 --- a/runtime/syscalls/lv2_register.c
