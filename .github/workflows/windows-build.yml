@@ -11,7 +11,7 @@ jobs:
     runs-on: windows-2025
     timeout-minutes: 300
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Host tools
         shell: bash
         run: choco install -y --no-progress zstandard
@@ -27,7 +27,7 @@ jobs:
         if: always()
         shell: bash
         run: grep -E "error|Error" build/vs-build.log | head -80 || true
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         if: success()
         with:
           name: fat-princess-windows

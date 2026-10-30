@@ -11,11 +11,11 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Host tools
         run: |
           sudo apt-get update -q
-          sudo apt-get install -yq ninja-build libsdl2-dev libvulkan-dev zlib1g-dev glslang-dev zstd clang
+          sudo apt-get install -yq ninja-build libsdl2-dev libvulkan-dev zlib1g-dev glslang-dev glslang-tools spirv-tools zstd clang
       - uses: ./.github/actions/prepare
         with:
           lift-key: ${{ secrets.FP_LIFT_KEY }}
@@ -37,7 +37,7 @@ jobs:
         run: |
           exe=$(find build/native -name MyGameRecomp -type f -perm -u+x | head -1)
           mkdir -p out && cp "$exe" out/fp_native && strip --strip-debug out/fp_native
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         if: success()
         with:
           name: fat-princess-linux

@@ -1,0 +1,26 @@
+diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
+index 7da54660..2688f25d 100644
+--- a/libs/audio/cellAudio.c
++++ b/libs/audio/cellAudio.c
+@@ -240,7 +240,7 @@ static int audio_backend_init(void)
+     setenv("PULSE_LATENCY_MSEC", "6", 0);
+ #endif
+     int buf_pinned = 0;
+-    if (const char* e = getenv("FP_AUDIO_BUF_BLOCKS")) { int v = atoi(e); if (v >= 1 && v <= 16) { buf_blocks = v; buf_pinned = 1; } }
++    { const char* e = getenv("FP_AUDIO_BUF_BLOCKS"); if (e) { int v = atoi(e); if (v >= 1 && v <= 16) { buf_blocks = v; buf_pinned = 1; } } }
+     want.samples  = CELL_AUDIO_BLOCK_SAMPLES * buf_blocks;
+     want.callback = NULL; /* push mode: SDL_QueueAudio */
+ #ifndef _WIN32
+@@ -1154,7 +1154,12 @@ static void* audio_mix_thread_func(void* arg)
+         if (due < last_mix + 3000000ll) due = last_mix + 3000000ll;   /* never two blocks within 3 ms */
+         if (now < due) {
+             struct timespec w; w.tv_sec = due / 1000000000ll; w.tv_nsec = due % 1000000000ll;
++#ifdef __APPLE__
++            /* No clock_nanosleep on Apple: sleep the remaining time to the same deadline. */
++            (void)w; { long long r = due - now; struct timespec rel = { (time_t)(r / 1000000000ll), (long)(r % 1000000000ll) }; nanosleep(&rel, NULL); }
++#else
+             clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &w, NULL);
++#endif
+             continue;
+         }
+         last_mix = now;
