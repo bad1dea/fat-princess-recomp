@@ -58,7 +58,7 @@ index 7da54660..2688f25d 100644
          }
          last_mix = now;
 diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
-index f78742c2..fa913c88 100644
+index f78742c2..5ad7da4f 100644
 --- a/libs/video/rsx_vulkan_backend.c
 +++ b/libs/video/rsx_vulkan_backend.c
 @@ -258,6 +258,12 @@ static int vk_load_library(void)
@@ -74,14 +74,25 @@ index f78742c2..fa913c88 100644
  #else
      static const char* names[] = { "libvulkan.so.1", "libvulkan.so" };
  #endif
-@@ -4342,6 +4348,17 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+@@ -4342,6 +4348,28 @@ static int vk_init_all(u32 width, u32 height, const char* title)
          ci.enabledExtensionCount   = s_vk.inst_ext_count;
          ci.ppEnabledExtensionNames = s_vk.inst_exts;
      }
 +#ifdef __APPLE__
-+    /* MoltenVK is a portability implementation: the loader only lists it when asked. */
++    /* Through the Vulkan loader MoltenVK is only listed when portability enumeration is
++     * asked for; MoltenVK used directly (iOS) does not offer that extension. */
 +    static const char* apple_exts[18];
-+    if (s_vk.windowed) {
++    PFN_vkEnumerateInstanceExtensionProperties enum_exts =
++        (PFN_vkEnumerateInstanceExtensionProperties)pvkGetInstanceProcAddr(VK_NULL_HANDLE, "vkEnumerateInstanceExtensionProperties");
++    int portability = 0;
++    if (enum_exts) {
++        VkExtensionProperties props[256];
++        uint32_t count = 256;
++        if (enum_exts(NULL, &count, props) >= 0)
++            for (uint32_t i = 0; i < count; i++)
++                if (!strcmp(props[i].extensionName, "VK_KHR_portability_enumeration")) portability = 1;
++    }
++    if (s_vk.windowed && portability) {
 +        u32 n = 0;
 +        for (; n < s_vk.inst_ext_count && n < 16; n++) apple_exts[n] = s_vk.inst_exts[n];
 +        apple_exts[n++] = "VK_KHR_portability_enumeration";
@@ -92,7 +103,7 @@ index f78742c2..fa913c88 100644
      static const char* const validation_layer[] = { "VK_LAYER_KHRONOS_validation" };
      const char* ext_all[18];
      int validation = 0;
-@@ -4405,7 +4422,12 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+@@ -4405,7 +4433,12 @@ static int vk_init_all(u32 width, u32 height, const char* title)
      VkDeviceQueueCreateInfo qci = { .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
                                      .queueFamilyIndex = s_vk.queue_family,
                                      .queueCount = 1, .pQueuePriorities = &prio };
@@ -105,7 +116,7 @@ index f78742c2..fa913c88 100644
      /* DXT (BC1-3) is how PS3 titles ship most textures; Vulkan gates it
       * behind a feature, enabled only when the device reports it. */
      VkPhysicalDeviceFeatures have, want;
-@@ -4428,7 +4450,7 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+@@ -4428,7 +4461,7 @@ static int vk_init_all(u32 width, u32 height, const char* title)
      }
      VkDeviceCreateInfo dci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
                                 .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci,
