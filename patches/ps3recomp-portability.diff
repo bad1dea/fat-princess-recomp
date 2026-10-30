@@ -1,5 +1,5 @@
 diff --git a/CMakeLists.txt b/CMakeLists.txt
-index 328da532..9b0671d2 100644
+index 328da532..137caad2 100644
 --- a/CMakeLists.txt
 +++ b/CMakeLists.txt
 @@ -50,9 +50,7 @@ list(FILTER HLE_SOURCES EXCLUDE REGEX "/tests/")
@@ -13,6 +13,24 @@ index 328da532..9b0671d2 100644
      find_path(PS3RECOMP_VULKAN_INCLUDE_DIR vulkan/vulkan.h)
      if(NOT PS3RECOMP_VULKAN_INCLUDE_DIR)
          message(FATAL_ERROR "Vulkan headers not found. Debian/Ubuntu: "
+@@ -66,7 +64,7 @@ endif()
+ 
+ # The Metal backend is Objective-C and Apple-only, so it is added explicitly
+ # rather than globbed. It needs no platform #ifdef of its own as a result.
+-if(APPLE)
++if(APPLE AND NOT IOS)   # the Metal backend uses AppKit; iOS takes the Vulkan path
+     enable_language(OBJC)
+     list(APPEND HLE_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/libs/video/rsx_metal_backend.m")
+ endif()
+@@ -163,7 +161,7 @@ else()
+     target_link_libraries(ps3recomp_runtime PRIVATE Threads::Threads)
+ endif()
+ 
+-if(APPLE)
++if(APPLE AND NOT IOS)
+     target_link_libraries(ps3recomp_runtime PUBLIC
+         "-framework Metal"
+         "-framework QuartzCore"
 diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
 index 7da54660..2688f25d 100644
 --- a/libs/audio/cellAudio.c
@@ -40,22 +58,23 @@ index 7da54660..2688f25d 100644
          }
          last_mix = now;
 diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
-index f78742c2..28682de8 100644
+index f78742c2..fa913c88 100644
 --- a/libs/video/rsx_vulkan_backend.c
 +++ b/libs/video/rsx_vulkan_backend.c
-@@ -258,6 +258,11 @@ static int vk_load_library(void)
+@@ -258,6 +258,12 @@ static int vk_load_library(void)
  {
  #ifdef _WIN32
      static const char* names[] = { "vulkan-1.dll" };
 +#elif defined(__APPLE__)
 +    /* The Vulkan loader if installed, else MoltenVK directly (bundled in the app on iOS). */
 +    static const char* names[] = { "libvulkan.1.dylib", "libvulkan.dylib", "libMoltenVK.dylib",
++                                   "@executable_path/Frameworks/MoltenVK.framework/MoltenVK",
 +                                   "@executable_path/Frameworks/libMoltenVK.dylib",
 +                                   "@executable_path/../Frameworks/libMoltenVK.dylib" };
  #else
      static const char* names[] = { "libvulkan.so.1", "libvulkan.so" };
  #endif
-@@ -4342,6 +4347,17 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+@@ -4342,6 +4348,17 @@ static int vk_init_all(u32 width, u32 height, const char* title)
          ci.enabledExtensionCount   = s_vk.inst_ext_count;
          ci.ppEnabledExtensionNames = s_vk.inst_exts;
      }
@@ -73,7 +92,7 @@ index f78742c2..28682de8 100644
      static const char* const validation_layer[] = { "VK_LAYER_KHRONOS_validation" };
      const char* ext_all[18];
      int validation = 0;
-@@ -4405,7 +4421,12 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+@@ -4405,7 +4422,12 @@ static int vk_init_all(u32 width, u32 height, const char* title)
      VkDeviceQueueCreateInfo qci = { .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
                                      .queueFamilyIndex = s_vk.queue_family,
                                      .queueCount = 1, .pQueuePriorities = &prio };
@@ -86,7 +105,7 @@ index f78742c2..28682de8 100644
      /* DXT (BC1-3) is how PS3 titles ship most textures; Vulkan gates it
       * behind a feature, enabled only when the device reports it. */
      VkPhysicalDeviceFeatures have, want;
-@@ -4428,7 +4449,7 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+@@ -4428,7 +4450,7 @@ static int vk_init_all(u32 width, u32 height, const char* title)
      }
      VkDeviceCreateInfo dci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
                                 .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci,

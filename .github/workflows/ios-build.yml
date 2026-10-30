@@ -1,0 +1,100 @@
+name: iOS build
+
+# iPad/iPhone app: the game built for iOS arm64 with the Vulkan renderer on
+# MoltenVK. Produces an ad-hoc signed IPA for sideloading. Game files are not
+# included; copy game/, elf/ and data/ into the app's Documents (Files app).
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ["src/**", "CMakeLists.txt", "patches/**", "encrypted/**", "ios/**", ".github/**"]
+
+env:
+  SDL_TAG: release-2.32.10
+  GLSLANG_TAG: 16.6.0
+  MVK_TAG: v1.4.2
+  IOS_MIN: "16.0"
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v5
+      - name: Select Xcode
+        run: |
+          xc="$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)"
+          sudo xcode-select -switch "${xc:-/Applications/Xcode.app}"
+          xcodebuild -version
+      - name: Host tools
+        run: |
+          brew install ninja zstd openssl@3 vulkan-headers
+          echo "$(brew --prefix openssl@3)/bin" >> "$GITHUB_PATH"
+          echo "DEPS=$RUNNER_TEMP/deps-ios" >> "$GITHUB_ENV"
+      - name: Cache iOS dependencies
+        id: deps
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/deps-ios
+          key: ios-deps-${{ env.SDL_TAG }}-${{ env.GLSLANG_TAG }}-${{ env.MVK_TAG }}-${{ env.IOS_MIN }}
+      - name: Build SDL2, glslang and fetch MoltenVK for iOS
+        if: steps.deps.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          ios=(-G Ninja -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=$IOS_MIN -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=$DEPS)
+          git clone -q --depth 1 -b $SDL_TAG https://github.com/libsdl-org/SDL.git "$RUNNER_TEMP/sdl"
+          cmake -S "$RUNNER_TEMP/sdl" -B "$RUNNER_TEMP/sdl/b" "${ios[@]}" -DSDL_SHARED=OFF -DSDL_STATIC=ON -DSDL_TEST=OFF
+          cmake --build "$RUNNER_TEMP/sdl/b" && cmake --install "$RUNNER_TEMP/sdl/b"
+          git clone -q --depth 1 -b $GLSLANG_TAG https://github.com/KhronosGroup/glslang.git "$RUNNER_TEMP/glslang"
+          cmake -S "$RUNNER_TEMP/glslang" -B "$RUNNER_TEMP/glslang/b" "${ios[@]}" -DENABLE_OPT=OFF -DGLSLANG_TESTS=OFF \
+            -DENABLE_GLSLANG_BINARIES=OFF -DBUILD_SHARED_LIBS=OFF -DGLSLANG_ENABLE_INSTALL=ON
+          cmake --build "$RUNNER_TEMP/glslang/b" && cmake --install "$RUNNER_TEMP/glslang/b"
+          curl -sSL -o "$RUNNER_TEMP/mvk.tar" https://github.com/KhronosGroup/MoltenVK/releases/download/$MVK_TAG/MoltenVK-ios.tar
+          mkdir -p "$RUNNER_TEMP/mvk" && tar -xf "$RUNNER_TEMP/mvk.tar" -C "$RUNNER_TEMP/mvk"
+          fw=$(find "$RUNNER_TEMP/mvk" -path "*dynamic*" -path "*ios-arm64/*" -name MoltenVK.framework -type d | grep -v simulator | head -1)
+          [ -n "$fw" ] || { find "$RUNNER_TEMP/mvk" -maxdepth 6 | head -60; exit 1; }
+          mkdir -p "$DEPS/Frameworks" && cp -R "$fw" "$DEPS/Frameworks/"
+          ls "$DEPS" "$DEPS/lib" "$DEPS/Frameworks"
+      - uses: ./.github/actions/prepare
+        with:
+          lift-key: ${{ secrets.FP_LIFT_KEY }}
+      - name: Configure
+        run: |
+          cmake -S . -B build/ios -G Ninja -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=$IOS_MIN -DCMAKE_BUILD_TYPE=Release -DFP_BUILD_GAME=ON -DFP_X86_V3=OFF \
+            -DCMAKE_PREFIX_PATH="$DEPS" -DCMAKE_FIND_ROOT_PATH="$DEPS" -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=BOTH \
+            -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=BOTH -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=BOTH \
+            -DPS3RECOMP_VULKAN_INCLUDE_DIR="$(brew --prefix vulkan-headers)/include" \
+            -DSPU_DIR="$PWD/private/lift/spu" -DFP_OVERLAY_DIR="$PWD/private/lift/overlays"
+          grep -c fp_ios_prepare build/ios/fp_boot_main.cpp
+      - name: Build
+        run: |
+          set -o pipefail
+          cmake --build build/ios --target MyGameRecomp -j "$(sysctl -n hw.ncpu)" -- -k 0 2>&1 | tee build.log | grep -E "error:|FAILED|Linking" || true
+          find build/ios -name fp_native -type f | grep -q .
+      - name: Error summary
+        if: failure()
+        run: |
+          grep -hE "error:" build.log | sed -E 's#^.*/(third_party|src|private)/#\1/#' | sort | uniq -c | sort -rn | head -80 || true
+          echo "--- linker ---"
+          grep -E "Undefined symbols|referenced from|undefined reference|ld: |duplicate symbol|  \"_" build.log | sort -u | head -150 || true
+      - name: Package IPA
+        run: |
+          set -euo pipefail
+          app="Payload/Fat Princess.app"
+          mkdir -p "$app/Frameworks"
+          cp "$(find build/ios -name fp_native -type f | head -1)" "$app/fp_native"
+          strip -S "$app/fp_native"
+          cp ios/Info.plist "$app/Info.plist"
+          plutil -replace CFBundleVersion -string "${{ github.run_number }}" "$app/Info.plist"
+          cp -R "$DEPS/Frameworks/MoltenVK.framework" "$app/Frameworks/"
+          codesign --force -s - "$app/Frameworks/MoltenVK.framework"
+          codesign --force -s - --entitlements ios/entitlements.plist "$app"
+          codesign -dv --entitlements - "$app" 2>&1 | tail -6 || true
+          zip -qry FatPrincess.ipa Payload
+          ls -la FatPrincess.ipa
+      - uses: actions/upload-artifact@v5
+        with:
+          name: fat-princess-ios-ipa
+          path: FatPrincess.ipa
+          retention-days: 14
