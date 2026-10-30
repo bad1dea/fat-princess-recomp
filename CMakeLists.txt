@@ -21,6 +21,7 @@ if(MSVC)
   # The macro is SDL's own guard for that definition.
   add_compile_definitions(__PRFCHWINTRIN_H)
 endif()
+if(NOT IOS)   # desktop asset and map tools
 find_package(OpenGL REQUIRED)
 add_executable(fp_assets src/assets.cpp)
 target_include_directories(fp_assets SYSTEM PRIVATE third_party/ps3recomp/libs/codec)
@@ -32,6 +33,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   target_compile_options(fp_assets PRIVATE -Wall -Wextra -Wconversion)
+endif()
 endif()
 
 option(FP_BUILD_GAME "Build the local, statically recompiled game" OFF)
