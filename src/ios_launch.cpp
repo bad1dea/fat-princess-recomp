@@ -102,6 +102,21 @@ bool unzip(const std::string& zip, const std::string& dest) {
     return done > 0;
 }
 
+bool has_zip(const std::string& docs) {
+    for (const std::string& dir : {docs, docs + "/Inbox"}) {
+        DIR* d = opendir(dir.c_str());
+        if (!d) continue;
+        bool found = false;
+        while (dirent* e = readdir(d)) {
+            const std::string n = e->d_name;
+            if (n.size() > 4 && strcasecmp(n.c_str() + n.size() - 4, ".zip") == 0) { found = true; break; }
+        }
+        closedir(d);
+        if (found) return true;
+    }
+    return false;
+}
+
 // Unpack the first .zip in Documents or Documents/Inbox (where "Open in" puts files) when the game is missing.
 void import_zip(const std::string& docs) {
     if (exists(docs + "/elf/retail-game-verified.elf")) return;
@@ -124,6 +139,8 @@ void import_zip(const std::string& docs) {
 }
 
 extern "C" void fp_prof_start(void);
+extern "C" bool fp_ios_fetch_game(const char* docs);   // ios_setup.mm: test builds download the game with a key
+extern "C" void fp_ios_setup_close(void);
 
 extern "C" void fp_ios_prepare(int* argc, char*** argv) {
     const char* home = std::getenv("HOME");
@@ -135,7 +152,9 @@ extern "C" void fp_ios_prepare(int* argc, char*** argv) {
     setvbuf(stderr, nullptr, _IONBF, 0);
     setvbuf(stdout, nullptr, _IONBF, 0);
     std::fprintf(stderr, "[ios] documents %s\n", docs.c_str());
+    if (!exists(docs + "/elf/retail-game-verified.elf") && !has_zip(docs)) fp_ios_fetch_game(docs.c_str());
     import_zip(docs);
+    fp_ios_setup_close();
     if (!exists(docs + "/elf/retail-game-verified.elf"))
         std::fprintf(stderr, "[ios] no game files: copy game/ and elf/ (or a zip of them) into this folder\n");
     // The same layout run.sh prepares on the desktop.

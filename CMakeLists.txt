@@ -179,8 +179,16 @@ if(FP_BUILD_GAME)
         FP_BOOT_MAIN "${FP_BOOT_MAIN}")
       string(PREPEND FP_BOOT_MAIN "#include <pthread.h>\n")
       target_sources(MyGameRecomp PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/ios_launch.cpp"
-                                         "${CMAKE_CURRENT_SOURCE_DIR}/src/ios_touch.mm")
-      set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/src/ios_touch.mm" PROPERTIES LANGUAGE CXX COMPILE_OPTIONS "-xobjective-c++;-fobjc-arc")   # Objective-C++ through the C++ compiler
+                                         "${CMAKE_CURRENT_SOURCE_DIR}/src/ios_touch.mm"
+                                         "${CMAKE_CURRENT_SOURCE_DIR}/src/ios_setup.mm")
+      set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/src/ios_touch.mm" "${CMAKE_CURRENT_SOURCE_DIR}/src/ios_setup.mm"
+        PROPERTIES LANGUAGE CXX COMPILE_OPTIONS "-xobjective-c++;-fobjc-arc")   # Objective-C++ through the C++ compiler
+      # Test builds: base URL the first-run key is appended to when downloading the game files (unset: no download).
+      set(FP_FILES_URL "" CACHE STRING "Base URL for the first-run game download on iOS")
+      if(FP_FILES_URL)
+        set_property(SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/ios_setup.mm" TARGET_DIRECTORY MyGameRecomp APPEND PROPERTY
+          COMPILE_DEFINITIONS "FP_FILES_URL=\"${FP_FILES_URL}\"")
+      endif()
       target_link_libraries(MyGameRecomp PRIVATE "-framework UIKit" "-framework GameController" "-framework QuartzCore")
       if(TARGET SDL2::SDL2main)
         target_link_libraries(MyGameRecomp PRIVATE SDL2::SDL2main)
