@@ -140,6 +140,11 @@ if(FP_BUILD_GAME)
       foreach(FP_CALL init present pump_messages)
         string(REPLACE "rsx_d3d12_backend_${FP_CALL}" "fp_backend_${FP_CALL}" FP_BOOT_MAIN "${FP_BOOT_MAIN}")
       endforeach()
+      # Apple builds take the same Vulkan host (MoltenVK) instead of the framework's Metal backend.
+      foreach(FP_CALL init present pump_messages)
+        string(REPLACE "rsx_metal_backend_${FP_CALL}" "fp_backend_${FP_CALL}" FP_BOOT_MAIN "${FP_BOOT_MAIN}")
+      endforeach()
+      string(REPLACE "\"Metal\"" "\"Vulkan\"" FP_BOOT_MAIN "${FP_BOOT_MAIN}")
       string(REPLACE "\"D3D12\"" "\"Vulkan\"" FP_BOOT_MAIN "${FP_BOOT_MAIN}")
       string(REPLACE "null (headless software)" "Vulkan" FP_BOOT_MAIN "${FP_BOOT_MAIN}")
       string(REPLACE "g_ps3_guest_caller = harness_guest_caller;"
