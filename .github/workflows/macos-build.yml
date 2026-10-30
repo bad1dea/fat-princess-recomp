@@ -1,6 +1,6 @@
 name: macOS build
 
-# ARM64 compile on Apple Silicon with the framework's Metal renderer: the first
+# ARM64 compile on Apple Silicon, Vulkan renderer through MoltenVK: the first
 # step toward the iOS app. Lifted sources arrive encrypted; game data never does.
 on:
   workflow_dispatch:
@@ -21,14 +21,14 @@ jobs:
           xcodebuild -version
       - name: Host tools
         run: |
-          brew install sdl2 ninja zstd openssl@3
+          brew install sdl2 ninja zstd openssl@3 molten-vk vulkan-headers vulkan-loader glslang spirv-tools
           echo "$(brew --prefix openssl@3)/bin" >> "$GITHUB_PATH"
       - uses: ./.github/actions/prepare
         with:
           lift-key: ${{ secrets.FP_LIFT_KEY }}
       - name: Configure
         run: |
-          cmake -S . -B build/mac -G Ninja -DCMAKE_BUILD_TYPE=Release -DFP_BUILD_GAME=ON -DFP_X86_V3=OFF -DPS3RECOMP_RSX_VULKAN=OFF \
+          cmake -S . -B build/mac -G Ninja -DCMAKE_BUILD_TYPE=Release -DFP_BUILD_GAME=ON -DFP_X86_V3=OFF -DCMAKE_PREFIX_PATH="$(brew --prefix)" \
             -DSPU_DIR="$PWD/private/lift/spu" -DFP_OVERLAY_DIR="$PWD/private/lift/overlays"
       - name: Build
         run: |

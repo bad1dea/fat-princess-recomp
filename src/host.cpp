@@ -867,7 +867,7 @@ extern "C" unsigned long fp_run_frame_clock(void (*present)(void)) {
     }
 }
 
-#ifndef _WIN32   // the sampler uses SIGPROF and ucontext
+#if defined(__linux__)   // the sampler uses SIGPROF and ucontext
 // FP_PROF=path: SIGPROF sampling of the instruction pointer per host thread, written to
 // `path` every 15 s as (tid, rip) pairs. Resolve offline with tools/resolve_prof.py.
 #include <csignal>
@@ -921,7 +921,7 @@ __attribute__((constructor)) void prof_start() {
 }
 #endif
 
-#ifndef _WIN32
+#if defined(__linux__)
 // A crash goes to the log with the faulting address and the host stack, so a report does not depend on a core dump
 // (the system here stores none). Resolve the frames with `addr2line -f -C -e fp_native <offsets>`.
 #include <execinfo.h>
@@ -993,7 +993,7 @@ __attribute__((constructor)) void crash_log_init() {
 }
 #endif
 
-#ifndef _WIN32
+#if defined(__linux__)
 // FP_HUGE_TEXT=1: move the executable's code onto transparent huge pages at start-up. The lifted game is ~120 MB of
 // code and the main thread's frame runs through a large part of it, so 4 KB pages cost instruction TLB misses. The
 // code is copied into a 2 MB aligned anonymous mapping (madvise HUGEPAGE), made read+execute, and mremap'd over the

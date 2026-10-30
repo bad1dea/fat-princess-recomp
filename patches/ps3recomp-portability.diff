@@ -1,3 +1,18 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 328da532..9b0671d2 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -50,9 +50,7 @@ list(FILTER HLE_SOURCES EXCLUDE REGEX "/tests/")
+ option(PS3RECOMP_RSX_VULKAN "Build the Vulkan RSX backend (Linux)" OFF)
+ list(FILTER HLE_SOURCES EXCLUDE REGEX "rsx_vulkan_backend\\.c$")
+ if(PS3RECOMP_RSX_VULKAN)
+-    if(APPLE)
+-        message(FATAL_ERROR "PS3RECOMP_RSX_VULKAN is not available on macOS")
+-    endif()
++    # Apple: Vulkan through MoltenVK (the backend enables the portability extensions).
+     find_path(PS3RECOMP_VULKAN_INCLUDE_DIR vulkan/vulkan.h)
+     if(NOT PS3RECOMP_VULKAN_INCLUDE_DIR)
+         message(FATAL_ERROR "Vulkan headers not found. Debian/Ubuntu: "
 diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
 index 7da54660..2688f25d 100644
 --- a/libs/audio/cellAudio.c
@@ -24,3 +39,59 @@ index 7da54660..2688f25d 100644
              continue;
          }
          last_mix = now;
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index f78742c2..28682de8 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -258,6 +258,11 @@ static int vk_load_library(void)
+ {
+ #ifdef _WIN32
+     static const char* names[] = { "vulkan-1.dll" };
++#elif defined(__APPLE__)
++    /* The Vulkan loader if installed, else MoltenVK directly (bundled in the app on iOS). */
++    static const char* names[] = { "libvulkan.1.dylib", "libvulkan.dylib", "libMoltenVK.dylib",
++                                   "@executable_path/Frameworks/libMoltenVK.dylib",
++                                   "@executable_path/../Frameworks/libMoltenVK.dylib" };
+ #else
+     static const char* names[] = { "libvulkan.so.1", "libvulkan.so" };
+ #endif
+@@ -4342,6 +4347,17 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+         ci.enabledExtensionCount   = s_vk.inst_ext_count;
+         ci.ppEnabledExtensionNames = s_vk.inst_exts;
+     }
++#ifdef __APPLE__
++    /* MoltenVK is a portability implementation: the loader only lists it when asked. */
++    static const char* apple_exts[18];
++    if (s_vk.windowed) {
++        u32 n = 0;
++        for (; n < s_vk.inst_ext_count && n < 16; n++) apple_exts[n] = s_vk.inst_exts[n];
++        apple_exts[n++] = "VK_KHR_portability_enumeration";
++        ci.enabledExtensionCount = n; ci.ppEnabledExtensionNames = apple_exts;
++        ci.flags |= 0x00000001; /* VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR */
++    }
++#endif
+     static const char* const validation_layer[] = { "VK_LAYER_KHRONOS_validation" };
+     const char* ext_all[18];
+     int validation = 0;
+@@ -4405,7 +4421,12 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+     VkDeviceQueueCreateInfo qci = { .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+                                     .queueFamilyIndex = s_vk.queue_family,
+                                     .queueCount = 1, .pQueuePriorities = &prio };
++#ifdef __APPLE__
++    /* A portability device must enable VK_KHR_portability_subset. */
++    static const char* dev_exts[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME, "VK_KHR_portability_subset" };
++#else
+     static const char* dev_exts[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
++#endif
+     /* DXT (BC1-3) is how PS3 titles ship most textures; Vulkan gates it
+      * behind a feature, enabled only when the device reports it. */
+     VkPhysicalDeviceFeatures have, want;
+@@ -4428,7 +4449,7 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+     }
+     VkDeviceCreateInfo dci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+                                .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci,
+-                               .enabledExtensionCount = s_vk.windowed ? 1u : 0u,
++                               .enabledExtensionCount = s_vk.windowed ? (u32)(sizeof dev_exts / sizeof dev_exts[0]) : 0u,
+                                .ppEnabledExtensionNames = s_vk.windowed ? dev_exts : NULL,
+                                .pEnabledFeatures = &want };
+     VK_CHECK(pvkCreateDevice(s_vk.phys, &dci, NULL, &s_vk.device), "vkCreateDevice");
