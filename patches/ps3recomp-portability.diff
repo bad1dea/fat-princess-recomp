@@ -32,7 +32,7 @@ index 328da532..137caad2 100644
          "-framework Metal"
          "-framework QuartzCore"
 diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
-index 7da54660..50621957 100644
+index 7da54660..138c07ae 100644
 --- a/libs/audio/cellAudio.c
 +++ b/libs/audio/cellAudio.c
 @@ -240,7 +240,7 @@ static int audio_backend_init(void)
@@ -44,7 +44,21 @@ index 7da54660..50621957 100644
      want.samples  = CELL_AUDIO_BLOCK_SAMPLES * buf_blocks;
      want.callback = NULL; /* push mode: SDL_QueueAudio */
  #ifndef _WIN32
-@@ -907,6 +907,8 @@ static void* audio_adapt_thread(void* arg)
+@@ -818,7 +818,12 @@ void fp_audio_boost_this_thread(const char* what)
+     done = 1;
+     const char* e = getenv("FP_AUDIO_BOOST");
+     if (e && e[0] == '0') return;
+-#if AUDIO_BACKEND_SDL2
++#if defined(__APPLE__)
++    /* Darwin: a QoS class, not a scheduling priority (setting one opts the thread out of QoS and the
++     * scheduler then treats it as ordinary work). User-interactive keeps it on a performance core. */
++    const int rc = pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
++    fprintf(stderr, "[audio-boost] %s thread QoS user-interactive: %s\n", what, rc == 0 ? "yes" : "no");
++#elif AUDIO_BACKEND_SDL2
+     /* FP_AUDIO_RT=1: real-time scheduling through rtkit (SCHED_RR) instead of nice -10. Off by default: the SPU
+      * audio task also spins on SPU lock lines, and at real-time priority it kept their holder off the core; a
+      * Steam Deck hung and rtkit's RLIMIT_RTTIME then killed the game with SIGXCPU. */
+@@ -907,6 +912,8 @@ static void* audio_adapt_thread(void* arg)
      }
  }
  
@@ -53,7 +67,7 @@ index 7da54660..50621957 100644
  static void SDLCALL audio_sdl_pull(void* userdata, Uint8* stream, int len)
  {
      (void)userdata;
-@@ -981,6 +983,7 @@ static void SDLCALL audio_sdl_pull(void* userdata, Uint8* stream, int len)
+@@ -981,6 +988,7 @@ static void SDLCALL audio_sdl_pull(void* userdata, Uint8* stream, int len)
              memset(dst, 0, (size_t)block_bytes);
              underruns++;
          }
@@ -61,7 +75,7 @@ index 7da54660..50621957 100644
          if (wf) fwrite(dst, sizeof(float), CELL_AUDIO_BLOCK_SAMPLES * 2, wf);
      }
      if (len > n * block_bytes) memset(stream + n * block_bytes, 0, (size_t)(len - n * block_bytes));
-@@ -1154,7 +1157,12 @@ static void* audio_mix_thread_func(void* arg)
+@@ -1154,7 +1162,12 @@ static void* audio_mix_thread_func(void* arg)
          if (due < last_mix + 3000000ll) due = last_mix + 3000000ll;   /* never two blocks within 3 ms */
          if (now < due) {
              struct timespec w; w.tv_sec = due / 1000000000ll; w.tv_nsec = due % 1000000000ll;
@@ -421,3 +435,48 @@ index 11a74804..aa296266 100644
      if (name != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), name);
      if (kr != KERN_SUCCESS) return 0;             /* nothing at or above it */
      if ((uintptr_t)a > addr) { *next = (uintptr_t)a; return 0; }
+diff --git a/runtime/spu/spu_workload.c b/runtime/spu/spu_workload.c
+index 814bea01..bd2ee7ab 100644
+--- a/runtime/spu/spu_workload.c
++++ b/runtime/spu/spu_workload.c
+@@ -1531,6 +1531,10 @@ int spu_workload_dispatch_task_async(const uint8_t* image, uint32_t image_size,
+     pthread_t th;
+     pthread_attr_t attr;
+     pthread_attr_init(&attr);
++#if defined(__APPLE__)
++    /* iOS schedules a thread without a QoS class like background work, often on an efficiency core. */
++    pthread_attr_set_qos_class_np(&attr, QOS_CLASS_USER_INITIATED, 0);
++#endif
+     int prc = EINVAL;
+     if (pthread_attr_setstacksize(&attr, 256u << 20) == 0)
+         prc = pthread_create(&th, &attr, spu_async_thread, j);
+diff --git a/runtime/syscalls/lv2_register.c b/runtime/syscalls/lv2_register.c
+index 53d452aa..1f6fa1b5 100644
+--- a/runtime/syscalls/lv2_register.c
++++ b/runtime/syscalls/lv2_register.c
+@@ -689,6 +689,10 @@ static void spu_spawn_host_thread(spu_thread_handle_t* out,
+ {
+     pthread_attr_t attr;
+     pthread_attr_init(&attr);
++#if defined(__APPLE__)
++    /* iOS schedules a thread without a QoS class like background work, often on an efficiency core. */
++    pthread_attr_set_qos_class_np(&attr, QOS_CLASS_USER_INITIATED, 0);
++#endif
+     int rc = EINVAL;
+     if (pthread_attr_setstacksize(&attr, spu_host_stack_bytes()) == 0)
+         rc = pthread_create(out, &attr, fn, arg);
+diff --git a/runtime/syscalls/sys_ppu_thread.c b/runtime/syscalls/sys_ppu_thread.c
+index 37e9a440..a42ce08e 100644
+--- a/runtime/syscalls/sys_ppu_thread.c
++++ b/runtime/syscalls/sys_ppu_thread.c
+@@ -493,6 +493,10 @@ int64_t sys_ppu_thread_create(ppu_context* ctx)
+     {
+         pthread_attr_t attr;
+         pthread_attr_init(&attr);
++#if defined(__APPLE__)
++        /* iOS schedules a thread without a QoS class like background work, often on an efficiency core. */
++        pthread_attr_set_qos_class_np(&attr, QOS_CLASS_USER_INITIATED, 0);
++#endif
+         if (pthread_attr_setstacksize(&attr, PPU_HOST_STACK_BYTES) == 0) {
+             rc = pthread_create(&t->host_thread, &attr, ppu_host_thread_proc, t);
+         } else {
