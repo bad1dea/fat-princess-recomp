@@ -114,6 +114,41 @@ index f78742c2..fa913c88 100644
                                 .ppEnabledExtensionNames = s_vk.windowed ? dev_exts : NULL,
                                 .pEnabledFeatures = &want };
      VK_CHECK(pvkCreateDevice(s_vk.phys, &dci, NULL, &s_vk.device), "vkCreateDevice");
+diff --git a/runtime/memory/vm.h b/runtime/memory/vm.h
+index 9ea87dbd..7d96c3ab 100644
+--- a/runtime/memory/vm.h
++++ b/runtime/memory/vm.h
+@@ -21,6 +21,9 @@
+ #include <stddef.h>
+ #include <string.h>
+ #include <assert.h>
++#if defined(__APPLE__)
++#include <mach/mach.h>   /* vm_map: an aligned reservation without over-mapping */
++#endif
+ 
+ #ifdef _WIN32
+   #define WIN32_LEAN_AND_MEAN
+@@ -208,6 +211,20 @@ static inline int32_t vm_init(void)
+     /* Over-map and trim: ask for twice the space, keep the 4 GB aligned window
+      * inside it, and give the head and tail back. mmap can hand back part of a
+      * mapping, so this needs no retry and cannot race. */
++#if defined(__APPLE__)
++    /* iOS caps a process's address space well below 8 GB unless the app holds
++     * the extended-virtual-addressing entitlement, so the over-map below fails
++     * there. vm_map takes an alignment mask: ask the kernel for exactly 4 GB on
++     * a 4 GB boundary in one step, and keep the over-map as the fallback. */
++    {
++        vm_address_t addr = 0;
++        if (vm_map(mach_task_self(), &addr, (vm_size_t)VM_TOTAL_SIZE, (vm_address_t)(VM_TOTAL_SIZE - 1u),
++                   VM_FLAGS_ANYWHERE, MEMORY_OBJECT_NULL, 0, FALSE, VM_PROT_NONE, VM_PROT_ALL,
++                   VM_INHERIT_DEFAULT) == KERN_SUCCESS)
++            vm_base = (uint8_t*)addr;
++    }
++    if (!vm_base)
++#endif
+     {
+         size_t want = (size_t)VM_TOTAL_SIZE;
+         uint8_t* raw = (uint8_t*)mmap(NULL, want * 2, PROT_NONE,
 diff --git a/runtime/platform/win32_compat.c b/runtime/platform/win32_compat.c
 index 11a74804..2bc6b0c4 100644
 --- a/runtime/platform/win32_compat.c
