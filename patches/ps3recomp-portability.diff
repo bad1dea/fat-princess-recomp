@@ -58,7 +58,7 @@ index 7da54660..2688f25d 100644
          }
          last_mix = now;
 diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
-index f78742c2..5ad7da4f 100644
+index f78742c2..f0597c82 100644
 --- a/libs/video/rsx_vulkan_backend.c
 +++ b/libs/video/rsx_vulkan_backend.c
 @@ -258,6 +258,12 @@ static int vk_load_library(void)
@@ -74,7 +74,128 @@ index f78742c2..5ad7da4f 100644
  #else
      static const char* names[] = { "libvulkan.so.1", "libvulkan.so" };
  #endif
-@@ -4342,6 +4348,28 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+@@ -2589,6 +2595,7 @@ typedef struct vk_eng_obj {
+     u32      block;                  /* bytes per 4x4 block, 0 = not BC     */
+     u32      surface, remap, rsx_fmt;/* VIEW: what it is a view of          */
+     u8       cube;                   /* TEXTURE: six layers, a CUBE view    */
++    u8       decode;                 /* TEXTURE: BC1..3 kept as RGBA8 (no BC on the device) */
+ } vk_eng_obj;
+ 
+ static vk_eng_obj s_eobj[VK_ENG_MAX_OBJ];
+@@ -2713,6 +2720,55 @@ static int vk_eng_upload_region(VkImage img, u32 layer, u32 mip, u32 x, u32 y,
+ }
+ 
+ /* The same into the whole of a level, from its origin. */
++/* Devices without textureCompressionBC (Apple's iOS GPUs) get BC1..3 decoded
++ * here into RGBA8, the same texels a BC image would sample. */
++static void vk_bc_colors(const u8* b, u8 pal[4][4], int bc1)
++{
++    const u32 c0 = b[0] | (b[1] << 8), c1 = b[2] | (b[3] << 8);
++    const u32 cs[2] = { c0, c1 };
++    for (int i = 0; i < 2; i++) {
++        const u32 r = (cs[i] >> 11) & 31, g = (cs[i] >> 5) & 63, bl = cs[i] & 31;
++        pal[i][0] = (u8)((r << 3) | (r >> 2)); pal[i][1] = (u8)((g << 2) | (g >> 4));
++        pal[i][2] = (u8)((bl << 3) | (bl >> 2)); pal[i][3] = 255;
++    }
++    for (int k = 0; k < 3; k++) {
++        if (!bc1 || c0 > c1) {
++            pal[2][k] = (u8)((2 * pal[0][k] + pal[1][k]) / 3);
++            pal[3][k] = (u8)((pal[0][k] + 2 * pal[1][k]) / 3);
++        } else {
++            pal[2][k] = (u8)((pal[0][k] + pal[1][k]) / 2);
++            pal[3][k] = 0;
++        }
++    }
++    pal[2][3] = 255;
++    pal[3][3] = (!bc1 || c0 > c1) ? 255 : 0;
++}
++static void vk_bc_decode_block(int kind, const u8* b, u8* out, size_t pitch)
++{
++    u8 alpha[16];
++    const u8* color = b;
++    if (kind == 2) {                      /* BC2: explicit 4-bit alpha */
++        for (int i = 0; i < 16; i++) { const u8 n = (b[i / 2] >> ((i & 1) * 4)) & 15; alpha[i] = (u8)(n * 17); }
++        color = b + 8;
++    } else if (kind == 3) {               /* BC3: interpolated alpha */
++        u8 a[8] = { b[0], b[1] };
++        if (a[0] > a[1]) for (int i = 1; i < 7; i++) a[i + 1] = (u8)(((7 - i) * a[0] + i * a[1]) / 7);
++        else { for (int i = 1; i < 5; i++) a[i + 1] = (u8)(((5 - i) * a[0] + i * a[1]) / 5); a[6] = 0; a[7] = 255; }
++        u64 bits = 0;
++        for (int i = 0; i < 6; i++) bits |= (u64)b[2 + i] << (8 * i);
++        for (int i = 0; i < 16; i++) alpha[i] = a[(bits >> (3 * i)) & 7];
++        color = b + 8;
++    }
++    u8 pal[4][4];
++    vk_bc_colors(color, pal, kind == 1);
++    const u32 idx = color[4] | (color[5] << 8) | (color[6] << 16) | ((u32)color[7] << 24);
++    for (int i = 0; i < 16; i++) {
++        u8* px = out + (size_t)(i / 4) * pitch + (size_t)(i % 4) * 4;
++        memcpy(px, pal[(idx >> (2 * i)) & 3], 4);
++        if (kind != 1) px[3] = alpha[i];
++    }
++}
++
+ static int vk_eng_upload_rows(VkImage img, u32 layer, u32 mip, u32 w, u32 h,
+                               size_t tight, u32 rows, const void* src, u32 row_bytes)
+ {
+@@ -3124,9 +3180,9 @@ static u32 vk_eng_texture_create(void* user, rsx_be_format fmt, u32 w, u32 h,
+     u32 bpp;
+     const VkFormat vf = vk_eng_format(fmt, &bpp);
+     const int bc = (fmt == RSX_BE_FMT_BC1 || fmt == RSX_BE_FMT_BC2 || fmt == RSX_BE_FMT_BC3);
+-    if (vf == VK_FORMAT_UNDEFINED || !w || !h || w > vk_max_dim() || h > vk_max_dim() ||
+-        (bc && !s_vk.bc_ok))
++    if (vf == VK_FORMAT_UNDEFINED || !w || !h || w > vk_max_dim() || h > vk_max_dim())
+         return 0;
++    const int decode = bc && !s_vk.bc_ok ? (fmt == RSX_BE_FMT_BC1 ? 1 : fmt == RSX_BE_FMT_BC2 ? 2 : 3) : 0;
+     const int cube = (faces == 6);
+     if ((faces != 1 && !cube) || (cube && w != h)) return 0;   /* cube faces are square */
+     if (!mips) mips = 1;
+@@ -3136,7 +3192,7 @@ static u32 vk_eng_texture_create(void* user, rsx_be_format fmt, u32 w, u32 h,
+     VkImageCreateInfo ici = {
+         .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+         .flags = cube ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0, .imageType = VK_IMAGE_TYPE_2D,
+-        .format = vf, .extent = { w, h, 1 }, .mipLevels = mips, .arrayLayers = cube ? 6u : 1u,
++        .format = decode ? VK_FORMAT_R8G8B8A8_UNORM : vf, .extent = { w, h, 1 }, .mipLevels = mips, .arrayLayers = cube ? 6u : 1u,
+         .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
+         .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+         .sharingMode = VK_SHARING_MODE_EXCLUSIVE, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED };
+@@ -3150,10 +3206,11 @@ static u32 vk_eng_texture_create(void* user, rsx_be_format fmt, u32 w, u32 h,
+                                  .allocationSize = req.size, .memoryTypeIndex = type };
+     if (pvkAllocateMemory(s_vk.device, &mai, NULL, &o->im.mem) != VK_SUCCESS ||
+         pvkBindImageMemory(s_vk.device, o->im.img, o->im.mem, 0) != VK_SUCCESS ||
+-        vk_eng_make_view(o->im.img, vf, mips, vk_remap(remap, rsx_fmt), cube, &o->im.view))
++        vk_eng_make_view(o->im.img, decode ? VK_FORMAT_R8G8B8A8_UNORM : vf, mips,
++                         vk_remap(remap, rsx_fmt), cube, &o->im.view))
+         goto fail;
+-    o->kind = VK_ENG_TEXTURE; o->fmt = vf; o->w = w; o->h = h; o->cube = (u8)cube;
+-    o->bpp = bc ? 0 : bpp; o->block = bc ? bpp : 0;
++    o->kind = VK_ENG_TEXTURE; o->fmt = decode ? VK_FORMAT_R8G8B8A8_UNORM : vf; o->w = w; o->h = h; o->cube = (u8)cube;
++    o->bpp = bc ? 0 : bpp; o->block = bc ? bpp : 0; o->decode = (u8)decode;
+     /* UNDEFINED -> GENERAL for every level and face before the uploads arrive. */
+     if ((s_begin_reason="vk_eng_texture_create", vk_begin())) goto fail;
+     vk_barrier_image(o->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED);
+@@ -3173,6 +3230,20 @@ static void vk_eng_texture_upload_impl(void* user, u32 texture, u32 face, u32 mi
+     if (!o || !src || !row_bytes || !rows || face >= (o->cube ? 6u : 1u)) return;
+     /* A BC row is a row of 4x4 blocks; the engine's `rows` already counts them. */
+     const size_t tight = o->block ? (size_t)((w + 3u) / 4u) * o->block : (size_t)w * o->bpp;
++    if (o->decode) {
++        const u32 bw = (w + 3u) / 4u, bh = rows, pw = bw * 4u;
++        const size_t pitch = (size_t)pw * 4u;
++        u8* rgba = (u8*)malloc(pitch * bh * 4u);
++        if (!rgba) return;
++        for (u32 by = 0; by < bh; by++)
++            for (u32 bx = 0; bx < bw; bx++)
++                vk_bc_decode_block(o->decode, (const u8*)src + (size_t)by * row_bytes + (size_t)bx * o->block,
++                                   rgba + (size_t)by * 4u * pitch + (size_t)bx * 16u, pitch);
++        u32 out_rows = bh * 4u < h ? bh * 4u : h;
++        vk_eng_upload_rows(o->im.img, face, mip, w, out_rows, (size_t)w * 4u, out_rows, rgba, (u32)pitch);
++        free(rgba);
++        return;
++    }
+     vk_eng_upload_rows(o->im.img, face, mip, w, h, tight, rows, src, row_bytes);
+ }
+ static void vk_eng_texture_upload(void* user, u32 texture, u32 face, u32 mip, u32 w, u32 h,
+@@ -4342,6 +4413,28 @@ static int vk_init_all(u32 width, u32 height, const char* title)
          ci.enabledExtensionCount   = s_vk.inst_ext_count;
          ci.ppEnabledExtensionNames = s_vk.inst_exts;
      }
@@ -103,7 +224,7 @@ index f78742c2..5ad7da4f 100644
      static const char* const validation_layer[] = { "VK_LAYER_KHRONOS_validation" };
      const char* ext_all[18];
      int validation = 0;
-@@ -4405,7 +4433,12 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+@@ -4405,7 +4498,12 @@ static int vk_init_all(u32 width, u32 height, const char* title)
      VkDeviceQueueCreateInfo qci = { .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
                                      .queueFamilyIndex = s_vk.queue_family,
                                      .queueCount = 1, .pQueuePriorities = &prio };
@@ -116,7 +237,7 @@ index f78742c2..5ad7da4f 100644
      /* DXT (BC1-3) is how PS3 titles ship most textures; Vulkan gates it
       * behind a feature, enabled only when the device reports it. */
      VkPhysicalDeviceFeatures have, want;
-@@ -4428,7 +4461,7 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+@@ -4428,7 +4526,7 @@ static int vk_init_all(u32 width, u32 height, const char* title)
      }
      VkDeviceCreateInfo dci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
                                 .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci,
