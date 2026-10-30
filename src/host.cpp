@@ -818,6 +818,16 @@ extern "C" void cellGcmTickFlip(void);
 extern "C" void cellGcm_rsx_process_fifo(void);
 extern "C" int cellGcm_present_pending(void (*)(void));
 
+// iOS refuses GPU work from a backgrounded app and loses the device. SDL reports the switch synchronously through an
+// event watch, on the main thread between frames, so the frame clock stops ticking, walking and presenting until the
+// app is back; the game waits at its next vblank.
+static std::atomic<bool> g_backgrounded{false};
+static int SDLCALL background_watch(void*, SDL_Event* e) {
+    if (e->type == SDL_APP_WILLENTERBACKGROUND || e->type == SDL_APP_DIDENTERBACKGROUND) g_backgrounded = true;
+    else if (e->type == SDL_APP_WILLENTERFOREGROUND || e->type == SDL_APP_DIDENTERFOREGROUND) g_backgrounded = false;
+    return 1;
+}
+
 // The command walker holds at a flip until its completed image is presented.
 // Keep simulation/vblank signals independent of whether a new image is ready.
 extern "C" unsigned long fp_run_frame_clock(void (*present)(void)) {
@@ -827,6 +837,7 @@ extern "C" unsigned long fp_run_frame_clock(void (*present)(void)) {
     const bool hd = fp::settings_get("resolution") == "1080P";
     bool ready = fp_backend_init(hd ? 1920 : 1280, hd ? 1080 : 720, title ? title : "Fat Princess - Native") == 0;
     std::fprintf(stderr,"[fp-host] frame-boundary presenter %s\n",ready ? "ready" : "failed");
+    SDL_AddEventWatch(background_watch, nullptr);
     auto next = Clock::now();
     // The emulated vblank also completes flips, so it bounds the frame rate the game can reach.
     // Default: the frame limit, never below 60; 240 when the limit is off. FP_VBLANK_HZ overrides.
@@ -882,6 +893,15 @@ extern "C" unsigned long fp_run_frame_clock(void (*present)(void)) {
         cellGcm_present_pending(present);
         if (!cellGcm_flip_request_count()) fp_backend_present();
         if (fp_backend_pump_messages() != 0) std::exit(0);
+        if (g_backgrounded) {
+            std::fprintf(stderr, "[fp-host] in the background: rendering paused\n");
+            while (g_backgrounded) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(50));
+                if (fp_backend_pump_messages() != 0) std::exit(0);
+            }
+            std::fprintf(stderr, "[fp-host] back in the foreground\n");
+            next = Clock::now() + tick;
+        }
     }
 }
 
