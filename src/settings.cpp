@@ -5,6 +5,12 @@
 #include "self_test.h"
 #include "trophy_ui.h"
 #include <SDL2/SDL.h>
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
+#if defined(__APPLE__) && TARGET_OS_IOS
+#include "ios_touch.h"
+#endif
 #include <algorithm>
 #include <cmath>
 #include <cctype>
@@ -153,7 +159,11 @@ void init_items() {
 #endif
     add("VIDEO", "interp", "INTERPOLATION (TEST)", Kind::Choice, "OFF", {"OFF", "2X", "4X"});
     add("VIDEO", "vsync", "VSYNC", Kind::Choice, "ON", {"ON", "ADAPTIVE", "OFF"});
+#if defined(__APPLE__) && TARGET_OS_IOS
+    add("VIDEO", "stats", "FPS PANEL (F3)", Kind::Choice, "OFF", {"OFF", "COMPACT", "DETAILED"});   // too much for a phone screen
+#else
     add("VIDEO", "stats", "FPS PANEL (F3)", Kind::Choice, "DETAILED", {"OFF", "COMPACT", "DETAILED"});
+#endif
     add("VIDEO", "overlay_opacity", "PANEL OPACITY %", Kind::Choice, "70", {"100", "85", "70", "50", "35", "20"});
     add("VIDEO", "async", "ASYNC GPU SUBMIT", Kind::Toggle, "ON");
     add("AUDIO", "volume", "VOLUME", Kind::Choice, "100", {"0", "10", "20", "30", "40", "50", "60", "70", "80", "90", "100"});
@@ -670,7 +680,12 @@ constexpr unsigned CELL_PAD_CTRL_SELECT = 1u << 0, CELL_PAD_CTRL_START = 1u << 3
 
 // Held buttons of the physical pads, read from the pad code. Opening the controllers a second time
 // from the presenter thread corrupted the heap.
-bool pad_down(unsigned ctrl_bit) { return (fp_pad_host_buttons() & ctrl_bit) != 0; }
+bool pad_down(unsigned ctrl_bit) {
+#if defined(__APPLE__) && TARGET_OS_IOS
+    if (fp_touch_pad_bits() & ctrl_bit) return true;   // the on-screen controller navigates the menu too
+#endif
+    return (fp_pad_host_buttons() & ctrl_bit) != 0;
+}
 
 char typed_char(SDL_Scancode s, bool shift) {
     if (s >= SDL_SCANCODE_A && s <= SDL_SCANCODE_Z) return static_cast<char>((shift ? 'A' : 'a') + (s - SDL_SCANCODE_A));
@@ -1575,7 +1590,10 @@ bool settings_menu_frame(std::string& panel) {
     if (trophy_frame(panel, keys, focused)) return true;   // so does a trophy screen
     const auto shortcut=find("menu_button")->value;
     const bool combo = shortcut=="SELECT" ? pad_down(CELL_PAD_CTRL_SELECT) : shortcut=="L3" ? pad_down(1u<<1) : shortcut=="R3" ? pad_down(1u<<2) : pad_down(CELL_PAD_CTRL_SELECT) && pad_down(CELL_PAD_CTRL_START);
-    const bool toggle = (focused && keyedge.down(SDL_SCANCODE_F1, keys)) || (combo && !combo_prev);
+    bool toggle = (focused && keyedge.down(SDL_SCANCODE_F1, keys)) || (combo && !combo_prev);
+#if defined(__APPLE__) && TARGET_OS_IOS
+    toggle = fp_touch_take_menu() || toggle;
+#endif
     combo_prev = combo;
     if (toggle) settings_menu_toggle();
     if (!is_open) return false;

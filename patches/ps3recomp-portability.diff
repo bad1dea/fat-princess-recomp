@@ -58,10 +58,20 @@ index 7da54660..2688f25d 100644
          }
          last_mix = now;
 diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
-index f78742c2..f0597c82 100644
+index f78742c2..4cb04d86 100644
 --- a/libs/video/rsx_vulkan_backend.c
 +++ b/libs/video/rsx_vulkan_backend.c
-@@ -258,6 +258,12 @@ static int vk_load_library(void)
+@@ -40,6 +40,9 @@
+ 
+ #define VK_NO_PROTOTYPES
+ #include <vulkan/vulkan.h>
++#if defined(__APPLE__)
++#include <TargetConditionals.h>
++#endif
+ 
+ #include "rsx_vulkan_backend.h"
+ #include "rsx_debug_stats.h"
+@@ -258,6 +261,12 @@ static int vk_load_library(void)
  {
  #ifdef _WIN32
      static const char* names[] = { "vulkan-1.dll" };
@@ -74,7 +84,17 @@ index f78742c2..f0597c82 100644
  #else
      static const char* names[] = { "libvulkan.so.1", "libvulkan.so" };
  #endif
-@@ -2589,6 +2595,7 @@ typedef struct vk_eng_obj {
+@@ -2052,6 +2061,9 @@ static void vk_window_open(const char* title)
+         return;
+     }
+     Uint32 flags = SDL_WINDOW_VULKAN | SDL_WINDOW_SHOWN;
++#if defined(__APPLE__) && TARGET_OS_IOS
++    flags |= SDL_WINDOW_ALLOW_HIGHDPI;   /* native pixels: sharper, and host panels at a sane size on phones */
++#endif
+     if (vk_env_on("PS3RECOMP_VK_FULLSCREEN")) flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
+     s_vk.window = SDL_CreateWindow(title && title[0] ? title : "ps3recomp",
+                                    SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+@@ -2589,6 +2601,7 @@ typedef struct vk_eng_obj {
      u32      block;                  /* bytes per 4x4 block, 0 = not BC     */
      u32      surface, remap, rsx_fmt;/* VIEW: what it is a view of          */
      u8       cube;                   /* TEXTURE: six layers, a CUBE view    */
@@ -82,7 +102,7 @@ index f78742c2..f0597c82 100644
  } vk_eng_obj;
  
  static vk_eng_obj s_eobj[VK_ENG_MAX_OBJ];
-@@ -2713,6 +2720,55 @@ static int vk_eng_upload_region(VkImage img, u32 layer, u32 mip, u32 x, u32 y,
+@@ -2713,6 +2726,55 @@ static int vk_eng_upload_region(VkImage img, u32 layer, u32 mip, u32 x, u32 y,
  }
  
  /* The same into the whole of a level, from its origin. */
@@ -138,7 +158,7 @@ index f78742c2..f0597c82 100644
  static int vk_eng_upload_rows(VkImage img, u32 layer, u32 mip, u32 w, u32 h,
                                size_t tight, u32 rows, const void* src, u32 row_bytes)
  {
-@@ -3124,9 +3180,9 @@ static u32 vk_eng_texture_create(void* user, rsx_be_format fmt, u32 w, u32 h,
+@@ -3124,9 +3186,9 @@ static u32 vk_eng_texture_create(void* user, rsx_be_format fmt, u32 w, u32 h,
      u32 bpp;
      const VkFormat vf = vk_eng_format(fmt, &bpp);
      const int bc = (fmt == RSX_BE_FMT_BC1 || fmt == RSX_BE_FMT_BC2 || fmt == RSX_BE_FMT_BC3);
@@ -150,7 +170,7 @@ index f78742c2..f0597c82 100644
      const int cube = (faces == 6);
      if ((faces != 1 && !cube) || (cube && w != h)) return 0;   /* cube faces are square */
      if (!mips) mips = 1;
-@@ -3136,7 +3192,7 @@ static u32 vk_eng_texture_create(void* user, rsx_be_format fmt, u32 w, u32 h,
+@@ -3136,7 +3198,7 @@ static u32 vk_eng_texture_create(void* user, rsx_be_format fmt, u32 w, u32 h,
      VkImageCreateInfo ici = {
          .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
          .flags = cube ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0, .imageType = VK_IMAGE_TYPE_2D,
@@ -159,7 +179,7 @@ index f78742c2..f0597c82 100644
          .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
          .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
          .sharingMode = VK_SHARING_MODE_EXCLUSIVE, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED };
-@@ -3150,10 +3206,11 @@ static u32 vk_eng_texture_create(void* user, rsx_be_format fmt, u32 w, u32 h,
+@@ -3150,10 +3212,11 @@ static u32 vk_eng_texture_create(void* user, rsx_be_format fmt, u32 w, u32 h,
                                   .allocationSize = req.size, .memoryTypeIndex = type };
      if (pvkAllocateMemory(s_vk.device, &mai, NULL, &o->im.mem) != VK_SUCCESS ||
          pvkBindImageMemory(s_vk.device, o->im.img, o->im.mem, 0) != VK_SUCCESS ||
@@ -174,7 +194,7 @@ index f78742c2..f0597c82 100644
      /* UNDEFINED -> GENERAL for every level and face before the uploads arrive. */
      if ((s_begin_reason="vk_eng_texture_create", vk_begin())) goto fail;
      vk_barrier_image(o->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED);
-@@ -3173,6 +3230,20 @@ static void vk_eng_texture_upload_impl(void* user, u32 texture, u32 face, u32 mi
+@@ -3173,6 +3236,20 @@ static void vk_eng_texture_upload_impl(void* user, u32 texture, u32 face, u32 mi
      if (!o || !src || !row_bytes || !rows || face >= (o->cube ? 6u : 1u)) return;
      /* A BC row is a row of 4x4 blocks; the engine's `rows` already counts them. */
      const size_t tight = o->block ? (size_t)((w + 3u) / 4u) * o->block : (size_t)w * o->bpp;
@@ -195,7 +215,7 @@ index f78742c2..f0597c82 100644
      vk_eng_upload_rows(o->im.img, face, mip, w, h, tight, rows, src, row_bytes);
  }
  static void vk_eng_texture_upload(void* user, u32 texture, u32 face, u32 mip, u32 w, u32 h,
-@@ -4342,6 +4413,28 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+@@ -4342,6 +4419,28 @@ static int vk_init_all(u32 width, u32 height, const char* title)
          ci.enabledExtensionCount   = s_vk.inst_ext_count;
          ci.ppEnabledExtensionNames = s_vk.inst_exts;
      }
@@ -224,7 +244,7 @@ index f78742c2..f0597c82 100644
      static const char* const validation_layer[] = { "VK_LAYER_KHRONOS_validation" };
      const char* ext_all[18];
      int validation = 0;
-@@ -4405,7 +4498,12 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+@@ -4405,7 +4504,12 @@ static int vk_init_all(u32 width, u32 height, const char* title)
      VkDeviceQueueCreateInfo qci = { .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
                                      .queueFamilyIndex = s_vk.queue_family,
                                      .queueCount = 1, .pQueuePriorities = &prio };
@@ -237,7 +257,7 @@ index f78742c2..f0597c82 100644
      /* DXT (BC1-3) is how PS3 titles ship most textures; Vulkan gates it
       * behind a feature, enabled only when the device reports it. */
      VkPhysicalDeviceFeatures have, want;
-@@ -4428,7 +4526,7 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+@@ -4428,7 +4532,7 @@ static int vk_init_all(u32 width, u32 height, const char* title)
      }
      VkDeviceCreateInfo dci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
                                 .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci,

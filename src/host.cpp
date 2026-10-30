@@ -9,6 +9,14 @@
 #include <thread>
 #include <vector>
 #include <SDL2/SDL.h>
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
+#if defined(__APPLE__) && TARGET_OS_IOS
+#include "ios_touch.h"
+#else
+struct fp_touch_state { uint32_t buttons; int32_t lx, ly; };
+#endif
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -756,6 +764,12 @@ extern "C" int fp_backend_pump_messages(void) {
         }
         menu_was_open=menu;
     }
+    // The on-screen controller presses the same virtual pad as the keyboard.
+    fp_touch_state touch{};
+#if defined(__APPLE__) && TARGET_OS_IOS
+    fp_touch_tick();
+    fp_touch_read(&touch);
+#endif
     if (keyboard_pad) {
         int keyboard_focused=0;
         const Uint8* keys = fp_menu_keyboard_state(&keyboard_focused);
@@ -779,17 +793,21 @@ extern "C" int fp_backend_pump_messages(void) {
             {"up", SDL_CONTROLLER_BUTTON_DPAD_UP}, {"down", SDL_CONTROLLER_BUTTON_DPAD_DOWN},
             {"left", SDL_CONTROLLER_BUTTON_DPAD_LEFT}, {"right", SDL_CONTROLLER_BUTTON_DPAD_RIGHT},
         };
-        for (const auto& b : buttons) {
-            SDL_JoystickSetVirtualButton(keyboard_pad, b.button, !menu_open && down(bound(b.name)) ? 1 : 0);
+        for (size_t i = 0; i < std::size(buttons); i++) {
+            const bool touched = i < 10 && (touch.buttons >> i & 1);   // touch bits follow the table's first ten
+            SDL_JoystickSetVirtualButton(keyboard_pad, buttons[i].button,
+                !menu_open && (down(bound(buttons[i].name)) || touched) ? 1 : 0);
         }
+        const int key_x = (down(bound("right")) - down(bound("left"))) * 32767;
+        const int key_y = (down(bound("down")) - down(bound("up"))) * 32767;
         SDL_JoystickSetVirtualAxis(keyboard_pad, SDL_CONTROLLER_AXIS_LEFTX,
-            static_cast<Sint16>(menu_open ? 0 : (down(bound("right")) - down(bound("left"))) * 32767));
+            static_cast<Sint16>(menu_open ? 0 : key_x ? key_x : touch.lx));
         SDL_JoystickSetVirtualAxis(keyboard_pad, SDL_CONTROLLER_AXIS_LEFTY,
-            static_cast<Sint16>(menu_open ? 0 : (down(bound("down")) - down(bound("up"))) * 32767));
+            static_cast<Sint16>(menu_open ? 0 : key_y ? key_y : touch.ly));
         SDL_JoystickSetVirtualAxis(keyboard_pad, SDL_CONTROLLER_AXIS_TRIGGERLEFT,
-            !menu_open && down(bound("l2")) ? 32767 : -32768);
+            !menu_open && (down(bound("l2")) || (touch.buttons & (1u << 14))) ? 32767 : -32768);
         SDL_JoystickSetVirtualAxis(keyboard_pad, SDL_CONTROLLER_AXIS_TRIGGERRIGHT,
-            !menu_open && down(bound("r2")) ? 32767 : -32768);
+            !menu_open && (down(bound("r2")) || (touch.buttons & (1u << 15))) ? 32767 : -32768);
         SDL_JoystickUpdate();
     }
     return result;
