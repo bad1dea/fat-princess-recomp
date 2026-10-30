@@ -173,10 +173,9 @@ if(FP_BUILD_GAME)
         "    static uint32_t fp_ios_entry; fp_ios_entry = entry;\n    {\n        pthread_attr_t fa; pthread_attr_init(&fa); pthread_attr_setstacksize(&fa, 64u << 20);\n        pthread_t ft;\n        pthread_create(&ft, &fa, [](void*) -> void* {\n            int r = ppu_run(fp_ios_entry, STACK_TOP);\n            printf(\"\\n[boot] ppu_run returned %d (entry function unwound)\\n\", r);\n            exit(g_sys_process_exit_called ? (int)g_sys_process_exit_code : r);\n            return nullptr;\n        }, nullptr);\n    }\n    frame_clock(NULL);\n    int rc = 0;"
         FP_BOOT_MAIN "${FP_BOOT_MAIN}")
       string(PREPEND FP_BOOT_MAIN "#include <pthread.h>\n")
-      enable_language(OBJCXX)
       target_sources(MyGameRecomp PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/ios_launch.cpp"
                                          "${CMAKE_CURRENT_SOURCE_DIR}/src/ios_touch.mm")
-      set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/src/ios_touch.mm" PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+      set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/src/ios_touch.mm" PROPERTIES LANGUAGE CXX COMPILE_OPTIONS "-xobjective-c++;-fobjc-arc")   # Objective-C++ through the C++ compiler
       target_link_libraries(MyGameRecomp PRIVATE "-framework UIKit" "-framework GameController" "-framework QuartzCore")
       if(TARGET SDL2::SDL2main)
         target_link_libraries(MyGameRecomp PRIVATE SDL2::SDL2main)
