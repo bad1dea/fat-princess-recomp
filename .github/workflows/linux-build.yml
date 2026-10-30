@@ -28,7 +28,7 @@ jobs:
         run: |
           set -o pipefail
           cmake --build build/native --target MyGameRecomp -j "$(nproc)" -- -k 0 2>&1 | tee build.log | grep -E "error:|FAILED|Linking" || true
-          find build/native -name MyGameRecomp -type f -perm -u+x | grep -q .
+          find build/native -name fp_native -type f -perm -u+x | grep -q .
       - name: Error summary
         if: failure()
         run: |
@@ -38,7 +38,7 @@ jobs:
       - name: Package
         if: success()
         run: |
-          exe=$(find build/native -name MyGameRecomp -type f -perm -u+x | head -1)
+          exe=$(find build/native -name fp_native -type f -perm -u+x | head -1)
           mkdir -p out && cp "$exe" out/fp_native && strip --strip-debug out/fp_native
       - uses: actions/upload-artifact@v5
         if: success()

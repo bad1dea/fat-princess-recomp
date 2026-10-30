@@ -221,7 +221,8 @@ Copy-Item -Force $exe.FullName $out
 $pdb = [System.IO.Path]::ChangeExtension($exe.FullName, '.pdb')
 if (Test-Path $pdb) { Copy-Item -Force $pdb $out }
 # run.bat and README come from tools\make_package.py so there is one copy of the text.
-$py = Get-Content -Raw -Path (Join-Path $root 'tools\make_package.py')
+$pkg = Join-Path $root 'tools\make_package.py'
+$py = if (Test-Path $pkg) { Get-Content -Raw -Path $pkg } else { '' }
 $m = [regex]::Match($py, "WINDOWS_RUN = r'''(.*?)'''", 'Singleline')
 if ($m.Success) {
     $bat = $m.Groups[1].Value.Replace("`r`n", "`n").Replace("`n", "`r`n")

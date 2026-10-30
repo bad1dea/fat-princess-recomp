@@ -34,7 +34,7 @@ jobs:
         run: |
           set -o pipefail
           cmake --build build/mac --target MyGameRecomp -j "$(sysctl -n hw.ncpu)" -- -k 0 2>&1 | tee build.log | grep -E "error:|FAILED|Linking" || true
-          ls build/mac/game/MyGameRecomp build/mac/MyGameRecomp 2>/dev/null | grep -q .
+          find build/mac -name fp_native -type f -perm -u+x | grep -q .
       - name: Error summary
         if: failure()
         run: |
