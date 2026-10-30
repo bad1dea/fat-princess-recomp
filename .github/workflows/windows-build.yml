@@ -1,0 +1,35 @@
+name: Windows build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ["src/**", "CMakeLists.txt", "patches/**", "encrypted/**", ".github/**", "tools/windows/**"]
+
+jobs:
+  build:
+    runs-on: windows-2025
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v4
+      - name: Host tools
+        shell: bash
+        run: choco install -y --no-progress zstandard
+      - uses: ./.github/actions/prepare
+        with:
+          lift-key: ${{ secrets.FP_LIFT_KEY }}
+      - name: Build (Visual Studio clang-cl)
+        shell: pwsh
+        run: |
+          $env:VCPKG_ROOT = $env:VCPKG_INSTALLATION_ROOT
+          powershell -ExecutionPolicy Bypass -File tools\windows\build_vs.ps1 -Yes
+      - name: Build log
+        if: always()
+        shell: bash
+        run: grep -E "error|Error" build/vs-build.log | head -80 || true
+      - uses: actions/upload-artifact@v4
+        if: success()
+        with:
+          name: fat-princess-windows
+          path: dist/fat-princess-windows-vs/
+          retention-days: 14

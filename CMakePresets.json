@@ -1,0 +1,39 @@
+{
+  "version": 3,
+  "configurePresets": [
+    {
+      "name": "win-clang-cl",
+      "displayName": "Windows x64, Visual Studio clang-cl, vcpkg libraries",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/win-clang-cl",
+      "architecture": { "value": "x64", "strategy": "external" },
+      "toolchainFile": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CMAKE_C_COMPILER": "clang-cl",
+        "CMAKE_CXX_COMPILER": "clang-cl",
+        "VCPKG_TARGET_TRIPLET": "x64-windows-static-md",
+        "FP_BUILD_GAME": "ON",
+        "PS3RECOMP_RSX_VULKAN": "ON",
+        "FP_SPU_LIFT_DIR": "${sourceDir}/private/lift/spu",
+        "FP_OVERLAY_DIR": "${sourceDir}/private/lift/overlays"
+      }
+    },
+    {
+      "name": "win-clang-cl-sdk",
+      "displayName": "Windows x64, Visual Studio clang-cl, libraries from SDL2 VC zip, Vulkan SDK and a glslang build",
+      "inherits": "win-clang-cl",
+      "toolchainFile": "",
+      "binaryDir": "${sourceDir}/build/win-clang-cl-sdk",
+      "cacheVariables": {
+        "CMAKE_PREFIX_PATH": "$env{FP_DEPS}",
+        "SDL2_DIR": "$env{FP_DEPS}/SDL2/cmake",
+        "PS3RECOMP_VULKAN_INCLUDE_DIR": "$env{VULKAN_SDK}/Include"
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "win-clang-cl", "configurePreset": "win-clang-cl", "targets": ["MyGameRecomp"] },
+    { "name": "win-clang-cl-sdk", "configurePreset": "win-clang-cl-sdk", "targets": ["MyGameRecomp"] }
+  ]
+}

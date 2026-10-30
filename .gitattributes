@@ -1,0 +1,2 @@
+# Preserve generated patch context and original source line endings.
+patches/*.patch -whitespace

@@ -1,0 +1,28 @@
+name: Prepare sources
+description: Rebuild the ps3recomp fork and decrypt the lifted sources
+inputs:
+  lift-key:
+    description: Decryption key for encrypted/lift.tar.zst.enc
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: ps3recomp fork
+      shell: bash
+      run: |
+        set -euo pipefail
+        git clone -q https://github.com/sp00nznet/ps3recomp.git third_party/ps3recomp
+        cd third_party/ps3recomp
+        git checkout -q 39a3629
+        # One binary-safe diff from upstream: several sources mix CRLF and LF.
+        git apply --whitespace=nowarn ../../patches/ps3recomp.diff
+    - name: Decrypt lifted sources
+      shell: bash
+      env:
+        FP_LIFT_KEY: ${{ inputs.lift-key }}
+      run: |
+        set -euo pipefail
+        mkdir -p private/lift
+        openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -in encrypted/lift.tar.zst.enc -pass env:FP_LIFT_KEY > lift.tar.zst
+        zstd -dq lift.tar.zst -o lift.tar && tar -xf lift.tar -C private/lift && rm lift.tar lift.tar.zst
+        ls private/lift

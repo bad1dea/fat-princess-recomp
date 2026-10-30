@@ -1,0 +1,40 @@
+name: macOS build
+
+# ARM64 compile on Apple Silicon with the framework's Metal renderer: the first
+# step toward the iOS app. Lifted sources arrive encrypted; game data never does.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ["src/**", "CMakeLists.txt", "patches/**", "encrypted/**", ".github/**"]
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select Xcode
+        run: |
+          xc="$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)"
+          sudo xcode-select -switch "${xc:-/Applications/Xcode.app}"
+          xcodebuild -version
+      - name: Host tools
+        run: |
+          brew install sdl2 ninja zstd openssl@3
+          echo "$(brew --prefix openssl@3)/bin" >> "$GITHUB_PATH"
+      - uses: ./.github/actions/prepare
+        with:
+          lift-key: ${{ secrets.FP_LIFT_KEY }}
+      - name: Configure
+        run: |
+          cmake -S . -B build/mac -G Ninja -DCMAKE_BUILD_TYPE=Release -DFP_BUILD_GAME=ON -DFP_X86_V3=OFF -DPS3RECOMP_RSX_VULKAN=OFF \
+            -DSPU_DIR="$PWD/private/lift/spu" -DFP_OVERLAY_DIR="$PWD/private/lift/overlays"
+      - name: Build
+        run: |
+          set -o pipefail
+          cmake --build build/mac --target MyGameRecomp -j "$(sysctl -n hw.ncpu)" -- -k 0 2>&1 | tee build.log | grep -E "error:|FAILED|Linking" || true
+          ls build/mac/game/MyGameRecomp build/mac/MyGameRecomp 2>/dev/null | grep -q .
+      - name: Error summary
+        if: failure()
+        run: grep -hE "error:" build.log | sed -E 's#^.*/(third_party|src|private)/#\1/#' | sort | uniq -c | sort -rn | head -80 || true
