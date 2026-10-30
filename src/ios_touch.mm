@@ -93,11 +93,17 @@ static bool g_forced_visible;
     _buttons[i].text.frame = CGRectMake(c.x - r, c.y - size * 0.62, 2 * r, size * 1.3);
 }
 
+// Layout unit in points: about a thumb's width on a phone, capped so a tablet does not get giant buttons.
+- (CGFloat)unit {
+    const CGFloat m = MIN(self.bounds.size.width, self.bounds.size.height);
+    return MAX(24.0, MIN(40.0, m / 15.0));
+}
+
 - (void)layoutSubviews {
     [super layoutSubviews];
     const UIEdgeInsets safe = self.safeAreaInsets;
     const CGRect b = UIEdgeInsetsInsetRect(self.bounds, safe);
-    const CGFloat u = MIN(b.size.width, b.size.height) / 9.0;   // button radius scale
+    const CGFloat u = [self unit];
     const CGFloat r = u * 0.9, maxX = CGRectGetMaxX(b), maxY = CGRectGetMaxY(b), minX = b.origin.x, minY = b.origin.y;
     const CGPoint face = CGPointMake(maxX - 3.4 * u, maxY - 3.4 * u);
     [CATransaction begin];
@@ -118,7 +124,7 @@ static bool g_forced_visible;
     [CATransaction commit];
 }
 
-- (CGFloat)stickRange { return MIN(self.bounds.size.width, self.bounds.size.height) / 9.0 * 1.8; }
+- (CGFloat)stickRange { return [self unit] * 1.6; }
 
 - (int)buttonAt:(CGPoint)p {
     int best = kNone;
