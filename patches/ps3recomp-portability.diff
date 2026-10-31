@@ -673,3 +673,32 @@ index 37e9a440..a42ce08e 100644
          if (pthread_attr_setstacksize(&attr, PPU_HOST_STACK_BYTES) == 0) {
              rc = pthread_create(&t->host_thread, &attr, ppu_host_thread_proc, t);
          } else {
+diff --git a/runtime/spu/spu_channels.c b/runtime/spu/spu_channels.c
+--- a/runtime/spu/spu_channels.c
++++ b/runtime/spu/spu_channels.c
+@@ -393,10 +393,10 @@
+ {
+     if (!ctx) return;
+     AcquireSRWLockExclusive(&s_mfc_claim_lock);
+-    mfc_invalidate_hints();
+     for (spu_mfc_slot** link = &s_mfc_slots; *link; link = &(*link)->next) {
+         if ((*link)->ctx != ctx) continue;
+         spu_mfc_slot* slot = *link;
++        mfc_invalidate_hints();
+         *link = slot->next;
+         free(slot);
+         break;
+@@ -409,11 +409,12 @@
+ void spu_mfc_forget_range(uintptr_t lo, uintptr_t hi)
+ {
+     AcquireSRWLockExclusive(&s_mfc_claim_lock);
+-    mfc_invalidate_hints();
++    int invalidated = 0;
+     for (spu_mfc_slot** link = &s_mfc_slots; *link;) {
+         spu_mfc_slot* slot = *link;
+         uintptr_t owner = (uintptr_t)slot->ctx;
+         if (owner >= lo && owner < hi) {
++            if (!invalidated) { mfc_invalidate_hints(); invalidated = 1; }
+             *link = slot->next;
+             free(slot);
+         } else {
