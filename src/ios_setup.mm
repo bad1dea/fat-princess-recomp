@@ -4,7 +4,7 @@
 #include <TargetConditionals.h>
 #if TARGET_OS_IOS
 #import <UIKit/UIKit.h>
-#import <QuartzCore/QuartzCore.h>
+#import <QuartzCore/QuartzCore.h>   // CACurrentMediaTime
 #include <atomic>
 #include <cstdio>
 
@@ -44,104 +44,97 @@
 }
 @end
 
-// The setup page: a dark backdrop with one card (title, state, progress bar, numbers, a note).
+// The setup page, in the settings menu's palette (settings_panel.h): navy ground, a pink rule along the top and bottom
+// edges and the title in pink, off-white text, blue-gray numbers, one thin pink progress bar, lower-left.
+static UIColor* fp_rgb(int r, int g, int b) { return [UIColor colorWithRed:r / 255.0 green:g / 255.0 blue:b / 255.0 alpha:1]; }
+
 @interface FPSetupController : UIViewController
 @property(nonatomic) UILabel* state;
-@property(nonatomic) UILabel* percent;
 @property(nonatomic) UILabel* detail;
 @property(nonatomic) UILabel* note;
 @property(nonatomic) UIProgressView* bar;
 @property(nonatomic) UIActivityIndicatorView* spinner;
-@property(nonatomic) CAGradientLayer* backdrop;
 @end
 
 @implementation FPSetupController
-- (UILabel*)label:(CGFloat)size weight:(UIFontWeight)weight color:(UIColor*)color {
-    UILabel* l = [UILabel new];
-    l.font = [UIFont systemFontOfSize:size weight:weight];
-    l.textColor = color;
-    l.textAlignment = NSTextAlignmentCenter;
-    l.numberOfLines = 0;
-    return l;
-}
 - (UIInterfaceOrientationMask)supportedInterfaceOrientations { return UIInterfaceOrientationMaskLandscape; }
 - (BOOL)prefersStatusBarHidden { return YES; }
 - (BOOL)prefersHomeIndicatorAutoHidden { return YES; }
+- (UILabel*)label:(UIFont*)font color:(UIColor*)color {
+    UILabel* l = [UILabel new];
+    l.font = font;
+    l.textColor = color;
+    l.numberOfLines = 0;
+    return l;
+}
 - (void)viewDidLoad {
     [super viewDidLoad];
-    self.view.backgroundColor = [UIColor colorWithRed:0.04 green:0.03 blue:0.03 alpha:1];
+    UIColor *ground = fp_rgb(24, 27, 36), *text = fp_rgb(242, 235, 220), *muted = fp_rgb(133, 149, 164);
+    UIColor *accent = fp_rgb(238, 145, 174), *rule = fp_rgb(85, 71, 87);
+    self.view.backgroundColor = ground;
     self.view.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
-    UIColor* gold = [UIColor colorWithRed:0.91 green:0.71 blue:0.29 alpha:1];
-    UIColor* text = [UIColor colorWithWhite:0.93 alpha:1];
-    UIColor* dim = [UIColor colorWithWhite:0.62 alpha:1];
-    self.backdrop = [CAGradientLayer layer];
-    self.backdrop.colors = @[(id)[UIColor colorWithRed:0.16 green:0.11 blue:0.08 alpha:1].CGColor,
-                             (id)[UIColor colorWithRed:0.04 green:0.03 blue:0.03 alpha:1].CGColor];
-    [self.view.layer addSublayer:self.backdrop];
+    for (int edge = 0; edge < 2; ++edge) {   // the menu panel's top and bottom pink rules, across the screen
+        UIView* line = [UIView new];
+        line.backgroundColor = accent;
+        line.translatesAutoresizingMaskIntoConstraints = NO;
+        [self.view addSubview:line];
+        [NSLayoutConstraint activateConstraints:@[
+            [line.leadingAnchor constraintEqualToAnchor:self.view.leadingAnchor],
+            [line.trailingAnchor constraintEqualToAnchor:self.view.trailingAnchor],
+            [line.heightAnchor constraintEqualToConstant:3],
+            edge ? [line.bottomAnchor constraintEqualToAnchor:self.view.bottomAnchor]
+                 : [line.topAnchor constraintEqualToAnchor:self.view.topAnchor],
+        ]];
+    }
 
-    UIView* card = [UIView new];
-    card.backgroundColor = [UIColor colorWithRed:0.10 green:0.08 blue:0.07 alpha:0.92];
-    card.layer.cornerRadius = 18;
-    card.layer.borderWidth = 1;
-    card.layer.borderColor = [UIColor colorWithRed:0.91 green:0.71 blue:0.29 alpha:0.25].CGColor;
-    card.translatesAutoresizingMaskIntoConstraints = NO;
-    [self.view addSubview:card];
-
-    UILabel* title = [self label:26 weight:UIFontWeightHeavy color:gold];
-    title.text = @"Fat Princess";
-    self.state = [self label:16 weight:UIFontWeightSemibold color:text];
-    self.percent = [self label:44 weight:UIFontWeightBold color:text];
-    self.percent.font = [UIFont monospacedDigitSystemFontOfSize:44 weight:UIFontWeightBold];
-    self.bar = [[UIProgressView alloc] initWithProgressViewStyle:UIProgressViewStyleDefault];
-    self.bar.progressTintColor = gold;
-    self.bar.trackTintColor = [UIColor colorWithWhite:1 alpha:0.12];
-    self.bar.layer.cornerRadius = 3;
-    self.bar.clipsToBounds = YES;
-    [self.bar.heightAnchor constraintEqualToConstant:6].active = YES;
-    self.detail = [self label:13 weight:UIFontWeightRegular color:dim];
-    self.detail.font = [UIFont monospacedDigitSystemFontOfSize:13 weight:UIFontWeightRegular];
+    self.state = [self label:[UIFont monospacedSystemFontOfSize:17 weight:UIFontWeightBold] color:accent];
     self.spinner = [[UIActivityIndicatorView alloc] initWithActivityIndicatorStyle:UIActivityIndicatorViewStyleMedium];
-    self.spinner.color = gold;
+    self.spinner.color = accent;
     self.spinner.hidesWhenStopped = YES;
-    self.note = [self label:13 weight:UIFontWeightMedium color:dim];
+    UIStackView* head = [[UIStackView alloc] initWithArrangedSubviews:@[self.spinner, self.state]];
+    head.spacing = 10;
+    head.alignment = UIStackViewAlignmentCenter;
+    UIView* divider = [UIView new];
+    divider.backgroundColor = rule;
+    [divider.heightAnchor constraintEqualToConstant:1].active = YES;
+
+    self.bar = [[UIProgressView alloc] initWithProgressViewStyle:UIProgressViewStyleBar];
+    self.bar.progressTintColor = accent;
+    self.bar.trackTintColor = rule;
+    self.detail = [self label:[UIFont monospacedDigitSystemFontOfSize:13 weight:UIFontWeightRegular] color:text];
+    self.note = [self label:[UIFont monospacedSystemFontOfSize:12 weight:UIFontWeightRegular] color:muted];
     self.note.text = @"Keep the app open until this finishes.";
 
-    UIStackView* stack = [[UIStackView alloc] initWithArrangedSubviews:@[title, self.state, self.percent, self.bar,
-                                                                         self.detail, self.spinner, self.note]];
+    UIStackView* stack = [[UIStackView alloc] initWithArrangedSubviews:@[head, divider, self.bar, self.detail, self.note]];
     stack.axis = UILayoutConstraintAxisVertical;
-    stack.spacing = 12;
-    [stack setCustomSpacing:4 afterView:title];
-    [stack setCustomSpacing:18 afterView:self.detail];
+    stack.alignment = UIStackViewAlignmentFill;
+    stack.spacing = 8;
+    [stack setCustomSpacing:10 afterView:head];
+    [stack setCustomSpacing:14 afterView:divider];
+    [stack setCustomSpacing:16 afterView:self.detail];
     stack.translatesAutoresizingMaskIntoConstraints = NO;
-    [card addSubview:stack];
+    [self.view addSubview:stack];
 
     UILayoutGuide* safe = self.view.safeAreaLayoutGuide;
-    NSLayoutConstraint* wide = [card.widthAnchor constraintEqualToConstant:380];
-    wide.priority = UILayoutPriorityDefaultHigh;
+    NSLayoutConstraint* width = [stack.widthAnchor constraintEqualToAnchor:safe.widthAnchor multiplier:0.45];
+    width.priority = UILayoutPriorityDefaultHigh;
     [NSLayoutConstraint activateConstraints:@[
-        [card.centerXAnchor constraintEqualToAnchor:safe.centerXAnchor],
-        [card.centerYAnchor constraintEqualToAnchor:safe.centerYAnchor],
-        wide,
-        [card.widthAnchor constraintLessThanOrEqualToAnchor:safe.widthAnchor constant:-32],
-        [stack.topAnchor constraintEqualToAnchor:card.topAnchor constant:26],
-        [stack.bottomAnchor constraintEqualToAnchor:card.bottomAnchor constant:-22],
-        [stack.leadingAnchor constraintEqualToAnchor:card.leadingAnchor constant:26],
-        [stack.trailingAnchor constraintEqualToAnchor:card.trailingAnchor constant:-26],
+        [stack.leadingAnchor constraintEqualToAnchor:safe.leadingAnchor constant:32],
+        [stack.bottomAnchor constraintEqualToAnchor:safe.bottomAnchor constant:-32],
+        width,
+        [stack.widthAnchor constraintGreaterThanOrEqualToConstant:260],
+        [stack.widthAnchor constraintLessThanOrEqualToConstant:440],
+        [stack.trailingAnchor constraintLessThanOrEqualToAnchor:safe.trailingAnchor constant:-32],
     ]];
-    [self show:@"Game files needed" percent:nil progress:0 detail:@"" busy:NO];
+    [self show:@"Game data needed" percent:nil progress:0 detail:@"" busy:NO];
 }
-- (void)viewDidLayoutSubviews {
-    [super viewDidLayoutSubviews];
-    self.backdrop.frame = self.view.bounds;
-}
+// percent nil hides the bar; the percentage itself is part of the detail line.
 - (void)show:(NSString*)state percent:(NSString*)percent progress:(float)p detail:(NSString*)detail busy:(BOOL)busy {
     self.state.text = state;
-    self.percent.text = percent;
-    self.percent.hidden = percent == nil;
     self.bar.hidden = percent == nil;
     [self.bar setProgress:p animated:NO];
-    self.detail.text = detail;
-    self.detail.hidden = detail.length == 0;
+    self.detail.text = percent ? [NSString stringWithFormat:@"%@   %@", percent, detail] : detail;
+    self.detail.hidden = self.detail.text.length == 0;
     if (busy) [self.spinner startAnimating]; else [self.spinner stopAnimating];
 }
 @end
@@ -150,8 +143,23 @@ namespace {
 UIWindow* g_window;
 FPSetupController* g_page;
 
+// The page must cover the whole screen whatever the scene reports at creation (an iPad scene can still be
+// settling its size and orientation then), so it is resized to the current screen on every run-loop turn.
+void fit() {
+    if (!g_window) return;
+    const CGRect screen = g_window.windowScene ? g_window.windowScene.coordinateSpace.bounds : UIScreen.mainScreen.bounds;
+    if (!CGRectEqualToRect(g_window.frame, screen)) g_window.frame = screen;
+    UIView* v = g_window.rootViewController.view;
+    if (!CGRectEqualToRect(v.frame, g_window.bounds)) v.frame = g_window.bounds;
+}
+
+void run(double seconds) {
+    CFRunLoopRunInMode(kCFRunLoopDefaultMode, seconds, false);
+    fit();
+}
+
 void pump(const std::atomic<bool>& done) {
-    while (!done.load()) CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.05, false);
+    while (!done.load()) run(0.05);
 }
 
 FPSetupController* page() {
@@ -161,10 +169,11 @@ FPSetupController* page() {
             if ([s isKindOfClass:UIWindowScene.class]) { scene = (UIWindowScene*)s; break; }
         g_window = scene ? [[UIWindow alloc] initWithWindowScene:scene] : [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
         g_page = [FPSetupController new];
-        g_window.frame = (scene ? scene.coordinateSpace.bounds : UIScreen.mainScreen.bounds);
         g_window.rootViewController = g_page;
         g_window.windowLevel = UIWindowLevelAlert;
+        g_window.overrideUserInterfaceStyle = UIUserInterfaceStyleDark;   // the key prompt matches the page
         [g_window makeKeyAndVisible];
+        fit();
     }
     return g_page;
 }
@@ -175,7 +184,7 @@ NSString* ask(NSString* message) {
     std::atomic<bool> done{false};
     std::atomic<bool>* d = &done;
     FPSetupController* p = page();
-    [p show:@"Game files needed" percent:nil progress:0 detail:@"" busy:NO];
+    [p show:@"Game data needed" percent:nil progress:0 detail:@"" busy:NO];
     UIAlertController* a = [UIAlertController alertControllerWithTitle:@"Enter your key" message:message
                                                         preferredStyle:UIAlertControllerStyleAlert];
     [a addTextFieldWithConfigurationHandler:^(UITextField* f) {
@@ -220,7 +229,7 @@ extern "C" bool fp_ios_fetch_game(const char* docs) {
         int64_t rate_bytes = 0;
         double rate = 0;
         while (!dl.finished) {
-            CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.1, false);
+            run(0.1);
             const CFTimeInterval now = CACurrentMediaTime();
             if (now - last < 0.25 || dl.total <= 0) continue;
             last = now;
@@ -233,11 +242,11 @@ extern "C" bool fp_ios_fetch_game(const char* docs) {
             NSString* detail = [NSString stringWithFormat:@"%@ of %@", megabytes(dl.written), megabytes(dl.total)];
             if (rate > 0) {
                 const int left = int(double(dl.total - dl.written) / rate);
-                detail = [detail stringByAppendingFormat:@"  ·  %.1f MB/s  ·  %@", rate / 1e6,
+                detail = [detail stringByAppendingFormat:@"   %.1f MB/s   %@", rate / 1e6,
                           left >= 60 ? [NSString stringWithFormat:@"%d min %d s left", left / 60, left % 60]
                                      : [NSString stringWithFormat:@"%d s left", left]];
             }
-            [p show:@"Downloading game files" percent:[NSString stringWithFormat:@"%d%%", int(frac * 100)]
+            [p show:@"Downloading game data" percent:[NSString stringWithFormat:@"%d%%", int(frac * 100)]
                 progress:frac detail:detail busy:NO];
         }
         [session finishTasksAndInvalidate];
@@ -245,8 +254,8 @@ extern "C" bool fp_ios_fetch_game(const char* docs) {
         std::fprintf(stderr, "[ios] game download: HTTP %ld, %lld bytes in %.0f s%s%s\n", long(dl.status),
                      (long long)dl.written, CACurrentMediaTime() - start, dl.error ? ", " : "", dl.error ? dl.error.UTF8String : "");
         if (dl.saved) {
-            [p show:@"Installing" percent:nil progress:0 detail:@"Unpacking the game files. This takes a minute." busy:YES];
-            CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.3, false);
+            [p show:@"Installing game data" percent:nil progress:0 detail:@"Unpacking. This takes about a minute." busy:YES];
+            run(0.3);
             return true;
         }
         message = dl.status == 404 ? @"That key did not work. Try again."
