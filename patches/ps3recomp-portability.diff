@@ -1464,3 +1464,126 @@ diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
      if (s_async_wanted >= 0) { s_async_enabled = s_async_wanted; s_async_wanted = -1; }
      static unsigned frames;
      if (s_submit_trace > 0 && ++frames % 120 == 0) {
+diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
+--- a/libs/audio/cellAudio.c
++++ b/libs/audio/cellAudio.c
+@@ -188,6 +188,26 @@
+ int g_audio_jitter_blocks;   /* output delay in blocks, for the stats overlay */
+ unsigned long long g_audio_late_blocks;   /* callbacks where the guest had not delivered a block in time */
+ 
++/* Lifecycle callbacks only publish state. The push worker owns close/reopen,
++ * so UIKit never blocks on an audio thread/device lock. */
++static int s_audio_interrupted;
++static unsigned s_audio_resume_generation;
++void fp_audio_set_interrupted(int paused)
++{
++#if AUDIO_BACKEND_SDL2 && !defined(_WIN32)
++    const int old=__atomic_exchange_n(&s_audio_interrupted,paused!=0,__ATOMIC_ACQ_REL);
++    if(old && !paused) __atomic_add_fetch(&s_audio_resume_generation,1,__ATOMIC_RELEASE);
++#else
++    (void)paused;
++#endif
++}
++void fp_audio_reset_output(void)
++{
++#if AUDIO_BACKEND_SDL2 && !defined(_WIN32)
++    __atomic_add_fetch(&s_audio_resume_generation,1,__ATOMIC_RELEASE);
++#endif
++}
++
+ #if AUDIO_BACKEND_SDL2
+ 
+ static SDL_AudioDeviceID s_sdl_audio_dev = 0;
+@@ -260,6 +280,13 @@
+     if (s_pull) want.callback = audio_sdl_pull;
+ #endif
+ 
++#ifndef _WIN32
++    s_want=want;  /* retained even when activation is currently unavailable */
++    if(!s_pull && __atomic_load_n(&s_audio_interrupted,__ATOMIC_ACQUIRE)) {
++        fprintf(stderr,"[audio-recover] waiting for active application before opening output\n");
++        return 0;
++    }
++#endif
+     s_sdl_audio_dev = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
+ #ifndef _WIN32
+     if (!s_sdl_audio_dev && s_pull) { s_pull = 0; want.callback = NULL; s_sdl_audio_dev = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0); }
+@@ -1184,6 +1211,28 @@
+     return late > 0 ? late : 0;
+ }
+ 
++#if AUDIO_BACKEND_SDL2
++static int audio_push_reopen(void)
++{
++    if(s_sdl_audio_dev) { SDL_CloseAudioDevice(s_sdl_audio_dev); s_sdl_audio_dev=0; }
++    if(!SDL_WasInit(SDL_INIT_AUDIO) && SDL_InitSubSystem(SDL_INIT_AUDIO)<0) return 0;
++    SDL_AudioSpec want=s_want,have;
++    if(!want.freq) {
++        memset(&want,0,sizeof want);want.freq=CELL_AUDIO_SAMPLE_RATE;
++        want.format=AUDIO_F32SYS;want.channels=2;want.samples=CELL_AUDIO_BLOCK_SAMPLES*2;
++    }
++    want.callback=NULL;
++    SDL_AudioDeviceID dev=SDL_OpenAudioDevice(NULL,0,&want,&have,0);
++    if(!dev) return 0;
++    if(__atomic_load_n(&s_audio_interrupted,__ATOMIC_ACQUIRE)) {SDL_CloseAudioDevice(dev);return 0;}
++    s_sdl_audio_dev=dev;s_sdl_have_samples=have.samples;s_want=want;
++    memset(s_limiter_pending,0,sizeof s_limiter_pending);s_limiter_peak=0;s_limiter_gain=1;
++    SDL_PauseAudioDevice(dev,0);
++    fprintf(stderr,"[audio-recover] push output reopened %d Hz, %u frames; stale output cleared\n",have.freq,(unsigned)have.samples);
++    return 1;
++}
++#endif
++
+ static void* audio_mix_thread_func(void* arg)
+ {
+     (void)arg;
+@@ -1208,10 +1257,41 @@
+     unsigned long long mix_count = 0, mix_ns_sum = 0, mix_ns_max = 0;
+     unsigned long long clipped_before = g_audio_clipped_samples, limited_before = g_audio_limited_blocks;
+     unsigned long long nan_before = g_audio_nan_samples;
++    int reset_rate=0;
++#if AUDIO_BACKEND_SDL2
++    unsigned resume_generation=__atomic_load_n(&s_audio_resume_generation,__ATOMIC_ACQUIRE);
++    int reopen_pending=0;
++    unsigned reopen_failures=0;
++#endif
+ 
+     while (s_mix_thread_running) {
+         struct timespec tn; clock_gettime(CLOCK_MONOTONIC, &tn);
+         long long now = (long long)tn.tv_sec * 1000000000ll + tn.tv_nsec;
++#if AUDIO_BACKEND_SDL2
++        if(__atomic_load_n(&s_audio_interrupted,__ATOMIC_ACQUIRE)) {
++            if(s_sdl_audio_dev) {
++                SDL_CloseAudioDevice(s_sdl_audio_dev);s_sdl_audio_dev=0;
++                fprintf(stderr,"[audio-recover] inactive: push output closed\n");
++            }
++            reopen_pending=1;
++            audio_wait_deadline_ns(now+20000000ll);
++            continue;
++        }
++        const unsigned generation=__atomic_load_n(&s_audio_resume_generation,__ATOMIC_ACQUIRE);
++        if(reopen_pending || generation!=resume_generation || !s_sdl_audio_dev) {
++            reopen_pending=1;
++            if(!audio_push_reopen()) {
++                if((reopen_failures++%20)==0) fprintf(stderr,"[audio-recover] reopen pending: %s\n",SDL_GetError());
++                audio_wait_deadline_ns(audio_mono_ns()+250000000ll);
++                continue;
++            }
++            reopen_failures=0;reopen_pending=0;resume_generation=generation;
++            now=audio_mono_ns();t0=now-2*period_ns;blocks=0;last_mix=0;reset_rate=1;
++            wake_count=queue_waits=0;wake_late_sum=wake_late_max=0;
++            mix_count=mix_ns_sum=mix_ns_max=0;
++            clipped_before=g_audio_clipped_samples;limited_before=g_audio_limited_blocks;nan_before=g_audio_nan_samples;
++        }
++#endif
+         long long due = t0 + blocks * period_ns;
+         if (now - due > 50000000ll) {                      /* stalled (suspend, debugger): drop the backlog */
+             t0 = now - blocks * period_ns; due = now;
+@@ -1257,6 +1337,7 @@
+           if (on) { static unsigned long long t0 = 0, n = 0, gaps = 0, silent = 0, qsum = 0, qmax = 0;
+             struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+             unsigned long long now = (unsigned long long)ts.tv_sec * 1000ull + ts.tv_nsec / 1000000ull;
++            if(reset_rate) {t0=0;n=gaps=silent=qsum=qmax=0;reset_rate=0;}
+             if (!t0) t0 = now;
+             n++;
+             { const u32 q = audio_backend_queued_samples(); if (q == 0) gaps++; qsum += q; if (q > qmax) qmax = q; }

@@ -16,6 +16,7 @@
 #include <unistd.h>
 #include <vector>
 #include <zlib.h>
+#include "ios_lifecycle.h"
 
 namespace {
 bool exists(const std::string& p) { struct stat st; return stat(p.c_str(), &st) == 0; }
@@ -162,6 +163,7 @@ extern "C" void fp_ios_prepare(int* argc, char*** argv) {
     if (!exists(docs + "/elf/retail-game-verified.elf") && !has_zip(docs)) fp_ios_fetch_game(docs.c_str());
     import_zip(docs);
     fp_ios_setup_close();
+    fp_ios_lifecycle_start();
     if (!exists(docs + "/elf/retail-game-verified.elf"))
         std::fprintf(stderr, "[ios] no game files: copy game/ and elf/ (or a zip of them) into this folder\n");
     // The same layout run.sh prepares on the desktop.

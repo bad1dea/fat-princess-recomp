@@ -14,6 +14,7 @@
 #endif
 #if defined(__APPLE__) && TARGET_OS_IOS
 #include "ios_touch.h"
+#include "ios_lifecycle.h"
 #else
 struct fp_touch_state { uint32_t buttons; int32_t lx, ly; };
 #endif
@@ -28,6 +29,7 @@ struct fp_touch_state { uint32_t buttons; int32_t lx, ly; };
 #include <filesystem>
 
 namespace {
+std::atomic<unsigned> g_resume_serial{0};
 std::atomic<double> g_pace_hz{60.0};          // rate the game is released and presented at
 std::atomic<long long> g_last_tick_ns{0};     // when the emulated vblank last released the game
 std::atomic<double> g_work_ms{0.0};           // time from that release to the game queueing its next flip
@@ -377,6 +379,15 @@ extern "C" void fp_backend_present(void) {
         return f;
     }();
     const uint32_t flip=cellGcm_flip_request_count();
+    static unsigned resume_serial=0;
+    const unsigned resume=g_resume_serial.load();
+    const bool just_resumed=resume!=resume_serial;
+    if(just_resumed) {
+        resume_serial=resume; last=Clock::now();
+        filled=cursor=window_frames=0; window_ms=window_wait=0;
+        window_submits=0;window_flip0=flip;previous_fifo_ms=fp_fifo_wall_ms;
+        if(!g_d3d12) rsx_vulkan_backend_get_debug_stats(&previous);
+    }
     // Frame cap (FP_FPS_CAP, default 60, 0 = unlimited). Paces presents only; the guest's own
     // 30 Hz simulation step is untouched.
     // AUTO keeps a steady 60 while the machine holds it and falls back to an even 30, never an uneven mix; it goes
@@ -404,6 +415,10 @@ extern "C" void fp_backend_present(void) {
         static auto last_ready=ready,window_start=ready,next_probe=ready+std::chrono::seconds(15);
         static unsigned frames=0,missed=0,bad_windows=0;
         static bool probing=false;static double probe_gap_s=15;
+        if(just_resumed) {
+            last_ready=window_start=ready;frames=missed=bad_windows=0;probing=false;
+            next_probe=ready+std::chrono::seconds(15);
+        }
         if(flip) {
             const double interval=std::chrono::duration<double,std::milli>(ready-last_ready).count();
             const double hz=g_pace_hz.load(),period=1000./hz;
@@ -660,7 +675,7 @@ extern "C" void fp_backend_present(void) {
     const bool duplicate=count && flip==last_flip;
     // A brightness drop is a clue, including legitimate transitions, not a flicker verdict.
     const bool drop=count && previous_luma>=24 && stats.mean_luma*100 < previous_luma*35;
-    if(count) {
+    if(count && !just_resumed) {
         intervals[cursor++ % intervals.size()]=ms;filled=std::min(filled+1,unsigned(intervals.size()));
         window_ms+=ms;window_wait+=wait;window_submits+=submits;++window_frames;
     }
@@ -727,6 +742,9 @@ extern "C" int fp_backend_pump_messages(void) {
     const int result = rsx_vulkan_backend_pump_messages();
 #endif
 #if defined(__APPLE__) && TARGET_OS_IOS
+    // Event pumping is still required while inactive, but menu/trophy redraws
+    // below can upload buffers and wait on GPU fences. Defer those until active.
+    if (!fp_ios_is_active()) return result;
     fp_touch_tick();
     float overlay_area[6];
     fp_touch_overlay_area(overlay_area);
@@ -835,7 +853,7 @@ extern "C" int cellGcm_present_pending(void (*)(void));
 static std::atomic<bool> g_backgrounded{false};
 static int SDLCALL background_watch(void*, SDL_Event* e) {
     if (e->type == SDL_APP_WILLENTERBACKGROUND || e->type == SDL_APP_DIDENTERBACKGROUND) g_backgrounded = true;
-    else if (e->type == SDL_APP_WILLENTERFOREGROUND || e->type == SDL_APP_DIDENTERFOREGROUND) g_backgrounded = false;
+    else if (e->type == SDL_APP_DIDENTERFOREGROUND) g_backgrounded = false;
     return 1;
 }
 
@@ -859,6 +877,30 @@ extern "C" unsigned long fp_run_frame_clock(void (*present)(void)) {
     static const char* poll_env = std::getenv("FP_FRAME_POLL_US");
     const long poll_us = poll_env ? std::atol(poll_env) : 500;
     for (;;) {
+        // UIKit notifications and SDL lifecycle events must be processed BEFORE
+        // walking commands or asking Vulkan to acquire a window image.
+        if (fp_backend_pump_messages() != 0) std::exit(0);
+        auto inactive=[] {
+#if defined(__APPLE__) && TARGET_OS_IOS
+            return g_backgrounded.load() || !fp_ios_is_active();
+#else
+            return g_backgrounded.load();
+#endif
+        };
+        if(inactive()) {
+            const auto paused_at=Clock::now();
+            std::fprintf(stderr,"[fp-host] inactive: rendering paused\n");
+            do {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                if(fp_backend_pump_messages()!=0) std::exit(0);
+            } while(inactive());
+            const auto resumed=Clock::now();
+            std::fprintf(stderr,"[fp-host] active: resumed after %.1f ms; clocks reset\n",
+                         std::chrono::duration<double,std::milli>(resumed-paused_at).count());
+            next=resumed+tick;
+            g_last_tick_ns.store(std::chrono::duration_cast<std::chrono::nanoseconds>(resumed.time_since_epoch()).count());
+            g_work_ms=0;g_resume_serial.fetch_add(1);
+        }
         // Sleep in poll_us steps for the flip queue, but never past the next vblank: wake 150 us early and spin the rest,
         // so the tick lands within microseconds instead of up to a whole poll step late.
         {
@@ -903,16 +945,6 @@ extern "C" unsigned long fp_run_frame_clock(void (*present)(void)) {
         if (!g_d3d12) rsx_vulkan_backend_interp_service();
         cellGcm_present_pending(present);
         if (!cellGcm_flip_request_count()) fp_backend_present();
-        if (fp_backend_pump_messages() != 0) std::exit(0);
-        if (g_backgrounded) {
-            std::fprintf(stderr, "[fp-host] in the background: rendering paused\n");
-            while (g_backgrounded) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(50));
-                if (fp_backend_pump_messages() != 0) std::exit(0);
-            }
-            std::fprintf(stderr, "[fp-host] back in the foreground\n");
-            next = Clock::now() + tick;
-        }
     }
 }
 

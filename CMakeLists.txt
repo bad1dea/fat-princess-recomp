@@ -184,8 +184,9 @@ if(FP_BUILD_GAME)
       target_sources(MyGameRecomp PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/ios_launch.cpp"
                                          "${CMAKE_CURRENT_SOURCE_DIR}/src/ios_touch.mm"
                                          "${CMAKE_CURRENT_SOURCE_DIR}/src/ios_setup.mm"
+                                         "${CMAKE_CURRENT_SOURCE_DIR}/src/ios_lifecycle.mm"
                                          "${CMAKE_CURRENT_SOURCE_DIR}/src/ios_diagnostics.mm")
-      set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/src/ios_touch.mm" "${CMAKE_CURRENT_SOURCE_DIR}/src/ios_setup.mm" "${CMAKE_CURRENT_SOURCE_DIR}/src/ios_diagnostics.mm"
+      set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/src/ios_touch.mm" "${CMAKE_CURRENT_SOURCE_DIR}/src/ios_setup.mm" "${CMAKE_CURRENT_SOURCE_DIR}/src/ios_lifecycle.mm" "${CMAKE_CURRENT_SOURCE_DIR}/src/ios_diagnostics.mm"
         TARGET_DIRECTORY MyGameRecomp
         PROPERTIES LANGUAGE CXX COMPILE_OPTIONS "-xobjective-c++;-fobjc-arc")   # Objective-C++ through the C++ compiler
       # Test builds: base URL the first-run key is appended to when downloading the game files (unset: no download).
