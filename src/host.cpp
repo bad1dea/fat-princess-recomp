@@ -918,6 +918,8 @@ extern "C" unsigned long fp_run_frame_clock(void (*present)(void)) {
 #else
 #include <sys/ucontext.h>
 #include <pthread.h>
+#include <dlfcn.h>
+#include <unordered_set>
 #include <mach-o/dyld.h>
 #endif
 namespace {
@@ -976,6 +978,18 @@ void prof_start() {
                     std::fprintf(m, "base %llx slide %llx\n", (unsigned long long)(uintptr_t)_dyld_get_image_header(0),
                                  (unsigned long long)_dyld_get_image_vmaddr_slide(0));
                     for (auto& t : prof_names) if (uint32_t tid = t.tid.load()) std::fprintf(m, "thread %u %s\n", tid, t.name);
+                    // Samples outside the main image (system libraries, the graphics driver) are named here: the
+                    // symbols of the shared cache are only available on the device.
+                    const uintptr_t main = (uintptr_t)_dyld_get_image_header(0);
+                    std::unordered_set<uint64_t> seen;
+                    for (size_t i = 0; i < n; ++i) {
+                        const uint64_t pc = prof_samples[i].rip;
+                        Dl_info info{};
+                        if (!seen.insert(pc).second || !dladdr((const void*)pc, &info) || (uintptr_t)info.dli_fbase == main) continue;
+                        const char* image = info.dli_fname ? std::strrchr(info.dli_fname, '/') : nullptr;
+                        std::fprintf(m, "pc %llx %s %s\n", (unsigned long long)pc, image ? image + 1 : "?",
+                                     info.dli_sname ? info.dli_sname : "?");
+                    }
                     std::fclose(m);
                 }
 #endif
