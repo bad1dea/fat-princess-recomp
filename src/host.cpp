@@ -977,6 +977,11 @@ void prof_start() {
     setitimer(ITIMER_PROF, &timer, nullptr);
     std::string out = path;
     std::thread([out] {
+#if defined(__APPLE__)
+        std::unordered_set<uint64_t> mapped_pcs;
+        std::vector<std::string> mapped_symbols;
+        size_t mapped_samples = 0;
+#endif
         for (;;) {
             std::this_thread::sleep_for(std::chrono::seconds(15));
             const size_t n = std::min(prof_count.load(), prof_capacity);
@@ -1003,8 +1008,7 @@ void prof_start() {
                     // Samples outside the main image (system libraries, the graphics driver) are named here: the
                     // symbols of the shared cache are only available on the device.
                     const uintptr_t main = (uintptr_t)_dyld_get_image_header(0);
-                    std::unordered_set<uint64_t> seen;
-                    for (size_t i = 0; i < n; ++i) {
+                    for (size_t i = mapped_samples; i < n; ++i) {
                       for (int source = 0; source < 2; ++source) {
                         uint64_t pc = prof_samples[i].rip;
 #if defined(__aarch64__)
@@ -1013,12 +1017,16 @@ void prof_start() {
                         if (source) continue;
 #endif
                         Dl_info info{};
-                        if (!seen.insert(pc).second || !dladdr((const void*)pc, &info) || (uintptr_t)info.dli_fbase == main) continue;
+                        if (!mapped_pcs.insert(pc).second || !dladdr((const void*)pc, &info) || (uintptr_t)info.dli_fbase == main) continue;
                         const char* image = info.dli_fname ? std::strrchr(info.dli_fname, '/') : nullptr;
-                        std::fprintf(m, "pc %llx %s %s\n", (unsigned long long)pc, image ? image + 1 : "?",
-                                     info.dli_sname ? info.dli_sname : "?");
+                        char symbol[4096];
+                        std::snprintf(symbol, sizeof symbol, "pc %llx %s %s\n", (unsigned long long)pc,
+                                      image ? image + 1 : "?", info.dli_sname ? info.dli_sname : "?");
+                        mapped_symbols.emplace_back(symbol);
                       }
                     }
+                    mapped_samples = n;
+                    for (const auto& symbol : mapped_symbols) std::fwrite(symbol.data(), 1, symbol.size(), m);
                     std::fclose(m);
                 }
 #endif
