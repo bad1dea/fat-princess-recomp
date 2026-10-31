@@ -177,7 +177,7 @@ static void fp_trophy_cards_tick() {
         next = std::move(g_trophy_queue.front());
         g_trophy_queue.pop_front();
     }
-    next.second.hint = fp::settings_controller_hints() ? "GUIDE: DETAILS" : "F2: DETAILS";
+    next.second.hint = fp::settings_prompt_text(fp::settings_controller_hints() ? "GUIDE: DETAILS" : "F2: DETAILS");
     const float scale = fp::settings_get("resolution") == "1080P" ? 1.5f : 1.f;
     card_px = fp::trophy_card_pixels(next.second, scale, card_w, card_h, card_r);
     fp_dump_overlay(card_px, card_w, card_h, "trophy");
@@ -694,7 +694,7 @@ extern "C" void fp_backend_present(void) {
         char title[240];
         std::snprintf(title,sizeof title,"Fat Princess - Native | %.1f FPS | %.1f ms%s",fps,window_ms/window_frames,fp::settings_title_suffix().c_str());
         std::string text;
-        if (ai_control) text = "AI CONTROL ACTIVE\nF1 > TOOLS > PLAYER CONTROL\n";
+        if (ai_control) text = fp::settings_prompt_text("AI CONTROL ACTIVE\nF1 > TOOLS > PLAYER CONTROL\n");
         const auto test=fp::self_test_status();
         if(test.running) text+="SELF-TEST "+test.scenario+" "+std::to_string(test.elapsed)+"/"+std::to_string(test.duration)+" S\n";
         if (fp_stats_allowed() && fp::settings_stats_visible()) {
@@ -707,6 +707,7 @@ extern "C" void fp_backend_present(void) {
             // the settings menu, the on-screen keyboard and the trophy screens own the overlay while they are up (clearing it here every
             // half second made the keyboard vanish until the next button press redrew it)
         } else if(!text.empty()) {
+            text=fp::settings_prompt_text(std::move(text));
             unsigned w,h;auto pixels=fp_hud_pixels(text,w,h);
             fp_dump_overlay(pixels,w,h,"stats");
             fp_set_overlay(pixels.data(),w,h,title);

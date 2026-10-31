@@ -2,6 +2,7 @@
 // or for ten seconds after) and the full trophy list (from the details panel or the settings menu). The settings
 // menu's frame routes input here while a screen is open; the host draws trophy_ui_pixels() as the overlay.
 #include "trophy_ui.h"
+#include "settings.h"
 #include "osk_panel.h"
 #include "../third_party/ps3recomp/libs/codec/stb_image.h"
 #include <SDL2/SDL.h>
@@ -134,13 +135,13 @@ std::vector<uint8_t> trophy_ui_pixels(float scale, bool controller, unsigned& w,
         const bool fresh = v.row.unlocked && s.toast_id == id && Clock::now() - s.toast_at < std::chrono::minutes(2);
         v.status = !v.row.unlocked ? "Not earned yet" : fresh ? "Earned just now" : v.row.when_text;
         v.title = title; v.earned = earned; v.total = int(list.size());
-        v.controls = controller ? "CROSS VIEW TROPHIES     CIRCLE CLOSE" : "ENTER VIEW TROPHIES     ESC CLOSE";
+        v.controls = settings_prompt_text(controller ? "CROSS VIEW TROPHIES     CIRCLE CLOSE" : "ENTER VIEW TROPHIES     ESC CLOSE");
         return trophy_detail_pixels(v, scale, w, h, radius);
     }
     TrophyListView v;
     v.title = title; v.earned = earned; v.total = int(list.size()); v.selected = s.selected;
     for (const auto& e : list) { v.rows.push_back(row_of(e)); v.icons.push_back(icon(e.id)); }
-    v.controls = controller ? "UP/DOWN SELECT     CROSS DETAILS     CIRCLE BACK" : "UP/DOWN SELECT     ENTER DETAILS     ESC BACK";
+    v.controls = settings_prompt_text(controller ? "UP/DOWN SELECT     CROSS DETAILS     CIRCLE BACK" : "UP/DOWN SELECT     ENTER DETAILS     ESC BACK");
     return trophy_list_pixels(v, scale, w, h, radius);
 }
 

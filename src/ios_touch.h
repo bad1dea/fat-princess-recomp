@@ -16,6 +16,9 @@ extern "C" {
 void fp_touch_tick(void);                  // main thread, once per frame
 // Main thread: safe content rectangle (normalized) and view size in UIKit points.
 void fp_touch_overlay_area(float area[6]);
+int fp_touch_keyboard_connected(void);
+int fp_touch_controls_visible(void);
+int fp_touch_controller_family(void);     // 0 unknown, 1 PlayStation, 2 Xbox, 3 Nintendo
 void fp_touch_read(fp_touch_state* out);   // any thread
 int fp_touch_take_menu(void);              // 1 once per press of the menu button
 unsigned fp_touch_pad_bits(void);          // held controls as CELL_PAD_CTRL bits (menu navigation)

@@ -245,6 +245,15 @@ extern "C" void fp_touch_tick(void) {
 }
 
 extern "C" int fp_touch_take_menu(void) { return g_menu.exchange(0); }
+extern "C" int fp_touch_keyboard_connected(void) { return GCKeyboard.coalescedKeyboard != nil; }
+extern "C" int fp_touch_controls_visible(void) { return g_view && (!GCController.controllers.count || g_forced_visible); }
+extern "C" int fp_touch_controller_family(void) {
+    NSString* category = GCController.controllers.firstObject.productCategory.lowercaseString;
+    if ([category containsString:@"xbox"]) return 2;
+    if ([category containsString:@"nintendo"] || [category containsString:@"switch"]) return 3;
+    if ([category containsString:@"dual"] || [category containsString:@"playstation"]) return 1;
+    return 0;
+}
 
 extern "C" void fp_touch_overlay_area(float area[6]) {
     const CGRect bounds = g_view.bounds;

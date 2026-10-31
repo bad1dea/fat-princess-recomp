@@ -9,6 +9,7 @@ namespace fp {
 bool settings_menu_frame(std::string& panel_text);
 bool settings_menu_open();
 bool settings_controller_hints();   // the last menu input came from a controller (prompt wording)
+std::string settings_prompt_text(std::string text);   // current touch/controller/keyboard labels
 // The game's text entry (cellOskDialog) is on screen.
 bool settings_osk_active();
 void settings_menu_toggle();

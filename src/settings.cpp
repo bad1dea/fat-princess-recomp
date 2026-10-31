@@ -160,7 +160,7 @@ void init_items() {
     add("VIDEO", "interp", "INTERPOLATION (TEST)", Kind::Choice, "OFF", {"OFF", "2X", "4X"});
     add("VIDEO", "vsync", "VSYNC", Kind::Choice, "ON", {"ON", "ADAPTIVE", "OFF"});
 #if defined(__APPLE__) && TARGET_OS_IOS
-    add("VIDEO", "stats", "FPS PANEL (F3)", Kind::Choice, "OFF", {"OFF", "COMPACT", "DETAILED"});   // too much for a phone screen
+    add("VIDEO", "stats", "FPS PANEL", Kind::Choice, "OFF", {"OFF", "COMPACT", "DETAILED"});   // too much for a phone screen
 #else
     add("VIDEO", "stats", "FPS PANEL (F3)", Kind::Choice, "DETAILED", {"OFF", "COMPACT", "DETAILED"});
 #endif
@@ -708,7 +708,14 @@ char typed_char(SDL_Scancode s, bool shift) {
 
 std::vector<Item*> page_items() {
     std::vector<Item*> out;
-    for (auto& i : menu_items()) if (i.tab == page_id()) out.push_back(&i);
+    for (auto& i : menu_items()) if (i.tab == page_id()) {
+#if defined(__APPLE__) && TARGET_OS_IOS
+        if (!std::strcmp(i.id,"fullscreen")) continue;
+        if (!fp_touch_keyboard_connected() && (i.kind==Kind::Key ||
+            !std::strcmp(i.id,"page_movement") || !std::strcmp(i.id,"page_shoulders"))) continue;
+#endif
+        out.push_back(&i);
+    }
     return out;
 }
 
@@ -1287,7 +1294,18 @@ std::string wrapped(const std::string& text, unsigned max_lines = 2) {
 }
 
 std::string prompt_style() {
+#if defined(__APPLE__) && TARGET_OS_IOS
+    if (fp_touch_controls_visible()) return "PLAYSTATION";
+#endif
     auto style=find("button_prompts")->value;
+#if defined(__APPLE__) && TARGET_OS_IOS
+    if(style=="AUTO") {
+        const int family=fp_touch_controller_family();
+        if(family==1) return "PLAYSTATION";
+        if(family==2) return "XBOX";
+        if(family==3) return "NINTENDO";
+    }
+#endif
 #if SDL_VERSION_ATLEAST(2,0,14)
     if(style=="AUTO") for(int i=0;i<SDL_NumJoysticks();++i) {
         if(!SDL_IsGameController(i) || SDL_JoystickIsVirtual(i)) continue;
@@ -1303,9 +1321,27 @@ std::string prompt_style() {
     return style=="AUTO"?"PLAYSTATION":style;
 }
 std::string format_prompts(std::string out,bool pad) {
+    auto replace=[&](const std::string& from,const std::string& to) {
+        size_t pos=0;while((pos=out.find(from,pos))!=std::string::npos) {out.replace(pos,from.size(),to);pos+=to.size();}
+    };
+    if(pad) {
+        replace("ENTER/CROSS", "CROSS"); replace("ESC/CIRCLE", "CIRCLE");
+        replace("ENTER TO TYPE", "CROSS TO TYPE"); replace("ENTER ACCEPT", "CROSS ACCEPT");
+        replace("ENTER UNBLOCK", "CROSS UNBLOCK");
+        replace("F3 HIDE   F1 MENU", "MENU > DIAGNOSTICS TO HIDE");
+        replace("F2 OR GUIDE", "GUIDE");
+        replace("F1 CLOSE", "SELECT+START CLOSE");
+        replace("F1 >", "SELECT+START >");
+#if defined(__APPLE__) && TARGET_OS_IOS
+        if(fp_touch_controls_visible()) {
+            replace("SELECT+START CLOSE", "MENU CLOSE"); replace("SELECT+START >", "MENU >");
+            replace("GUIDE OPENS IT IN GAME", "OPEN FROM GAME > TROPHIES");
+            replace("GUIDE: DETAILS", "MENU > GAME > TROPHIES");
+        }
+#endif
+    }
     if (pad && find("menu_button")->value!="SELECT+START") {
-        const auto pos=out.find("SELECT+START CLOSE");
-        if(pos!=std::string::npos) out.replace(pos,18,find("menu_button")->value+" CLOSE");
+        replace("SELECT+START",find("menu_button")->value);
     }
     if(pad && prompt_style()!="PLAYSTATION") {
         const bool xbox=prompt_style()=="XBOX";
@@ -1315,7 +1351,8 @@ std::string format_prompts(std::string out,bool pad) {
 #endif
         for(auto replacement:{std::pair<std::string,std::string>{"CROSS",swap?"B":"A"},{"CIRCLE",swap?"A":"B"},
             {"SQUARE",swap?"Y":"X"},{"TRIANGLE",swap?"X":"Y"},{"L1/R1",xbox?"LB/RB":"L/R"},
-            {"SELECT+START CLOSE",xbox?"VIEW+MENU CLOSE":"MINUS+PLUS CLOSE"},{"SELECT CLOSE",xbox?"VIEW CLOSE":"MINUS CLOSE"},
+            {"SELECT+START CLOSE",xbox?"VIEW+MENU CLOSE":"MINUS+PLUS CLOSE"},{"SELECT+START >",xbox?"VIEW+MENU >":"MINUS+PLUS >"},
+            {"SELECT CLOSE",xbox?"VIEW CLOSE":"MINUS CLOSE"},{"SELECT >",xbox?"VIEW >":"MINUS >"},
             {"START DONE",xbox?"MENU DONE":"PLUS DONE"}}) {
             size_t pos=0;while((pos=out.find(replacement.first,pos))!=std::string::npos) { out.replace(pos,replacement.first.size(),replacement.second);pos+=replacement.second.size(); }
         }
@@ -1325,7 +1362,8 @@ std::string format_prompts(std::string out,bool pad) {
 
 std::string render() {
     const std::string heading = fp::player_control_state().ai ? "SETTINGS  AI ACTIVE" : "SETTINGS";
-    std::string out = heading + std::string(54 - heading.size() - 8, ' ') + "F1 CLOSE\n";
+    const std::string close = format_prompts("F1 CLOSE",controller_hints);
+    std::string out = heading + std::string(54 - heading.size() - close.size(), ' ') + close + "\n";
     for (int t = 0; t < kTabCount; ++t) out += t == tab ? std::string("[") + kTabs[t] + "] " : std::string(" ") + kTabs[t] + "  ";
     out += "\n";
     if (page_id()=="ONLINE") {
@@ -1406,6 +1444,7 @@ std::string render() {
 namespace fp {
 bool settings_menu_open() { return is_open; }
 bool settings_controller_hints() { return controller_hints; }
+std::string settings_prompt_text(std::string text) { return format_prompts(std::move(text),controller_hints); }
 
 void settings_menu_toggle() {
     is_open = !is_open;
@@ -1590,13 +1629,26 @@ bool settings_menu_frame(std::string& panel) {
         panel.clear();
         return is_open || osk.active;
     }
+#if defined(__APPLE__) && TARGET_OS_IOS
+    // Touch is the default on a phone. A keyboard only gets keyboard prompts
+    // when one is actually attached; real pad input still overrides it below.
+    static int previous_inputs=-1;
+    int pads=0;
+    for(int i=0;i<SDL_NumJoysticks();++i) if(SDL_IsGameController(i) && !SDL_JoystickIsVirtual(i)) ++pads;
+    const int inputs=(fp_touch_keyboard_connected()?1:0) | (pads?2:0) | (fp_touch_controls_visible()?4:0) |
+                     (fp_touch_controller_family()<<4);
+    if(inputs!=previous_inputs) {controller_hints=!(inputs&1) || (inputs&2);previous_inputs=inputs;dirty=true;}
+    if(!fp_touch_keyboard_connected()) controller_hints=true;
+#endif
     if (osk_frame(panel, keys, focused)) return true;   // the game's text entry owns the overlay while it is up
     if (trophy_frame(panel, keys, focused)) return true;   // so does a trophy screen
     const auto shortcut=find("menu_button")->value;
     const bool combo = shortcut=="SELECT" ? pad_down(CELL_PAD_CTRL_SELECT) : shortcut=="L3" ? pad_down(1u<<1) : shortcut=="R3" ? pad_down(1u<<2) : pad_down(CELL_PAD_CTRL_SELECT) && pad_down(CELL_PAD_CTRL_START);
     bool toggle = (focused && keyedge.down(SDL_SCANCODE_F1, keys)) || (combo && !combo_prev);
 #if defined(__APPLE__) && TARGET_OS_IOS
-    toggle = fp_touch_take_menu() || toggle;
+    const bool touch_menu=fp_touch_take_menu();
+    if(touch_menu) {controller_hints=true;dirty=true;}
+    toggle = touch_menu || toggle;
 #endif
     combo_prev = combo;
     if (toggle) settings_menu_toggle();
@@ -1664,7 +1716,7 @@ bool settings_menu_frame(std::string& panel) {
                 confirm_action = {}; dirty = true;
                 if (action) action();
             }
-            panel = render(); dirty = false; return true;
+            panel = format_prompts(render(),controller_hints); dirty = false; return true;
         }
         if (friends_page()) friends_nav(nav, keys, focused);
         else {
@@ -1690,7 +1742,7 @@ bool settings_menu_frame(std::string& panel) {
     }
     if (!dirty) { panel.clear(); return true; }
     dirty = false;
-    panel = render();
+    panel = format_prompts(render(),controller_hints);
     return true;
 }
 }  // namespace fp
@@ -1703,8 +1755,10 @@ KeyboardView settings_keyboard_view() {
     view.row=osk.cy;view.column=osk.cx;view.upper=osk.upper;view.symbols=osk.symbols;
     auto prompt=osk.prompt;for(char& c:prompt)c=char(std::toupper(static_cast<unsigned char>(c)));
     view.secret=prompt.find("PASSWORD")!=std::string::npos;
-    view.controls=format_prompts("CROSS SELECT   CIRCLE DELETE   TRIANGLE SHIFT   START DONE",true);
-    view.hint="L1/R1 SYMBOLS   ESC CANCEL   TYPE OR CTRL+V TO PASTE";
+    view.controls=controller_hints ? format_prompts("CROSS SELECT   CIRCLE DELETE   TRIANGLE SHIFT   START DONE",true)
+                                 : "ARROWS MOVE   ENTER SELECT   BACKSPACE DELETE";
+    view.hint=controller_hints ? format_prompts("L1/R1 SYMBOLS   CIRCLE DELETE/BACK",true)
+                              : "ESC CANCEL   TYPE OR CTRL+V TO PASTE";
     return view;
 }
 }
