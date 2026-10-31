@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <sys/utsname.h>
+#include <mach-o/dyld.h>
 #include <map>
 #include <algorithm>
 #include <vector>
@@ -37,9 +38,9 @@ static NSData* tailFile(NSString* path, NSUInteger limit) {
     NSData* body = [NSData dataWithContentsOfFile:pending];
     if (!body) {
         struct utsname hardware; uname(&hardware);
-        NSString* header = [NSString stringWithFormat:@"device: %s\nos: %@\nbuild: %@\ntime: %@\n\n", hardware.machine,
+        NSString* header = [NSString stringWithFormat:@"device: %s\nos: %@\nbuild: %@\ntime: %@\nbase %llx\n\n", hardware.machine,
             NSProcessInfo.processInfo.operatingSystemVersionString,
-            [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"unknown", NSDate.date];
+            [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"unknown", NSDate.date, (unsigned long long)(uintptr_t)_dyld_get_image_header(0)];
         NSMutableData* snapshot = [[header dataUsingEncoding:NSUTF8StringEncoding] mutableCopy];
         [snapshot appendData:tailFile([self.docs stringByAppendingPathComponent:@"play.log"], 512 * 1024)];
         [snapshot appendData:[@"\n\nPROFILE MAPS\n" dataUsingEncoding:NSUTF8StringEncoding]];
