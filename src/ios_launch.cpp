@@ -191,6 +191,13 @@ extern "C" void fp_ios_prepare(int* argc, char*** argv) {
         std::fclose(f);
     }
     for (const auto& e : env) setenv(e.key, e.value.c_str(), 0);
+    // Keep ordinary remote log captures free of CPU sampling and profile-file writes.
+    // FP_PROF_ENABLE=1 plus FP_PROF opts back into instruction sampling.
+    const char* profile_enabled = std::getenv("FP_PROF_ENABLE");
+    if (!profile_enabled || std::strcmp(profile_enabled, "1") != 0) {
+        unsetenv("FP_PROF");
+        std::fprintf(stderr, "[ios] CPU sampler disabled; diagnostic log uploads remain enabled\n");
+    }
     fp_ios_diagnostics_start(docs.c_str());
     fp_prof_start();
     // SDL's window only finds MoltenVK through an explicit path; it ships inside the app bundle.
