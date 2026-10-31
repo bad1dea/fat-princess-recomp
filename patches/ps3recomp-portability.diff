@@ -771,3 +771,39 @@ diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
          s_sdl_audio_dev = dev; s_sdl_have_samples = have.samples;
          SDL_PauseAudioDevice(dev, 0);
          fprintf(stderr, "[audio-adapt] callbacks arrived late, device buffer now %d block(s) = %.1f ms\n", s_buf_blocks,
+diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
+--- a/libs/audio/cellAudio.c
++++ b/libs/audio/cellAudio.c
+@@ -522,6 +522,7 @@
+  * guest, which only writes when the index moves, and made it later still (response p50 2.7 -> 9.6 ms). */
+ /* Blocks of the main port the guest wrote as all zeros while the port was playing (producer output, not lateness). */
+ static unsigned long long g_audio_zero_blocks;
++static unsigned long long g_audio_unwritten_blocks;
+ static int s_sent = -1;
+ static int s_port_recent[CELL_AUDIO_PORT_MAX];
+ static int s_stall_run[CELL_AUDIO_PORT_MAX];
+@@ -749,7 +750,10 @@
+             s_mix_buffer[s * 2 + 1] += right;
+         }
+ 
+-        if (p == 0 && s_port_recent[p] > 0 && audio_block_all(src, nfloats, 0)) g_audio_zero_blocks++;
++        if (p == 0 && s_port_recent[p] > 0) {
++            if (audio_block_all(src, nfloats, 0)) g_audio_zero_blocks++;
++            else if (audio_sent_on() && audio_block_all(src, nfloats, 0x80u)) g_audio_unwritten_blocks++;
++        }
+         if (!audio_block_silent(src, nfloats)) s_port_recent[p] = 64;
+         else if (s_port_recent[p] > 0) s_port_recent[p]--;
+ 
+@@ -1064,10 +1068,10 @@
+         const double p99 = nerr ? err_us[(unsigned)(nerr * 0.99)] : 0.0, pmax = nerr ? err_us[nerr - 1] : 0.0;
+         fprintf(stderr, "[audio-rate] pull %.1f blocks/s (real time 187.5), callback period %.2f ms, timing error p99 %.2f ms max %.2f ms, "
+                 "mix in callback avg %.2f max %.2f ms, silent callbacks %.0f%%, game-late (held) ring blocks so far %llu, "
+-                "guest writes avg %.1f blocks ahead of read index, output underruns so far %llu, guest-written zero blocks so far %llu, idle give-ups %llu, SDL buffer %.1f ms, clipped samples so far %llu, limited blocks so far %llu, NaN samples so far %llu\n",
++                "guest writes avg %.1f blocks ahead of read index, output underruns so far %llu, guest-written zero blocks so far %llu, untouched blocks so far %llu (marker=%d), idle give-ups %llu, SDL buffer %.1f ms, clipped samples so far %llu, limited blocks so far %llu, NaN samples so far %llu\n",
+                 nblk * 1e9 / (double)(t_out - win_t0), period_us / 1000.0, p99 / 1000.0, pmax / 1000.0,
+                 cb ? mix_sum / cb / 1000.0 : 0.0, mix_max / 1000.0, cb ? 100.0 * silent / cb : 0.0, g_audio_ring_dropouts,
+-                ahead_n ? ahead_sum / ahead_n : 0.0, underruns, g_audio_zero_blocks, s_n_stall_giveup, AUDIO_DEV_BUF_MS,
++                ahead_n ? ahead_sum / ahead_n : 0.0, underruns, g_audio_zero_blocks, g_audio_unwritten_blocks, audio_sent_on(), s_n_stall_giveup, AUDIO_DEV_BUF_MS,
+                 g_audio_clipped_samples, g_audio_limited_blocks, g_audio_nan_samples);
+         if (g_audio_ch_n) {
+             static const char* const cn[8] = {"L","R","C","LFE","RL","RR","SL","SR"};
