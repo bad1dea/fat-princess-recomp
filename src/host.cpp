@@ -1023,17 +1023,7 @@ void prof_start() {
                 }
 #endif
                 if (FILE* in = std::fopen("/proc/self/maps", "r")) {
-    #if defined(__aarch64__)
-                if (prof_callers) {
-                    const std::string callers = out + ".callers";
-                    if (FILE* c = std::fopen((callers + ".tmp").c_str(), "wb")) {
-                        std::fwrite(prof_callers, sizeof(ProfSample), n, c);
-                        std::fclose(c);
-                        std::rename((callers + ".tmp").c_str(), callers.c_str());
-                    }
-                }
-#endif
-                if (FILE* m = std::fopen((out + ".maps").c_str(), "w")) {
+                    if (FILE* m = std::fopen((out + ".maps").c_str(), "w")) {
                         char buf[4096]; size_t got;
                         while ((got = std::fread(buf, 1, sizeof buf, in)) > 0) std::fwrite(buf, 1, got, m);
                         std::fclose(m);
