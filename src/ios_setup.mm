@@ -104,6 +104,10 @@ static UIColor* fp_rgb(int r, int g, int b) { return [UIColor colorWithRed:r / 2
     self.detail = [self label:[UIFont monospacedDigitSystemFontOfSize:13 weight:UIFontWeightRegular] color:text];
     self.note = [self label:[UIFont monospacedSystemFontOfSize:12 weight:UIFontWeightRegular] color:muted];
     self.note.text = @"Keep the app open until this finishes.";
+    UILabel* credit = [self label:[UIFont monospacedSystemFontOfSize:12 weight:UIFontWeightRegular] color:muted];
+    credit.text = @"by khuong";
+    credit.translatesAutoresizingMaskIntoConstraints = NO;
+    [self.view addSubview:credit];
 
     UIStackView* stack = [[UIStackView alloc] initWithArrangedSubviews:@[head, divider, self.bar, self.detail, self.note]];
     stack.axis = UILayoutConstraintAxisVertical;
@@ -125,6 +129,8 @@ static UIColor* fp_rgb(int r, int g, int b) { return [UIColor colorWithRed:r / 2
         [stack.widthAnchor constraintGreaterThanOrEqualToConstant:260],
         [stack.widthAnchor constraintLessThanOrEqualToConstant:440],
         [stack.trailingAnchor constraintLessThanOrEqualToAnchor:safe.trailingAnchor constant:-32],
+        [credit.trailingAnchor constraintEqualToAnchor:safe.trailingAnchor constant:-32],
+        [credit.lastBaselineAnchor constraintEqualToAnchor:self.note.lastBaselineAnchor],
     ]];
     [self show:@"Game data needed" percent:nil progress:0 detail:@"" busy:NO];
 }
