@@ -926,6 +926,9 @@ namespace {
 constexpr size_t prof_capacity = 1u << 22;
 struct ProfSample { uint32_t tid; uint32_t us; uint64_t rip; };   // us: steady clock microseconds, low 32 bits
 ProfSample* prof_samples;
+#if defined(__APPLE__) && defined(__aarch64__)
+ProfSample* prof_callers;
+#endif
 std::atomic<size_t> prof_count{0};
 #if defined(__linux__)
 uint32_t prof_tid() { return uint32_t(syscall(SYS_gettid)); }
@@ -953,11 +956,20 @@ void prof_handler(int, siginfo_t*, void* uc) {
     if (i >= prof_capacity) return;
     timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
     prof_samples[i] = {prof_tid(), uint32_t(ts.tv_sec * 1000000ull + ts.tv_nsec / 1000), prof_pc(uc)};
+#if defined(__APPLE__) && defined(__aarch64__)
+    // LR names the interrupted function's return site without walking a live stack.
+    // Remove pointer authentication bits from the saved ARM64 return address.
+    if (prof_callers) prof_callers[i] = {prof_samples[i].tid, prof_samples[i].us,
+        uint64_t(static_cast<ucontext_t*>(uc)->uc_mcontext->__ss.__lr) & 0x0000ffffffffffffull};
+#endif
 }
 void prof_start() {
     const char* path = std::getenv("FP_PROF");
     if (!path || !*path || prof_samples) return;
     prof_samples = static_cast<ProfSample*>(calloc(prof_capacity, sizeof(ProfSample)));
+#if defined(__APPLE__) && defined(__aarch64__)
+    prof_callers = static_cast<ProfSample*>(calloc(prof_capacity, sizeof(ProfSample)));
+#endif
     struct sigaction sa{};
     sa.sa_sigaction = prof_handler; sa.sa_flags = SA_SIGINFO | SA_RESTART;
     sigaction(SIGPROF, &sa, nullptr);
@@ -974,6 +986,16 @@ void prof_start() {
                 std::fclose(f);
                 std::rename(tmp.c_str(), out.c_str());
 #if defined(__APPLE__)
+#if defined(__aarch64__)
+                if (prof_callers) {
+                    const std::string callers = out + ".callers";
+                    if (FILE* c = std::fopen((callers + ".tmp").c_str(), "wb")) {
+                        std::fwrite(prof_callers, sizeof(ProfSample), n, c);
+                        std::fclose(c);
+                        std::rename((callers + ".tmp").c_str(), callers.c_str());
+                    }
+                }
+#endif
                 if (FILE* m = std::fopen((out + ".maps").c_str(), "w")) {
                     std::fprintf(m, "base %llx slide %llx\n", (unsigned long long)(uintptr_t)_dyld_get_image_header(0),
                                  (unsigned long long)_dyld_get_image_vmaddr_slide(0));
@@ -983,18 +1005,35 @@ void prof_start() {
                     const uintptr_t main = (uintptr_t)_dyld_get_image_header(0);
                     std::unordered_set<uint64_t> seen;
                     for (size_t i = 0; i < n; ++i) {
-                        const uint64_t pc = prof_samples[i].rip;
+                      for (int source = 0; source < 2; ++source) {
+                        uint64_t pc = prof_samples[i].rip;
+#if defined(__aarch64__)
+                        if (source) { if (!prof_callers) continue; pc = prof_callers[i].rip; }
+#else
+                        if (source) continue;
+#endif
                         Dl_info info{};
                         if (!seen.insert(pc).second || !dladdr((const void*)pc, &info) || (uintptr_t)info.dli_fbase == main) continue;
                         const char* image = info.dli_fname ? std::strrchr(info.dli_fname, '/') : nullptr;
                         std::fprintf(m, "pc %llx %s %s\n", (unsigned long long)pc, image ? image + 1 : "?",
                                      info.dli_sname ? info.dli_sname : "?");
+                      }
                     }
                     std::fclose(m);
                 }
 #endif
                 if (FILE* in = std::fopen("/proc/self/maps", "r")) {
-                    if (FILE* m = std::fopen((out + ".maps").c_str(), "w")) {
+    #if defined(__aarch64__)
+                if (prof_callers) {
+                    const std::string callers = out + ".callers";
+                    if (FILE* c = std::fopen((callers + ".tmp").c_str(), "wb")) {
+                        std::fwrite(prof_callers, sizeof(ProfSample), n, c);
+                        std::fclose(c);
+                        std::rename((callers + ".tmp").c_str(), callers.c_str());
+                    }
+                }
+#endif
+                if (FILE* m = std::fopen((out + ".maps").c_str(), "w")) {
                         char buf[4096]; size_t got;
                         while ((got = std::fread(buf, 1, sizeof buf, in)) > 0) std::fwrite(buf, 1, got, m);
                         std::fclose(m);

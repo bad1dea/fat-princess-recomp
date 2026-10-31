@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <vector>
 #include <cstdint>
+#include <tuple>
+#include <string>
 
 #ifdef FP_REPORT_URL
 static NSData* tailFile(NSString* path, NSUInteger limit) {
@@ -45,11 +47,29 @@ static NSData* tailFile(NSString* path, NSUInteger limit) {
         if (prof) {
             struct Sample { uint32_t tid, us; uint64_t pc; };
             std::map<std::pair<uint32_t, uint64_t>, size_t> counts;
+            std::map<std::tuple<uint32_t, uint64_t, uint64_t>, size_t> callers;
+            FILE* callerFile = fopen((std::string(prof) + ".callers").c_str(), "rb");
             if (FILE* file = fopen(prof, "rb")) {
                 Sample sample;
-                while (fread(&sample, sizeof sample, 1, file) == 1) ++counts[{sample.tid, sample.pc}];
+                while (fread(&sample, sizeof sample, 1, file) == 1) {
+                    ++counts[{sample.tid, sample.pc}];
+                    Sample caller;
+                    if (callerFile && fread(&caller, sizeof caller, 1, callerFile) == 1 && caller.tid == sample.tid && caller.us == sample.us)
+                        ++callers[{sample.tid, sample.pc, caller.pc}];
+                }
                 fclose(file);
             }
+            if (callerFile) fclose(callerFile);
+            std::vector<std::pair<size_t, std::tuple<uint32_t, uint64_t, uint64_t>>> callerRanks;
+            for (const auto& entry : callers) callerRanks.push_back({entry.second, entry.first});
+            std::sort(callerRanks.rbegin(), callerRanks.rend());
+            NSMutableString* callerSummary = [NSMutableString stringWithString:@"\nCALLER COUNTS (count tid pc lr)\n"];
+            for (size_t i = 0; i < std::min(size_t(2048), callerRanks.size()); ++i) {
+                const auto& entry = callerRanks[i];
+                [callerSummary appendFormat:@"%zu %u %llx %llx\n", entry.first, std::get<0>(entry.second),
+                    (unsigned long long)std::get<1>(entry.second), (unsigned long long)std::get<2>(entry.second)];
+            }
+            [snapshot appendData:[callerSummary dataUsingEncoding:NSUTF8StringEncoding]];
             std::vector<std::pair<size_t, std::pair<uint32_t, uint64_t>>> ranked;
             for (const auto& entry : counts) ranked.push_back({entry.second, entry.first});
             std::sort(ranked.rbegin(), ranked.rend());
