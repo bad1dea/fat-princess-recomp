@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <dirent.h>
+#include <fcntl.h>
 #include <mach-o/dyld.h>
 #include <string>
 #include <sys/stat.h>
@@ -148,8 +149,13 @@ extern "C" void fp_ios_prepare(int* argc, char*** argv) {
     if (!home) return;
     static std::string docs = std::string(home) + "/Documents";
     if (chdir(docs.c_str()) != 0) return;
-    std::freopen((docs + "/play.log").c_str(), "w", stderr);
-    std::freopen((docs + "/play.log").c_str(), "a", stdout);
+    const int log_fd = open((docs + "/play.log").c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_APPEND, 0600);
+    if (log_fd >= 0) {
+        std::fflush(stdout); std::fflush(stderr);
+        dup2(log_fd, STDERR_FILENO); dup2(log_fd, STDOUT_FILENO);
+        if (log_fd != STDOUT_FILENO && log_fd != STDERR_FILENO) close(log_fd);
+        std::clearerr(stdout); std::clearerr(stderr);
+    }
     setvbuf(stderr, nullptr, _IONBF, 0);
     setvbuf(stdout, nullptr, _IONBF, 0);
     std::fprintf(stderr, "[ios] documents %s\n", docs.c_str());

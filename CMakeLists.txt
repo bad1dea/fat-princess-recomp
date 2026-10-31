@@ -199,7 +199,7 @@ if(FP_BUILD_GAME)
         set_property(SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/ios_diagnostics.mm" TARGET_DIRECTORY MyGameRecomp APPEND PROPERTY
           COMPILE_DEFINITIONS "FP_REPORT_URL=\"${FP_REPORT_URL}\"")
       endif()
-      target_link_libraries(MyGameRecomp PRIVATE "-framework UIKit" "-framework GameController" "-framework QuartzCore")
+      target_link_libraries(MyGameRecomp PRIVATE "-framework UIKit" "-framework GameController" "-framework QuartzCore" "-framework AVFAudio")
       if(TARGET SDL2::SDL2main)
         target_link_libraries(MyGameRecomp PRIVATE SDL2::SDL2main)
       endif()

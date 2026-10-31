@@ -1,5 +1,6 @@
 // Diagnostic snapshots for iOS test builds. Network work stays off the game thread.
 #import <UIKit/UIKit.h>
+#import <AVFAudio/AVFAudio.h>
 #include <cstdio>
 #include <cstdlib>
 #include <sys/utsname.h>
@@ -41,6 +42,13 @@ static NSData* tailFile(NSString* path, NSUInteger limit) {
         NSString* header = [NSString stringWithFormat:@"device: %s\nos: %@\nbuild: %@\ntime: %@\nbase %llx\n\n", hardware.machine,
             NSProcessInfo.processInfo.operatingSystemVersionString,
             [NSBundle.mainBundle objectForInfoDictionaryKey:@"CFBundleVersion"] ?: @"unknown", NSDate.date, (unsigned long long)(uintptr_t)_dyld_get_image_header(0)];
+        AVAudioSession* audio = AVAudioSession.sharedInstance;
+        NSMutableArray<NSString*>* routes = [NSMutableArray array];
+        for (AVAudioSessionPortDescription* port in audio.currentRoute.outputs) [routes addObject:port.portType];
+        header = [header stringByAppendingFormat:@"thermal: %ld\nlow-power: %d\naudio-hz: %.0f\naudio-io-ms: %.3f\naudio-output-latency-ms: %.3f\naudio-route: %@\naudio-category: %@\naudio-mode: %@\n\n",
+            (long)NSProcessInfo.processInfo.thermalState, (int)NSProcessInfo.processInfo.lowPowerModeEnabled,
+            audio.sampleRate, audio.IOBufferDuration * 1000.0, audio.outputLatency * 1000.0,
+            [routes componentsJoinedByString:@","], audio.category, audio.mode];
         NSMutableData* snapshot = [[header dataUsingEncoding:NSUTF8StringEncoding] mutableCopy];
         [snapshot appendData:tailFile([self.docs stringByAppendingPathComponent:@"play.log"], 512 * 1024)];
         [snapshot appendData:[@"\n\nPROFILE MAPS\n" dataUsingEncoding:NSUTF8StringEncoding]];
