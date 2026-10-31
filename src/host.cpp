@@ -876,6 +876,18 @@ extern "C" unsigned long fp_run_frame_clock(void (*present)(void)) {
     // Default polls every 500 us; FP_FRAME_POLL_US=0 yields instead.
     static const char* poll_env = std::getenv("FP_FRAME_POLL_US");
     const long poll_us = poll_env ? std::atol(poll_env) : 500;
+#if defined(__APPLE__) && TARGET_OS_IOS
+    unsigned native_resume=fp_ios_resume_generation();
+#endif
+    auto reset_clocks=[&] {
+        const auto resumed=Clock::now();
+        next=resumed+tick;
+        g_last_tick_ns.store(std::chrono::duration_cast<std::chrono::nanoseconds>(resumed.time_since_epoch()).count());
+        g_work_ms=0;g_resume_serial.fetch_add(1);
+#if defined(__APPLE__) && TARGET_OS_IOS
+        native_resume=fp_ios_resume_generation();
+#endif
+    };
     for (;;) {
         // UIKit notifications and SDL lifecycle events must be processed BEFORE
         // walking commands or asking Vulkan to acquire a window image.
@@ -897,10 +909,14 @@ extern "C" unsigned long fp_run_frame_clock(void (*present)(void)) {
             const auto resumed=Clock::now();
             std::fprintf(stderr,"[fp-host] active: resumed after %.1f ms; clocks reset\n",
                          std::chrono::duration<double,std::milli>(resumed-paused_at).count());
-            next=resumed+tick;
-            g_last_tick_ns.store(std::chrono::duration_cast<std::chrono::nanoseconds>(resumed.time_since_epoch()).count());
-            g_work_ms=0;g_resume_serial.fetch_add(1);
+            reset_clocks();
         }
+#if defined(__APPLE__) && TARGET_OS_IOS
+        else if(native_resume!=fp_ios_resume_generation()) {
+            std::fprintf(stderr,"[fp-host] system UI cycle completed inside event pump; clocks reset\n");
+            reset_clocks();
+        }
+#endif
         // Sleep in poll_us steps for the flip queue, but never past the next vblank: wake 150 us early and spin the rest,
         // so the tick lands within microseconds instead of up to a whole poll step late.
         {

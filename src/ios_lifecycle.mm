@@ -10,10 +10,13 @@ extern "C" void fp_audio_reset_output(void);
 namespace {
 enum { Inactive = 1, Background = 2, AudioInterrupted = 4 };
 std::atomic<unsigned> reasons{Inactive};
+std::atomic<unsigned> resume_generation{0};
 
 void update(unsigned set, unsigned clear, const char* event) {
-    const unsigned state = (reasons.load() | set) & ~clear;
+    const unsigned previous = reasons.load();
+    const unsigned state = (previous | set) & ~clear;
     reasons.store(state);
+    if ((previous & (Inactive | Background)) && !(state & (Inactive | Background))) resume_generation.fetch_add(1);
     fp_audio_set_interrupted(state != 0);
     std::fprintf(stderr, "[ios-state] %s active=%d audio-paused=%d reasons=%u\n",
                  event, !(state & (Inactive | Background)), state != 0, state);
@@ -23,6 +26,7 @@ void update(unsigned set, unsigned clear, const char* event) {
 extern "C" int fp_ios_is_active(void) {
     return !(reasons.load() & (Inactive | Background));
 }
+extern "C" unsigned fp_ios_resume_generation(void) { return resume_generation.load(); }
 
 extern "C" void fp_ios_lifecycle_start(void) {
     static NSMutableArray* observers;
@@ -48,6 +52,7 @@ extern "C" void fp_ios_lifecycle_start(void) {
         std::fprintf(stderr, "[ios-state] audio-media-services-reset\n");
     });
     observe(UIApplicationUserDidTakeScreenshotNotification, ^(NSNotification*) {
+        resume_generation.fetch_add(1);   // capture/UI work can block an entire event-pump call
         std::fprintf(stderr, "[ios-state] screenshot active=%d\n", fp_ios_is_active());
     });
     const UIApplicationState state = UIApplication.sharedApplication.applicationState;
