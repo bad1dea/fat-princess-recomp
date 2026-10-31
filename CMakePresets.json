@@ -20,6 +20,16 @@
       }
     },
     {
+      "name": "win-clang-cl-arm64",
+      "displayName": "Windows ARM64, Visual Studio clang-cl, vcpkg libraries",
+      "inherits": "win-clang-cl",
+      "binaryDir": "${sourceDir}/build/win-clang-cl-arm64",
+      "architecture": { "value": "arm64", "strategy": "external" },
+      "cacheVariables": {
+        "VCPKG_TARGET_TRIPLET": "arm64-windows-static-md"
+      }
+    },
+    {
       "name": "win-clang-cl-sdk",
       "displayName": "Windows x64, Visual Studio clang-cl, libraries from SDL2 VC zip, Vulkan SDK and a glslang build",
       "inherits": "win-clang-cl",
@@ -34,6 +44,7 @@
   ],
   "buildPresets": [
     { "name": "win-clang-cl", "configurePreset": "win-clang-cl", "targets": ["MyGameRecomp"] },
+    { "name": "win-clang-cl-arm64", "configurePreset": "win-clang-cl-arm64", "targets": ["MyGameRecomp"] },
     { "name": "win-clang-cl-sdk", "configurePreset": "win-clang-cl-sdk", "targets": ["MyGameRecomp"] }
   ]
 }

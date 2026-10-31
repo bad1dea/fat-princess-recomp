@@ -5,7 +5,8 @@ Builds fp_native.exe on Windows 11 with Visual Studio's clang-cl. One command, f
 
 Steps: check Visual Studio and its components, load the VS developer environment, fetch SDL2/zlib/glslang/Vulkan headers
 with vcpkg into build\deps, configure the CMake preset win-clang-cl, build MyGameRecomp, collect the result in
-dist\fat-princess-windows-vs. Log: build\vs-build.log.
+dist\fat-princess-windows-vs. Log: build\vs-build.log. On an ARM64 PC (Snapdragon) the same command builds a native
+ARM64 exe: preset win-clang-cl-arm64, result in dist\fat-princess-windows-arm64-vs.
 
   -Clean        delete build\win-clang-cl first
   -SkipDeps     do not run vcpkg (libraries already installed by an earlier run)
@@ -25,6 +26,10 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+$arm64 = ($env:PROCESSOR_ARCHITECTURE -eq 'ARM64') -or ($env:PROCESSOR_ARCHITEW6432 -eq 'ARM64')
+$arch = if ($arm64) { 'arm64' } else { 'x64' }
+$preset = if ($arm64) { 'win-clang-cl-arm64' } else { 'win-clang-cl' }
+$toolsId = if ($arm64) { 'Microsoft.VisualStudio.Component.VC.Tools.ARM64' } else { 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64' }
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 Set-Location $root
 New-Item -ItemType Directory -Force -Path (Join-Path $root 'build') | Out-Null
@@ -80,7 +85,7 @@ $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer
 if (-not (Test-Path $vswhere)) {
     Fail 'Visual Studio is not installed (vswhere.exe not found). Install Visual Studio 2022 Community: https://visualstudio.microsoft.com/downloads/  and tick "Desktop development with C++".'
 }
-$vsPath = (& $vswhere -latest -products '*' -requires 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64' -property installationPath | Select-Object -First 1)
+$vsPath = (& $vswhere -latest -products '*' -requires $toolsId -property installationPath | Select-Object -First 1)
 if (-not $vsPath) {
     $vsAny = (& $vswhere -latest -products '*' -property installationPath | Select-Object -First 1)
     if (-not $vsAny) { Fail 'vswhere finds no Visual Studio installation.' }
@@ -89,7 +94,7 @@ if (-not $vsPath) {
 Say ("  Visual Studio: $vsPath")
 
 $components = @(
-    @{ Id = 'Microsoft.VisualStudio.Component.VC.Tools.x86.x64'; Name = 'MSVC x64/x86 build tools' },
+    @{ Id = $toolsId; Name = ('MSVC ' + $arch + ' build tools') },
     @{ Id = 'Microsoft.VisualStudio.Component.VC.Llvm.Clang'; Name = 'C++ Clang compiler for Windows' },
     @{ Id = 'Microsoft.VisualStudio.Component.VC.Llvm.ClangToolset'; Name = 'MSBuild support for LLVM (clang-cl) toolset' },
     @{ Id = 'Microsoft.VisualStudio.Component.VC.CMake.Project'; Name = 'C++ CMake tools for Windows' },
@@ -131,9 +136,9 @@ if ($missing.Count -gt 0) {
     }
 }
 
-Say '== Loading the Visual Studio x64 developer environment'
-$vcvars = Join-Path $vsPath 'VC\Auxiliary\Build\vcvars64.bat'
-if (-not (Test-Path $vcvars)) { Fail ("vcvars64.bat not found under $vsPath") }
+Say ('== Loading the Visual Studio ' + $arch + ' developer environment')
+$vcvars = Join-Path $vsPath ('VC\Auxiliary\Build\' + $(if ($arm64) { 'vcvarsarm64.bat' } else { 'vcvars64.bat' }))
+if (-not (Test-Path $vcvars)) { Fail ("$(Split-Path -Leaf $vcvars) not found under $vsPath") }
 $tmpCmd = Join-Path $env:TEMP 'fp_vcvars.cmd'
 Set-Content -Path $tmpCmd -Encoding ASCII -Value @('@echo off', ('call "' + $vcvars + '" >nul 2>&1'), 'set')
 $envDump = & cmd.exe /c $tmpCmd
@@ -143,12 +148,14 @@ foreach ($line in $envDump) {
     if ($i -gt 0) { Set-Item -Path ('Env:' + $line.Substring(0, $i)) -Value $line.Substring($i + 1) }
 }
 $extra = @(
-    (Join-Path $vsPath 'VC\Tools\Llvm\x64\bin'),
+    (Join-Path $vsPath ('VC\Tools\Llvm\' + $(if ($arm64) { 'ARM64' } else { 'x64' }) + '\bin')),
     (Join-Path $vsPath 'VC\Tools\Llvm\bin'),
     (Join-Path $vsPath 'Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin'),
     (Join-Path $vsPath 'Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja')
 )
 foreach ($e in $extra) {
+    # Llvm\bin holds the 32-bit x86 clang-cl; prepended after Llvm\ARM64\bin it would win on an ARM64 PC.
+    if ($arm64 -and $e -eq (Join-Path $vsPath 'VC\Tools\Llvm\bin')) { continue }
     if (Test-Path $e) { $env:PATH = $e + ';' + $env:PATH }
 }
 foreach ($tool in @('clang-cl', 'cmake', 'ninja')) {
@@ -160,7 +167,7 @@ foreach ($tool in @('clang-cl', 'cmake', 'ninja')) {
 Say '== Libraries (vcpkg)'
 $depsDir = Join-Path $root 'build\deps'
 $vcpkgRoot = Join-Path $depsDir 'vcpkg'
-$triplet = 'x64-windows-static-md'
+$triplet = $arch + '-windows-static-md'
 $env:VCPKG_ROOT = $vcpkgRoot
 $env:VCPKG_DISABLE_METRICS = '1'
 if (-not $SkipDeps) {
@@ -197,12 +204,12 @@ if ($env:VULKAN_SDK) {
 }
 
 Say '== Configure'
-$buildDir = Join-Path $root 'build\win-clang-cl'
+$buildDir = Join-Path $root ('build\' + $preset)
 if ($Clean -and (Test-Path $buildDir)) {
-    Say '  -Clean: removing build\win-clang-cl'
+    Say ('  -Clean: removing build\' + $preset)
     Remove-Item -Recurse -Force $buildDir
 }
-$code = Run 'cmake' @('--preset', 'win-clang-cl', ('-DCMAKE_BUILD_TYPE=' + $Config), ('-DPS3RECOMP_VULKAN_INCLUDE_DIR=' + $vkInclude))
+$code = Run 'cmake' @('--preset', $preset, ('-DCMAKE_BUILD_TYPE=' + $Config), ('-DPS3RECOMP_VULKAN_INCLUDE_DIR=' + $vkInclude))
 if ($code -ne 0) { Fail 'CMake configure failed. The first "CMake Error" above says what is missing.' }
 
 Say '== Build (several minutes; the lifted game is a few hundred source files)'
@@ -211,11 +218,11 @@ $jobs = [Math]::Max(1, [Environment]::ProcessorCount - 1)
 $code = Run 'cmake' @('--build', $buildDir, '--target', 'MyGameRecomp', '--parallel', $jobs, '--', '-k', '0')
 if ($code -ne 0) { Fail 'Build failed. Search the log for "error:" (build\vs-build.log). Send that file back.' }
 $exe = Get-ChildItem -Path $buildDir -Filter 'fp_native.exe' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1
-if (-not $exe) { Fail 'The build finished but fp_native.exe was not found under build\win-clang-cl.' }
+if (-not $exe) { Fail ('The build finished but fp_native.exe was not found under build\' + $preset + '.') }
 Say ('  ' + $exe.FullName + '  ' + [Math]::Round($exe.Length / 1MB) + ' MB')
 
 Say '== Collecting dist\fat-princess-windows-vs'
-$out = Join-Path $root 'dist\fat-princess-windows-vs'
+$out = Join-Path $root $(if ($arm64) { 'dist\fat-princess-windows-arm64-vs' } else { 'dist\fat-princess-windows-vs' })
 New-Item -ItemType Directory -Force -Path $out | Out-Null
 Copy-Item -Force $exe.FullName $out
 $pdb = [System.IO.Path]::ChangeExtension($exe.FullName, '.pdb')

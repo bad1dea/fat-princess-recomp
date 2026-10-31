@@ -8,6 +8,10 @@
 #include <atomic>
 #include <cstdio>
 
+#if !__has_feature(objc_arc)
+#error "ios_setup.mm needs ARC: objects here live across run-loop turns"
+#endif
+
 #ifdef FP_FILES_URL
 @interface FPSetupDownload : NSObject <NSURLSessionDownloadDelegate>
 @property(nonatomic) NSString* target;
@@ -60,8 +64,13 @@
     l.numberOfLines = 0;
     return l;
 }
+- (UIInterfaceOrientationMask)supportedInterfaceOrientations { return UIInterfaceOrientationMaskLandscape; }
+- (BOOL)prefersStatusBarHidden { return YES; }
+- (BOOL)prefersHomeIndicatorAutoHidden { return YES; }
 - (void)viewDidLoad {
     [super viewDidLoad];
+    self.view.backgroundColor = [UIColor colorWithRed:0.04 green:0.03 blue:0.03 alpha:1];
+    self.view.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
     UIColor* gold = [UIColor colorWithRed:0.91 green:0.71 blue:0.29 alpha:1];
     UIColor* text = [UIColor colorWithWhite:0.93 alpha:1];
     UIColor* dim = [UIColor colorWithWhite:0.62 alpha:1];
@@ -152,6 +161,7 @@ FPSetupController* page() {
             if ([s isKindOfClass:UIWindowScene.class]) { scene = (UIWindowScene*)s; break; }
         g_window = scene ? [[UIWindow alloc] initWithWindowScene:scene] : [[UIWindow alloc] initWithFrame:UIScreen.mainScreen.bounds];
         g_page = [FPSetupController new];
+        g_window.frame = (scene ? scene.coordinateSpace.bounds : UIScreen.mainScreen.bounds);
         g_window.rootViewController = g_page;
         g_window.windowLevel = UIWindowLevelAlert;
         [g_window makeKeyAndVisible];

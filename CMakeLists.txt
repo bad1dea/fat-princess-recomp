@@ -55,6 +55,9 @@ if(FP_BUILD_GAME)
   set(FP_DEFAULT_SERVER "" CACHE STRING "Default online server (host:port) baked into the settings")
   if(FP_X86_V3 AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
     target_compile_options(MyGameRecomp PRIVATE -mavx2 -mfma -mbmi2 -mmovbe -msse4.1 -ffp-contract=off)
+  elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    # arm64 has FMA in the base ISA and clang fuses a multiply and an add by default; keep them separate as on x86.
+    target_compile_options(MyGameRecomp PRIVATE -ffp-contract=off)
   endif()
   if(MSVC)
     target_compile_options(MyGameRecomp PRIVATE /FI "${CMAKE_CURRENT_SOURCE_DIR}/src/msvc_clock.h")
@@ -182,6 +185,7 @@ if(FP_BUILD_GAME)
                                          "${CMAKE_CURRENT_SOURCE_DIR}/src/ios_touch.mm"
                                          "${CMAKE_CURRENT_SOURCE_DIR}/src/ios_setup.mm")
       set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/src/ios_touch.mm" "${CMAKE_CURRENT_SOURCE_DIR}/src/ios_setup.mm"
+        TARGET_DIRECTORY MyGameRecomp
         PROPERTIES LANGUAGE CXX COMPILE_OPTIONS "-xobjective-c++;-fobjc-arc")   # Objective-C++ through the C++ compiler
       # Test builds: base URL the first-run key is appended to when downloading the game files (unset: no download).
       set(FP_FILES_URL "" CACHE STRING "Base URL for the first-run game download on iOS")
