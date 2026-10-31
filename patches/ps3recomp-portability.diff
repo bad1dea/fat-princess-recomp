@@ -981,3 +981,60 @@ diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
                  t0 = now; n = gaps = silent = qsum = qmax = 0; } } }
          audio_backend_submit(s_mix_buffer, CELL_AUDIO_BLOCK_SAMPLES);
          audio_notify_event_queues();
+diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
+--- a/libs/audio/cellAudio.c
++++ b/libs/audio/cellAudio.c
+@@ -92,7 +92,7 @@
+ /* Portable threading */
+ #ifdef _WIN32
+   #include <windows.h>
+-  typedef HANDLE thread_t;
++  typedef HANDLE fp_audio_thread_t;
+   typedef CRITICAL_SECTION mutex_t;
+   #define mutex_init(m)    InitializeCriticalSection(m)
+   #define mutex_destroy(m) DeleteCriticalSection(m)
+@@ -102,7 +102,7 @@
+   #include <pthread.h>
+   #include <unistd.h>
+   #include <time.h>
+-  typedef pthread_t thread_t;
++  typedef pthread_t fp_audio_thread_t;
+   typedef pthread_mutex_t mutex_t;
+   #define mutex_init(m)    pthread_mutex_init(m, NULL)
+   #define mutex_destroy(m) pthread_mutex_destroy(m)
+@@ -148,7 +148,7 @@
+ /* Mixing thread */
+ static unsigned long long g_audio_dropped;   /* frames the device had no room for */
+ static volatile int  s_mix_thread_running = 0;
+-static thread_t      s_mix_thread;
++static fp_audio_thread_t      s_mix_thread;
+ #ifndef _WIN32
+ /* Is s_mix_thread a thread that exists and has not been joined? The Win32
+  * branch asks that of the HANDLE itself, which it nulls after closing;
+@@ -1044,13 +1044,13 @@
+      * index the guest has written (that lead is latency the guest adds, and the floor for the total). */
+     static int on = -1; if (on < 0) on = getenv("AUDIO_RATE") ? 1 : 0;
+     if (!on) return;
+-    static long long win_t0; static unsigned cb, nblk; static double err_us[4096]; static unsigned nerr;
++    static long long win_t0; static unsigned cb, nblk; static double audio_err_us[4096]; static unsigned nerr;
+     static double mix_sum, mix_max, ahead_sum; static unsigned ahead_n, silent;
+     clock_gettime(CLOCK_MONOTONIC, &ts);
+     const long long t_out = (long long)ts.tv_sec * 1000000000ll + ts.tv_nsec;
+     if (!win_t0) win_t0 = t_in;
+     const double period_us = (double)(len / (2 * (int)sizeof(float))) * 1e6 / CELL_AUDIO_SAMPLE_RATE;
+-    if (last_in && nerr < 4096) { double e = (t_in - last_in) / 1000.0 - period_us; err_us[nerr++] = e < 0 ? -e : e; }
++    if (last_in && nerr < 4096) { double e = (t_in - last_in) / 1000.0 - period_us; audio_err_us[nerr++] = e < 0 ? -e : e; }
+     last_in = t_in;
+     cb++; nblk += (unsigned)n;
+     { const double m = (t_out - t_in) / 1000.0; mix_sum += m; if (m > mix_max) mix_max = m; }
+@@ -1067,8 +1067,8 @@
+           ahead_sum += ahead; ahead_n++;
+       } }
+     if (t_out - win_t0 >= 5000000000ll) {
+-        for (unsigned a = 1; a < nerr; a++) { double v = err_us[a]; unsigned b = a; while (b && err_us[b - 1] > v) { err_us[b] = err_us[b - 1]; b--; } err_us[b] = v; }
+-        const double p99 = nerr ? err_us[(unsigned)(nerr * 0.99)] : 0.0, pmax = nerr ? err_us[nerr - 1] : 0.0;
++        for (unsigned a = 1; a < nerr; a++) { double v = audio_err_us[a]; unsigned b = a; while (b && audio_err_us[b - 1] > v) { audio_err_us[b] = audio_err_us[b - 1]; b--; } audio_err_us[b] = v; }
++        const double p99 = nerr ? audio_err_us[(unsigned)(nerr * 0.99)] : 0.0, pmax = nerr ? audio_err_us[nerr - 1] : 0.0;
+         fprintf(stderr, "[audio-rate] pull %.1f blocks/s (real time 187.5), callback period %.2f ms, timing error p99 %.2f ms max %.2f ms, "
+                 "mix in callback avg %.2f max %.2f ms, silent callbacks %.0f%%, game-late (held) ring blocks so far %llu, "
+                 "guest writes avg %.1f blocks ahead of read index, output underruns so far %llu, guest-written zero blocks so far %llu, untouched blocks so far %llu (marker=%d), idle give-ups %llu, SDL buffer %.1f ms, clipped samples so far %llu, limited blocks so far %llu, NaN samples so far %llu\n",
