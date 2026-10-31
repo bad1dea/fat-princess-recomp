@@ -183,8 +183,9 @@ if(FP_BUILD_GAME)
       string(PREPEND FP_BOOT_MAIN "#include <pthread.h>\n")
       target_sources(MyGameRecomp PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/ios_launch.cpp"
                                          "${CMAKE_CURRENT_SOURCE_DIR}/src/ios_touch.mm"
-                                         "${CMAKE_CURRENT_SOURCE_DIR}/src/ios_setup.mm")
-      set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/src/ios_touch.mm" "${CMAKE_CURRENT_SOURCE_DIR}/src/ios_setup.mm"
+                                         "${CMAKE_CURRENT_SOURCE_DIR}/src/ios_setup.mm"
+                                         "${CMAKE_CURRENT_SOURCE_DIR}/src/ios_diagnostics.mm")
+      set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/src/ios_touch.mm" "${CMAKE_CURRENT_SOURCE_DIR}/src/ios_setup.mm" "${CMAKE_CURRENT_SOURCE_DIR}/src/ios_diagnostics.mm"
         TARGET_DIRECTORY MyGameRecomp
         PROPERTIES LANGUAGE CXX COMPILE_OPTIONS "-xobjective-c++;-fobjc-arc")   # Objective-C++ through the C++ compiler
       # Test builds: base URL the first-run key is appended to when downloading the game files (unset: no download).
@@ -192,6 +193,11 @@ if(FP_BUILD_GAME)
       if(FP_FILES_URL)
         set_property(SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/ios_setup.mm" TARGET_DIRECTORY MyGameRecomp APPEND PROPERTY
           COMPILE_DEFINITIONS "FP_FILES_URL=\"${FP_FILES_URL}\"")
+      endif()
+      set(FP_REPORT_URL "" CACHE STRING "Diagnostic report endpoint for iOS test builds")
+      if(FP_REPORT_URL)
+        set_property(SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/ios_diagnostics.mm" TARGET_DIRECTORY MyGameRecomp APPEND PROPERTY
+          COMPILE_DEFINITIONS "FP_REPORT_URL=\"${FP_REPORT_URL}\"")
       endif()
       target_link_libraries(MyGameRecomp PRIVATE "-framework UIKit" "-framework GameController" "-framework QuartzCore")
       if(TARGET SDL2::SDL2main)

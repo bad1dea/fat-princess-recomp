@@ -139,6 +139,7 @@ void import_zip(const std::string& docs) {
 }
 
 extern "C" void fp_prof_start(void);
+extern "C" void fp_ios_diagnostics_start(const char* docs);
 extern "C" bool fp_ios_fetch_game(const char* docs);   // ios_setup.mm: test builds download the game with a key
 extern "C" void fp_ios_setup_close(void);
 
@@ -190,6 +191,7 @@ extern "C" void fp_ios_prepare(int* argc, char*** argv) {
         std::fclose(f);
     }
     for (const auto& e : env) setenv(e.key, e.value.c_str(), 0);
+    fp_ios_diagnostics_start(docs.c_str());
     fp_prof_start();
     // SDL's window only finds MoltenVK through an explicit path; it ships inside the app bundle.
     char exe[1024];
