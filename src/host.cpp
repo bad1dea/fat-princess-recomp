@@ -71,6 +71,7 @@ extern "C" void sceNpTrophySetUnlockHook(void (*hook)(int, const char*, int, con
 extern "C" void rsx_engine_pass_dump_request(const char* dir, unsigned passes);
 extern "C" void rsx_vulkan_backend_set_interp(int factor);
 extern "C" void rsx_vulkan_backend_set_overlay_anchor(int anchor);
+extern "C" void rsx_vulkan_backend_set_overlay_area(const float area[6]);
 extern "C" void rsx_vulkan_backend_set_fullscreen(int on);
 extern "C" void rsx_vulkan_backend_interp_flip(uint32_t flips);
 extern "C" void rsx_vulkan_backend_interp_service(void);
@@ -724,6 +725,12 @@ extern "C" int fp_backend_pump_messages(void) {
 #else
     const int result = rsx_vulkan_backend_pump_messages();
 #endif
+#if defined(__APPLE__) && TARGET_OS_IOS
+    fp_touch_tick();
+    float overlay_area[6];
+    fp_touch_overlay_area(overlay_area);
+    rsx_vulkan_backend_set_overlay_area(overlay_area);
+#endif
     // FP_MENU_AT=open_s,close_s opens and closes the settings menu on a timer (headless tests).
     {
         static const char* spec=std::getenv("FP_MENU_AT");
@@ -751,7 +758,11 @@ extern "C" int fp_backend_pump_messages(void) {
         if(menu && !panel.empty()) {
             // the on-screen keyboard: larger glyphs, bottom centre, so the game's own text field stays visible
             const bool osk=fp::settings_osk_active(), trophies=fp::trophy_ui_active();
+#if defined(__APPLE__) && TARGET_OS_IOS
+            fp_set_overlay_anchor(osk ? 1 : 2);   // centre menus inside the safe area
+#else
             fp_set_overlay_anchor(osk?1:trophies?2:0);   // 2: centred (trophy screens)
+#endif
             unsigned w,h,radius=0;
             auto pixels=osk ? fp::keyboard_pixels(fp::settings_keyboard_view(),w,h)
                 : trophies ? fp::trophy_ui_pixels(fp::settings_get("resolution")=="1080P"?1.5f:1.f,fp::settings_controller_hints(),w,h,radius)
@@ -767,7 +778,6 @@ extern "C" int fp_backend_pump_messages(void) {
     // The on-screen controller presses the same virtual pad as the keyboard.
     fp_touch_state touch{};
 #if defined(__APPLE__) && TARGET_OS_IOS
-    fp_touch_tick();
     fp_touch_read(&touch);
 #endif
     if (keyboard_pad) {

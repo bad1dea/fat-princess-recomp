@@ -1038,3 +1038,279 @@ diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
          fprintf(stderr, "[audio-rate] pull %.1f blocks/s (real time 187.5), callback period %.2f ms, timing error p99 %.2f ms max %.2f ms, "
                  "mix in callback avg %.2f max %.2f ms, silent callbacks %.0f%%, game-late (held) ring blocks so far %llu, "
                  "guest writes avg %.1f blocks ahead of read index, output underruns so far %llu, guest-written zero blocks so far %llu, untouched blocks so far %llu (marker=%d), idle give-ups %llu, SDL buffer %.1f ms, clipped samples so far %llu, limited blocks so far %llu, NaN samples so far %llu\n",
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -47,6 +47,7 @@
+ #include "rsx_vulkan_backend.h"
+ #include "rsx_debug_stats.h"
+ #include "rsx_notify.h"
++#include "rsx_overlay_layout.h"
+ #include "rsx_vertex_fetch.h"
+ #include "rsx_texture_layout.h"
+ #include "rsx_vp_decompiler.h"
+@@ -492,6 +493,31 @@
+         if (file) { fputs("submission,reason,batch_draws,wait_ms\n", file); setvbuf(file,NULL,_IOLBF,0); }
+     }
+     if (file) fprintf(file,"%llu,%s,%u,%.6f\n",(unsigned long long)++serial,reason,draws,ms);
++    static int summary=-1;
++    if(summary<0) { const char* e=getenv("RSX_SUBMIT_SUMMARY"); summary=e && !strcmp(e,"1"); }
++    if(!summary) return;
++    struct WaitBucket { const char* reason; unsigned calls, draws; double total, max; };
++    static struct WaitBucket buckets[32];
++    static unsigned used;
++    static Uint32 window;
++    const Uint32 now=SDL_GetTicks();
++    if(!window) window=now;
++    unsigned i=0;
++    while(i<used && strcmp(buckets[i].reason,reason)) i++;
++    if(i==used && used<32) { buckets[used++].reason=reason; }
++    if(i<32) {
++        struct WaitBucket* b=&buckets[i];
++        b->calls++; b->draws+=draws; b->total+=ms;
++        if(ms>b->max) b->max=ms;
++    }
++    if(now-window>=5000) {
++        for(unsigned j=0;j<used;j++) {
++            const struct WaitBucket* b=&buckets[j];
++            fprintf(stderr,"[rsx-wait] window_ms=%u reason=%s calls=%u draws=%u wait_ms=%.3f max_ms=%.3f\n",
++                    now-window,b->reason,b->calls,b->draws,b->total,b->max);
++        }
++        memset(buckets,0,sizeof buckets); used=0; window=now;
++    }
+ }
+ /* Draw batches are submitted without waiting (RSX_ASYNC_SUBMIT=0 turns this off): they rotate through
+  * VK_ASYNC_SETS command buffers, fences and draw-slot sets. A set is waited on only when it is
+@@ -619,8 +645,17 @@
+ static int s_debug_anchor;   /* 0 top-left, 1 bottom centre, 2 centre */
+ static vk_buffer s_notify;   /* the host's notification card, window byte order (rsx_notify.h) */
+ static u32 s_notify_w, s_notify_h, s_notify_radius;
++static float s_overlay_area[6] = {0, 0, 1, 1, 0, 0};
++static uint8_t* s_debug_source;
++static size_t s_debug_source_capacity;
++static u32 s_debug_source_w, s_debug_source_h, s_debug_screen_w, s_debug_screen_h;
++static float s_debug_source_area[6], s_debug_source_opacity, s_debug_scale = 1;
++static u32 s_debug_draw_radius;
++void rsx_vulkan_backend_set_overlay_area(const float area[6]) {
++    memcpy(s_overlay_area, area, sizeof s_overlay_area);
++}
+ static u32 s_debug_radius;   /* host panel corner radius, 0 square */
+-void rsx_vulkan_backend_set_overlay_radius(u32 radius) { s_debug_radius = radius; }
++void rsx_vulkan_backend_set_overlay_radius(u32 radius) { s_debug_radius = radius; s_debug_draw_radius = (u32)(radius * s_debug_scale); }
+ void rsx_vulkan_backend_set_overlay_anchor(int anchor) { s_debug_anchor = anchor; }
+ static int vk_submit_and_wait(void)
+ {
+@@ -2403,8 +2438,12 @@
+             ox = (int32_t)(s_vk.sc_extent.width - s_debug_width) / 2;
+             oy = (int32_t)(s_vk.sc_extent.height - s_debug_height) / 2;
+         }
++        if (s_overlay_area[4] > 0) {
++            const rsx_overlay_rect safe = rsx_overlay_safe_rect(s_vk.sc_extent.width, s_vk.sc_extent.height, s_overlay_area);
++            rsx_overlay_origin(safe, s_debug_width, s_debug_height, s_debug_anchor, &ox, &oy);
++        }
+         if (!vk_hud_blend(src, dx, dy, dw, dh, s_debug_width, s_debug_height, s_vk.sc_images[idx], ox, oy)) {
+-            vk_copy_rounded(s_debug_overlay.buf, s_debug_width, s_debug_height, s_debug_radius, ox, oy, s_vk.sc_images[idx]);
++            vk_copy_rounded(s_debug_overlay.buf, s_debug_width, s_debug_height, s_debug_draw_radius, ox, oy, s_vk.sc_images[idx]);
+         }
+     }
+     if (s_notify_w && s_notify_h && s_notify.buf &&
+@@ -4574,6 +4613,7 @@
+     if (vk_guest_init()) {
+         VK_LOG("guest programs: setup failed, fixed-function path only\n");
+         vk_destroy_buffer(&s_debug_overlay);
++        free(s_debug_source); s_debug_source=NULL; s_debug_source_capacity=0; s_debug_width=s_debug_height=0;
+         vk_destroy_buffer(&s_notify); s_notify_w = s_notify_h = 0;
+         vk_guest_shutdown();
+     }
+@@ -4761,21 +4801,53 @@
+ 
+ void rsx_vulkan_backend_set_debug_overlay(const uint8_t* rgba,u32 w,u32 h,const char* title) {
+     if(s_vk.window && title) SDL_SetWindowTitle(s_vk.window,title);
++    if(!s_vk.windowed || !rgba || !w || !h || w>2048 || h>1536) {
++        s_debug_width=s_debug_height=0;
++        return;
++    }
++    const size_t source_bytes = (size_t)w*h*4;
++    /* The persistent AI badge is identical each half second. Re-uploading it drained
++     * all in-flight command sets, even though the displayed pixels never changed. */
++    if(s_debug_width && s_debug_source && s_debug_source_w==w && s_debug_source_h==h &&
++       s_debug_screen_w==s_vk.sc_extent.width && s_debug_screen_h==s_vk.sc_extent.height &&
++       s_debug_source_opacity==s_overlay_opacity &&
++       !memcmp(s_debug_source_area,s_overlay_area,sizeof s_overlay_area) &&
++       !memcmp(s_debug_source,rgba,source_bytes)) return;
+     s_debug_width=s_debug_height=0;
+-    if(!s_vk.windowed || !rgba || !w || !h || w>2048 || h>1536) return;
++    const u32 source_w=w, source_h=h;
++    if(s_overlay_area[4]>0) {
++        const rsx_overlay_rect safe=rsx_overlay_safe_rect(s_vk.sc_extent.width,s_vk.sc_extent.height,s_overlay_area);
++        rsx_overlay_fit(w,h,safe,s_vk.sc_extent.height,s_overlay_area[5],&w,&h);
++    }
+     if(vk_ensure_buffer(&s_debug_overlay,(VkDeviceSize)w*h*4,VK_BUFFER_USAGE_TRANSFER_SRC_BIT) ||
+        !s_debug_overlay.coherent) return;
+     if(s_vk.sc_format != VK_FORMAT_B8G8R8A8_UNORM && s_vk.sc_format != VK_FORMAT_B8G8R8A8_SRGB &&
+        s_vk.sc_format != VK_FORMAT_R8G8B8A8_UNORM && s_vk.sc_format != VK_FORMAT_R8G8B8A8_SRGB) return;
+     vk_flush_at("overlay update");   /* an async present may still be copying the previous contents */
+-    memcpy(s_debug_overlay.ptr,rgba,(size_t)w*h*4);
++    uint8_t* pixels=s_debug_overlay.ptr;
++    if(w==source_w && h==source_h) memcpy(pixels,rgba,(size_t)w*h*4);
++    else for(u32 y=0;y<h;y++) for(u32 x=0;x<w;x++) {
++        const size_t src=((size_t)((uint64_t)y*source_h/h)*source_w+(uint64_t)x*source_w/w)*4;
++        memcpy(pixels+((size_t)y*w+x)*4,rgba+src,4);
++    }
+     if(s_overlay_opacity<0.99f && !vk_ensure_buffer(&s_hud_rgba,(VkDeviceSize)w*h*4,VK_BUFFER_USAGE_STORAGE_BUFFER_BIT) && s_hud_rgba.coherent)
+-        memcpy(s_hud_rgba.ptr,rgba,(size_t)w*h*4);
++        memcpy(s_hud_rgba.ptr,pixels,(size_t)w*h*4);
+     if(s_vk.sc_format==VK_FORMAT_B8G8R8A8_UNORM || s_vk.sc_format==VK_FORMAT_B8G8R8A8_SRGB) {
+-        uint8_t* p=s_debug_overlay.ptr;
+-        for(size_t i=0;i<(size_t)w*h;i++) { uint8_t r=p[i*4];p[i*4]=p[i*4+2];p[i*4+2]=r; }
+-    }
++        for(size_t i=0;i<(size_t)w*h;i++) { uint8_t r=pixels[i*4];pixels[i*4]=pixels[i*4+2];pixels[i*4+2]=r; }
++    }
++    s_debug_scale=(float)w/source_w;
++    s_debug_draw_radius=(u32)(s_debug_radius*s_debug_scale);
+     s_debug_width=w;s_debug_height=h;
++    if(source_bytes>s_debug_source_capacity) {
++        uint8_t* cache=realloc(s_debug_source,source_bytes);
++        if(!cache) return;   /* upload is valid; retry caching on the next update */
++        s_debug_source=cache;s_debug_source_capacity=source_bytes;
++    }
++    memcpy(s_debug_source,rgba,source_bytes);
++    s_debug_source_w=source_w;s_debug_source_h=source_h;
++    s_debug_screen_w=s_vk.sc_extent.width;s_debug_screen_h=s_vk.sc_extent.height;
++    memcpy(s_debug_source_area,s_overlay_area,sizeof s_overlay_area);
++    s_debug_source_opacity=s_overlay_opacity;
+ }
+ 
+ /* The notification card (R, G, B, A bytes, w x h, corner radius in pixels); NULL hides it. */
+diff --git a/libs/video/rsx_vulkan_backend.h b/libs/video/rsx_vulkan_backend.h
+--- a/libs/video/rsx_vulkan_backend.h
++++ b/libs/video/rsx_vulkan_backend.h
+@@ -76,6 +76,8 @@
+ void rsx_vulkan_backend_present(void);
+ /* Where the host overlay sits: 0 top-left (menus, stats), 1 bottom centre (the on-screen keyboard). */
+ void rsx_vulkan_backend_set_overlay_anchor(int anchor);
++/* Normalized safe bounds and logical view size in points; width=0 keeps desktop layout. */
++void rsx_vulkan_backend_set_overlay_area(const float area[6]);
+ /* Host panel corner radius in pixels; non-zero also pads a top-left panel off the window corner. */
+ void rsx_vulkan_backend_set_overlay_radius(uint32_t radius);
+ 
+diff --git a/libs/video/vulkan/rsx_vk_hud.inc b/libs/video/vulkan/rsx_vk_hud.inc
+--- a/libs/video/vulkan/rsx_vk_hud.inc
++++ b/libs/video/vulkan/rsx_vk_hud.inc
+@@ -22,7 +22,7 @@
+ 
+ static int vk_hud_create(void)
+ {
+-    if (vk_create_image(&s_hud.t, VK_FORMAT_R8G8B8A8_UNORM, 1024, 512,
++    if (vk_create_image(&s_hud.t, VK_FORMAT_R8G8B8A8_UNORM, 2048, 1536,
+                         VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                         VK_IMAGE_ASPECT_COLOR_BIT)) return -1;
+     VkDescriptorSetLayoutBinding b[2];
+@@ -55,7 +55,7 @@
+ static int vk_hud_blend(VkImage src, int32_t dx, int32_t dy, int32_t dw, int32_t dh, u32 w, u32 h, VkImage dst,
+                         int32_t ox, int32_t oy)
+ {
+-    if (s_overlay_opacity >= 0.99f || !s_hud_rgba.buf || s_hud.failed || w > 1024 || h > 512 || dw <= 0 || dh <= 0) return 0;
++    if (s_overlay_opacity >= 0.99f || !s_hud_rgba.buf || s_hud.failed || w > 2048 || h > 1536 || dw <= 0 || dh <= 0) return 0;
+     if (!s_hud.ready && vk_hud_create()) { s_hud.failed = 1; return 0; }
+     const int32_t wx0 = dx > ox ? dx : ox, wy0 = dy > oy ? dy : oy;
+     const int32_t wx1 = ox + (int32_t)w < dx + dw ? ox + (int32_t)w : dx + dw, wy1 = oy + (int32_t)h < dy + dh ? oy + (int32_t)h : dy + dh;
+@@ -90,7 +90,7 @@
+     pvkCmdBlitImage(s_vk.cmd, src, VK_IMAGE_LAYOUT_GENERAL, s_hud.t.img, VK_IMAGE_LAYOUT_GENERAL, 1, &under, VK_FILTER_LINEAR);
+     pvkCmdPipelineBarrier(s_vk.cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+ 
+-    struct { uint32_t w, h; float opacity, radius; } pc = { w, h, s_overlay_opacity, (float)s_debug_radius };
++    struct { uint32_t w, h; float opacity, radius; } pc = { w, h, s_overlay_opacity, (float)s_debug_draw_radius };
+     pvkCmdBindPipeline(s_vk.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_hud.pipe);
+     pvkCmdBindDescriptorSets(s_vk.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_hud.pl, 0, 1, &s_hud.set, 0, NULL);
+     pvkCmdPushConstants(s_vk.cmd, s_hud.pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, &pc);
+diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
+--- a/libs/audio/cellAudio.c
++++ b/libs/audio/cellAudio.c
+@@ -1201,6 +1201,9 @@
+     long long blocks = 0, last_mix = 0;
+     long long wake_late_sum = 0, wake_late_max = 0;
+     unsigned long long wake_count = 0, queue_waits = 0;
++    unsigned long long mix_count = 0, mix_ns_sum = 0, mix_ns_max = 0;
++    unsigned long long clipped_before = g_audio_clipped_samples, limited_before = g_audio_limited_blocks;
++    unsigned long long nan_before = g_audio_nan_samples;
+ 
+     while (s_mix_thread_running) {
+         struct timespec tn; clock_gettime(CLOCK_MONOTONIC, &tn);
+@@ -1225,11 +1228,15 @@
+         }
+         last_mix = now;
+         blocks++;
++        const long long mix_start = audio_mono_ns();
+         audio_mix_one_block();
+         audio_apply_gain();
+ #if AUDIO_BACKEND_SDL2
+         cellVoice_mix_output(s_mix_buffer, CELL_AUDIO_BLOCK_SAMPLES);
+ #endif
++        const unsigned long long mix_ns = (unsigned long long)(audio_mono_ns() - mix_start);
++        mix_count++; mix_ns_sum += mix_ns;
++        if (mix_ns > mix_ns_max) mix_ns_max = mix_ns;
+         /* AUDIO_PEAK=1 reports the peak of the mixed block, AUDIO_WAV=<file> appends it as raw f32le
+          * stereo 48 kHz (the Windows thread above has the same two switches). */
+         { static int _ap = -1; if (_ap < 0) _ap = getenv("AUDIO_PEAK") ? 1 : 0;
+@@ -1258,6 +1265,12 @@
+                         n ? qsum * 1000.0 / CELL_AUDIO_SAMPLE_RATE / n : 0.0, qmax * 1000.0 / CELL_AUDIO_SAMPLE_RATE,
+                         AUDIO_DEV_BUF_MS, wake_count ? wake_late_sum / (double)wake_count / 1000000.0 : 0.0,
+                         wake_late_max / 1000000.0, queue_waits);
++                fprintf(stderr, "[audio-quality] mix_us_avg=%.2f mix_us_max=%.2f limited_blocks=%llu clipped_samples=%llu nan_samples=%llu\n",
++                        mix_count ? mix_ns_sum / (double)mix_count / 1000.0 : 0.0, mix_ns_max / 1000.0,
++                        g_audio_limited_blocks - limited_before, g_audio_clipped_samples - clipped_before,
++                        g_audio_nan_samples - nan_before);
++                clipped_before = g_audio_clipped_samples; limited_before = g_audio_limited_blocks;
++                nan_before = g_audio_nan_samples; mix_count = mix_ns_sum = mix_ns_max = 0;
+                 wake_count = queue_waits = 0; wake_late_sum = wake_late_max = 0;
+                 t0 = now; n = gaps = silent = qsum = qmax = 0; } } }
+         audio_backend_submit(s_mix_buffer, CELL_AUDIO_BLOCK_SAMPLES);
+diff --git a/libs/video/rsx_overlay_layout.h b/libs/video/rsx_overlay_layout.h
+new file mode 100644
+--- /dev/null
++++ b/libs/video/rsx_overlay_layout.h
+@@ -0,0 +1,43 @@
++#ifndef RSX_OVERLAY_LAYOUT_H
++#define RSX_OVERLAY_LAYOUT_H
++#include <stdint.h>
++#include <math.h>
++
++typedef struct rsx_overlay_rect { int32_t x, y; uint32_t w, h; } rsx_overlay_rect;
++
++/* area is left/top/right/bottom in normalized window coordinates. */
++static inline rsx_overlay_rect rsx_overlay_safe_rect(uint32_t w, uint32_t h, const float area[6]) {
++    int32_t l = (int32_t)ceilf(w * area[0]), t = (int32_t)ceilf(h * area[1]);
++    int32_t r = (int32_t)floorf(w * area[2]), b = (int32_t)floorf(h * area[3]);
++    if (l < 0) l = 0;
++    if (t < 0) t = 0;
++    if (r > (int32_t)w) r = (int32_t)w;
++    if (b > (int32_t)h) b = (int32_t)h;
++    if (r <= l || b <= t) return (rsx_overlay_rect){0, 0, w, h};
++    return (rsx_overlay_rect){l, t, (uint32_t)(r-l), (uint32_t)(b-t)};
++}
++
++/* A bitmap pixel becomes a UIKit point, bounded by the available safe area.
++ * The menu's 14-pixel glyphs therefore read as 14 points on Retina displays. */
++static inline void rsx_overlay_fit(uint32_t w, uint32_t h, rsx_overlay_rect safe,
++                                  uint32_t screen_h, float point_h, uint32_t* out_w, uint32_t* out_h) {
++    float scale = point_h > 0 ? screen_h / point_h : 1;
++    if (scale * w > safe.w) scale = (float)safe.w / w;
++    if (scale * h > safe.h) scale = (float)safe.h / h;
++    if (scale * w > 2048) scale = 2048.f / w;
++    if (scale * h > 1536) scale = 1536.f / h;
++    *out_w = (uint32_t)floorf(w * scale);
++    *out_h = (uint32_t)floorf(h * scale);
++    if (!*out_w) *out_w = 1;
++    if (!*out_h) *out_h = 1;
++}
++
++/* All mobile panels are horizontally centred; 0 top, 1 bottom, 2 middle. */
++static inline void rsx_overlay_origin(rsx_overlay_rect safe, uint32_t w, uint32_t h,
++                                     int anchor, int32_t* x, int32_t* y) {
++    *x = safe.x + ((int32_t)safe.w - (int32_t)w) / 2;
++    *y = safe.y;
++    if (anchor == 1) *y += (int32_t)safe.h - (int32_t)h;
++    if (anchor == 2) *y += ((int32_t)safe.h - (int32_t)h) / 2;
++}
++#endif

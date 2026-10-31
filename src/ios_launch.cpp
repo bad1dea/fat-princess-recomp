@@ -180,6 +180,8 @@ extern "C" void fp_ios_prepare(int* argc, char*** argv) {
         {"PS3_BOOT_PATH", "/dev_hdd0/game/NPUA80139/USRDIR/GAME.self"}, {"PS3_TITLE", "Fat Princess"},
         {"PS3RECOMP_VK_WINDOW", "1"}, {"PS3RECOMP_VK_GUEST_PROGRAMS", "1"}, {"AUDIO_RATE", "1"},
         {"FP_AUDIO_PUSH", "1"}, {"AUDIO_SENTINEL", "1"}, {"FP_PRESENT_TIMING", "1"}, {"FP_GAME_DIR", d + "/game/USRDIR"}, {"FP_CONFIG", d + "/settings.ini"},
+        // Diagnostic image copies drain the graphics queue; sample them less often on phones.
+        {"PS3RECOMP_VK_READBACK_EVERY", "300"}, {"FP_VK_SC_CHECK_MS", "0"}, {"RSX_SUBMIT_SUMMARY", "1"},
     };
     // env.txt in the documents folder (KEY=VALUE per line) overrides and adds settings, for testing over USB.
     if (FILE* f = std::fopen((docs + "/env.txt").c_str(), "r")) {

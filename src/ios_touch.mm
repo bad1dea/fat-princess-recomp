@@ -246,6 +246,25 @@ extern "C" void fp_touch_tick(void) {
 
 extern "C" int fp_touch_take_menu(void) { return g_menu.exchange(0); }
 
+extern "C" void fp_touch_overlay_area(float area[6]) {
+    const CGRect bounds = g_view.bounds;
+    const CGFloat w = bounds.size.width, h = bounds.size.height;
+    if (w <= 0 || h <= 0) {
+        const float fallback[6] = {0.06f, 0.04f, 0.94f, 0.92f, 0, 0};
+        for (int i = 0; i < 6; ++i) area[i] = fallback[i];
+        return;
+    }
+    const UIEdgeInsets safe = g_view.safeAreaInsets;
+    // Extra space keeps the panel border away from curved corners and gestures.
+    area[0] = (safe.left + 8) / w;
+    // Keep status panels below SELECT / menu / START touch controls.
+    area[1] = (MAX(safe.top, 48) + 8) / h;
+    area[2] = 1 - (safe.right + 8) / w;
+    area[3] = 1 - (safe.bottom + 8) / h;
+    area[4] = w;
+    area[5] = h;
+}
+
 extern "C" unsigned fp_touch_pad_bits(void) {
     // PS3 pad bits (cellPad.h): the stick doubles as the d-pad for menus.
     const uint32_t b = g_buttons.load();

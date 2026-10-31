@@ -14,6 +14,8 @@ typedef struct fp_touch_state { uint32_t buttons; int32_t lx, ly; } fp_touch_sta
 extern "C" {
 #endif
 void fp_touch_tick(void);                  // main thread, once per frame
+// Main thread: safe content rectangle (normalized) and view size in UIKit points.
+void fp_touch_overlay_area(float area[6]);
 void fp_touch_read(fp_touch_state* out);   // any thread
 int fp_touch_take_menu(void);              // 1 once per press of the menu button
 unsigned fp_touch_pad_bits(void);          // held controls as CELL_PAD_CTRL bits (menu navigation)
