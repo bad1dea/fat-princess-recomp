@@ -6,6 +6,7 @@ root=Path(__file__).resolve().parents[1]
 s=(root/'third_party/ps3recomp/libs/video/rsx_vulkan_backend.c').read_text()
 start=s.index('typedef struct vk_buffer {');structure=s[start:s.index('} vk_buffer;',start)+len('} vk_buffer;')]
 start=s.index('static int vk_create_host_buffer(');function=s[start:s.index('\nstatic void vk_destroy_buffer(',start)]
+start=s.index('static void vk_destroy_buffer_now(');destroy=s[start:s.index('\nstatic void vk_retire_buffer(',start)]
 fixture=r'''
 #include <vulkan/vulkan.h>
 #include <stdint.h>
@@ -15,6 +16,9 @@ fixture=r'''
 typedef uint32_t u32;
 static struct {VkDevice device;}s_vk;
 static int fail, buffers, memories, mappings;
+static VkDeviceSize s_buffer_live_bytes,s_buffer_peak_bytes;
+static unsigned s_buffer_live_count;
+static void vk_buffer_memory_report(const char* reason) {(void)reason;}
 #define VK_LOG(...) do {if(0)fprintf(stderr,__VA_ARGS__);}while(0)
 static VkResult pvkCreateBuffer(VkDevice d,const VkBufferCreateInfo*i,const VkAllocationCallbacks*a,VkBuffer*b){if(fail==1)return VK_ERROR_OUT_OF_DEVICE_MEMORY;*b=(VkBuffer)(uintptr_t)1;buffers++;return VK_SUCCESS;}
 static void pvkGetBufferMemoryRequirements(VkDevice d,VkBuffer b,VkMemoryRequirements*r){*r=(VkMemoryRequirements){.size=4096,.alignment=256,.memoryTypeBits=1};}
@@ -31,20 +35,21 @@ int main(void){
  for(unsigned pass=0;pass<500;pass++)for(fail=1;fail<=5;fail++){
   vk_buffer b={0},zero={0};
   assert(vk_create_host_buffer(&b,1024,VK_BUFFER_USAGE_VERTEX_BUFFER_BIT)==-1);
-  assert(!buffers&&!memories&&!mappings);assert(!memcmp(&b,&zero,sizeof b));
+  assert(!buffers&&!memories&&!mappings && !s_buffer_live_bytes && !s_buffer_live_count);assert(!memcmp(&b,&zero,sizeof b));
  }
  fail=0;
  for(unsigned pass=0;pass<500;pass++){
   vk_buffer b={0};assert(!vk_create_host_buffer(&b,1024,VK_BUFFER_USAGE_VERTEX_BUFFER_BIT));
   assert(b.size==1024 && b.coherent && buffers==1 && memories==1 && mappings==1);
-  pvkUnmapMemory(s_vk.device,b.mem);pvkDestroyBuffer(s_vk.device,b.buf,NULL);pvkFreeMemory(s_vk.device,b.mem,NULL);
+  vk_destroy_buffer_now(&b);
+  assert(!s_buffer_live_bytes && !s_buffer_live_count);
  }
  assert(!buffers&&!memories&&!mappings);
  puts("PASS: 2500 failed Vulkan constructions release partial ownership and reset handles; 500 successful constructions preserve mapping/size/coherence");
 }
 '''
 with tempfile.TemporaryDirectory(prefix='fp-buffer-failure-')as tmp:
- source=Path(tmp)/'test.c';source.write_text(fixture+structure+'\n'+function+'\n'+test)
+ source=Path(tmp)/'test.c';source.write_text(fixture+structure+'\n'+function+'\n'+destroy+'\n'+test)
  binary=Path(tmp)/'test'
  subprocess.run([os.environ.get('CC','cc'),'-std=gnu17','-O2','-UNDEBUG',*shlex.split(os.environ.get('CPPFLAGS','')),str(source),'-o',str(binary)],check=True)
  subprocess.run([str(binary)],check=True)

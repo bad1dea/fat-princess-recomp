@@ -3266,3 +3266,183 @@ diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
  }
  
  static void vk_destroy_buffer(vk_buffer* b)
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -585,6 +585,9 @@
+     memset(im, 0, sizeof *im);
+ }
+ 
++static VkDeviceSize s_buffer_live_bytes,s_buffer_peak_bytes;
++static unsigned s_buffer_live_count;
++static void vk_buffer_memory_report(const char* reason);
+ static int vk_create_host_buffer(vk_buffer* b, VkDeviceSize size, VkBufferUsageFlags usage)
+ {
+     // Callers supply a fresh buffer; all partial ownership is local to this call.
+@@ -622,6 +625,8 @@
+     stage="vkMapMemory"; result=pvkMapMemory(s_vk.device, b->mem, 0, VK_WHOLE_SIZE, 0, &b->ptr);
+     if(result!=VK_SUCCESS)goto failed;
+     b->size = size;
++    s_buffer_live_bytes+=size;++s_buffer_live_count;
++    if(s_buffer_live_bytes>s_buffer_peak_bytes)s_buffer_peak_bytes=s_buffer_live_bytes;
+     return 0;
+ failed:
+     VK_LOG("%s failed (VkResult %d)\n",stage,(int)result);
+@@ -631,6 +636,7 @@
+     if(b->buf)pvkDestroyBuffer(s_vk.device,b->buf,NULL);
+     if(b->mem)pvkFreeMemory(s_vk.device,b->mem,NULL);
+     memset(b,0,sizeof *b);
++    vk_buffer_memory_report("allocation_failed");
+     return -1;
+ }
+ 
+@@ -640,6 +646,7 @@
+     if (b->ptr) pvkUnmapMemory(s_vk.device, b->mem);
+     if (b->buf) pvkDestroyBuffer(s_vk.device, b->buf, NULL);
+     if (b->mem) pvkFreeMemory(s_vk.device, b->mem, NULL);
++    if(b->size){s_buffer_live_bytes-=b->size;--s_buffer_live_count;}
+     memset(b, 0, sizeof *b);
+ }
+ 
+@@ -914,6 +921,7 @@
+ static double vk_ms_since(uint64_t start) {
+     return 1000.0 * (double)(SDL_GetPerformanceCounter() - start) / SDL_GetPerformanceFrequency();
+ }
++static void vk_retired_complete_set(unsigned set);
+ /* Wait for one set's fence, if it is still in flight. */
+ static int vk_set_wait(unsigned set, const char* reason)
+ {
+@@ -921,6 +929,7 @@
+     const uint64_t start = SDL_GetPerformanceCounter();
+     VK_CHECK(pvkWaitForFences(s_vk.device, 1, &s_set_fence[set], VK_TRUE, UINT64_MAX), "vkWaitForFences");
+     s_set_inflight[set] = 0;
++    vk_retired_complete_set(set);
+     const double ms = vk_ms_since(start);
+     vk_stall_end(ST_SET_WAIT,vk_stall_enabled()?start:0,0);
+     vk_trace_submit(reason, 0, ms);
+@@ -1897,31 +1906,49 @@
+  * would flush and drain every in-flight set in the middle of recording a draw (a stall, and the draw's
+  * slot would belong to a set that has already been submitted). With async submit the old buffer is parked
+  * and freed once every set has been waited on (vk_async_drain). */
+-static vk_buffer* s_retired;
++typedef struct { vk_buffer buffer; unsigned pending_sets; } vk_retired_buffer;
++static vk_retired_buffer* s_retired;
+ static unsigned s_retired_count, s_retired_cap;
+ static void vk_destroy_buffer_now(vk_buffer* b)
+ {
+     if (b->ptr) pvkUnmapMemory(s_vk.device, b->mem);
+     if (b->buf) pvkDestroyBuffer(s_vk.device, b->buf, NULL);
+     if (b->mem) pvkFreeMemory(s_vk.device, b->mem, NULL);
++    if(b->size){s_buffer_live_bytes-=b->size;--s_buffer_live_count;}
+     memset(b, 0, sizeof *b);
+ }
+ static void vk_retire_buffer(vk_buffer* b)
+ {
+     if (!b->buf) { memset(b, 0, sizeof *b); return; }
+     if (!vk_async_enabled()) { vk_destroy_buffer(b); return; }
++    // Existing fences, including the batch still being recorded, delimit the
++    // last possible use. Do not retain every replaced buffer until a global drain.
++    unsigned pending=0;
++    for(unsigned i=0;i<VK_ASYNC_SETS;i++)if(s_set_inflight[i])pending|=1u<<i;
++    if(s_batch_recording)pending|=1u<<s_cur_set;
++    if(!pending){vk_destroy_buffer_now(b);return;}
+     if (s_retired_count == s_retired_cap) {
+         const unsigned cap = s_retired_cap ? s_retired_cap * 2 : 16;
+-        vk_buffer* grown = (vk_buffer*)realloc(s_retired, cap * sizeof *grown);
++        vk_retired_buffer* grown = (vk_retired_buffer*)realloc(s_retired, cap * sizeof *grown);
+         if (!grown) { vk_destroy_buffer(b); return; }
+         s_retired = grown; s_retired_cap = cap;
+     }
+-    s_retired[s_retired_count++] = *b;
++    s_retired[s_retired_count++] = (vk_retired_buffer){*b,pending};
+     memset(b, 0, sizeof *b);
+ }
++static void vk_retired_complete_set(unsigned set)
++{
++    unsigned kept=0;
++    for(unsigned i=0;i<s_retired_count;i++){
++        s_retired[i].pending_sets&=~(1u<<set);
++        if(!s_retired[i].pending_sets)vk_destroy_buffer_now(&s_retired[i].buffer);
++        else s_retired[kept++]=s_retired[i];
++    }
++    s_retired_count=kept;
++}
+ static void vk_free_retired_buffers(void)
+ {
+-    for (unsigned i = 0; i < s_retired_count; i++) vk_destroy_buffer_now(&s_retired[i]);
++    for (unsigned i = 0; i < s_retired_count; i++) vk_destroy_buffer_now(&s_retired[i].buffer);
+     s_retired_count = 0;
+ }
+ static int vk_ensure_buffer(vk_buffer* b, VkDeviceSize bytes, VkBufferUsageFlags usage)
+@@ -1958,6 +1985,18 @@
+ typedef struct { u32 off, frame; } vk_pool_pending;
+ static vk_pool_pending* s_vpool_pend; static u32 s_vpool_npend, s_vpool_cappend;
+ static u32 s_present_serial;
++static void vk_buffer_memory_report(const char* reason)
++{
++    static uint64_t last;
++    const uint64_t now=SDL_GetPerformanceCounter(),frequency=SDL_GetPerformanceFrequency();
++    if(last && now-last<frequency*5)return;
++    last=now;
++    VkDeviceSize retired=0;
++    for(unsigned i=0;i<s_retired_count;i++)retired+=s_retired[i].buffer.size;
++    VK_LOG("[vk-buffer-memory] reason=%s live_mb=%.2f peak_mb=%.2f count=%u retired_mb=%.2f retired_count=%u pool_mb=%.2f logical_sizes=1\n",
++        reason,s_buffer_live_bytes/1048576.,s_buffer_peak_bytes/1048576.,s_buffer_live_count,
++        retired/1048576.,s_retired_count,s_vpool.size/1048576.);
++}
+ static int vk_pool_in(const void* p) { return s_vpool_state == 1 && p && (const u8*)p >= (const u8*)s_vpool.ptr &&
+                                               (const u8*)p < (const u8*)s_vpool.ptr + s_vpool.size; }
+ static void vk_pool_push_free(u32 cls, u32 off)
+@@ -2737,6 +2776,7 @@
+ {
+     (void)ud; (void)buffer_id;
+     s_present_serial++;   /* frees in the converted-vertex pool age by presents */
++    vk_buffer_memory_report("present");
+     if (!s_vk.device) return;
+ 
+     if (!vk_readback_due()) {
+@@ -4354,10 +4394,10 @@
+ {
+     if(!slot->constants.buf || slot->constants.size<s_g.ubo.size)
+         slot->descriptors.valid=0;  /* buffer recreation may recycle the handle */
+-    if (vk_ensure_buffer(&slot->vertices, vb, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT) ||
++    if ((vb && vk_ensure_buffer(&slot->vertices, vb, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT)) ||
+         (ib && vk_ensure_buffer(&slot->indices, ib, VK_BUFFER_USAGE_INDEX_BUFFER_BIT)) ||
+         vk_ensure_buffer(&slot->constants, s_g.ubo.size, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT)) return -1;
+-    if (!slot->vertices.coherent || !slot->constants.coherent || (ib && !slot->indices.coherent)) return -1;
++    if ((vb && !slot->vertices.coherent) || !slot->constants.coherent || (ib && !slot->indices.coherent)) return -1;
+     if (!slot->pool) {
+         slot->descriptors.valid=0;
+         VkDescriptorPoolSize sizes[] = {
+@@ -4554,6 +4594,9 @@
+ 
+     const VkDeviceSize vbytes = (VkDeviceSize)vertex_count * stride;
+     const VkDeviceSize ibytes = indices ? (VkDeviceSize)index_count * 4u : 0;
++    // Pooled geometry is bound in place below. It must not also grow a private
++    // copy in every command set's draw slot, even though no memcpy uses it.
++    const int v_pooled = vk_pool_in(vertices), i_pooled = ibytes && vk_pool_in(indices);
+     struct vk_draw_slot* slot = NULL;
+     unsigned slot_index = 0;
+     if (vk_batch_enabled()) {
+@@ -4564,19 +4607,18 @@
+         if (!s_batch_recording && vk_async_enabled() && vk_set_wait(s_cur_set, "set_acquire")) return;
+         slot_index = s_batch_count;
+         slot = &s_draw_slot[s_cur_set * VK_DRAW_BATCH_SIZE + slot_index];
+-        if (vk_draw_slot_prepare(slot, vbytes, ibytes)) return;
++        if (vk_draw_slot_prepare(slot, v_pooled?0:vbytes, i_pooled?0:ibytes)) return;
+         if (!s_batch_constants) return;
+         vk_eng_copy_vs_constants((u8*)slot->constants.ptr, s_batch_constants, s_e2.vs_bytes);
+         memcpy((u8*)slot->constants.ptr + s_g.ps_off,
+                s_batch_constants + s_g.ps_off, s_e2.ps_bytes);
+     } else {
+-        if (vk_ensure_vertex_buffer(vbytes)) return;
+-        if (ibytes && vk_eng_ensure_indices(ibytes)) return;
++        if (!v_pooled && vk_ensure_vertex_buffer(vbytes)) return;
++        if (ibytes && !i_pooled && vk_eng_ensure_indices(ibytes)) return;
+     }
+     vk_buffer* vertex_buffer = slot ? &slot->vertices : &s_vk.vertices;
+     vk_buffer* index_buffer = slot ? &slot->indices : &s_e2.indices;
+     /* Data that already lives in the converted-vertex pool is bound in place. */
+-    const int v_pooled = vk_pool_in(vertices), i_pooled = ibytes && vk_pool_in(indices);
+     if (!v_pooled) memcpy(vertex_buffer->ptr, vertices, (size_t)vbytes);
+     if (ibytes && !i_pooled) memcpy(index_buffer->ptr, indices, (size_t)ibytes);
+     const VkDescriptorSet set = vk_eng_write_descriptors(P, slot);

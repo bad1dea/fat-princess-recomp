@@ -27,6 +27,7 @@ jobs:
           cc -O2 tests/audio_queue_budget.c -o /tmp/audio-budget
           /tmp/audio-budget
           python3 tests/vulkan_buffer_failure.py
+          python3 tests/vulkan_buffer_ownership.py
       - name: Configure
         run: |
           cmake -S . -B build/native -G Ninja -DCMAKE_BUILD_TYPE=Release -DFP_BUILD_GAME=ON \
