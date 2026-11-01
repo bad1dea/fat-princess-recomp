@@ -3216,3 +3216,53 @@ diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
                      '-I'+str(root/'include'), '-I'+str(spu),
                      '-I'+str(root/'runtime/platform'),
                      str(spu/'tests/test_spu_interpreter_handoff.c'),
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -587,10 +587,15 @@
+ 
+ static int vk_create_host_buffer(vk_buffer* b, VkDeviceSize size, VkBufferUsageFlags usage)
+ {
++    // Callers supply a fresh buffer; all partial ownership is local to this call.
++    memset(b,0,sizeof *b);
++    VkResult result;
++    const char* stage;
+     VkBufferCreateInfo bci = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                                .size = size, .usage = usage,
+                                .sharingMode = VK_SHARING_MODE_EXCLUSIVE };
+-    VK_CHECK(pvkCreateBuffer(s_vk.device, &bci, NULL, &b->buf), "vkCreateBuffer");
++    stage="vkCreateBuffer"; result=pvkCreateBuffer(s_vk.device, &bci, NULL, &b->buf);
++    if(result!=VK_SUCCESS)goto failed;
+     VkMemoryRequirements req;
+     pvkGetBufferMemoryRequirements(s_vk.device, b->buf, &req);
+     u32 type;
+@@ -607,14 +612,26 @@
+     else if (readback && vk_find_memory_type(req.memoryTypeBits, cached, &type) == 0) b->coherent = 0;
+     else if (vk_find_memory_type(req.memoryTypeBits, coh, &type) == 0) b->coherent = 1;
+     else if (vk_find_memory_type(req.memoryTypeBits, vis, &type) == 0) b->coherent = 0;
+-    else { VK_LOG("no host-visible memory for a buffer\n"); return -1; }
++    else { stage="host-visible memory type";result=VK_ERROR_FEATURE_NOT_PRESENT;goto failed; }
+     VkMemoryAllocateInfo mai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+                                  .allocationSize = req.size, .memoryTypeIndex = type };
+-    VK_CHECK(pvkAllocateMemory(s_vk.device, &mai, NULL, &b->mem), "vkAllocateMemory(buffer)");
+-    VK_CHECK(pvkBindBufferMemory(s_vk.device, b->buf, b->mem, 0), "vkBindBufferMemory");
+-    VK_CHECK(pvkMapMemory(s_vk.device, b->mem, 0, VK_WHOLE_SIZE, 0, &b->ptr), "vkMapMemory");
++    stage="vkAllocateMemory(buffer)"; result=pvkAllocateMemory(s_vk.device, &mai, NULL, &b->mem);
++    if(result!=VK_SUCCESS)goto failed;
++    stage="vkBindBufferMemory"; result=pvkBindBufferMemory(s_vk.device, b->buf, b->mem, 0);
++    if(result!=VK_SUCCESS)goto failed;
++    stage="vkMapMemory"; result=pvkMapMemory(s_vk.device, b->mem, 0, VK_WHOLE_SIZE, 0, &b->ptr);
++    if(result!=VK_SUCCESS)goto failed;
+     b->size = size;
+     return 0;
++failed:
++    VK_LOG("%s failed (VkResult %d)\n",stage,(int)result);
++    // This fresh buffer was never submitted; release partial ownership without
++    // flushing unrelated in-flight GPU work. Never leave stale handles on retry.
++    if(b->ptr)pvkUnmapMemory(s_vk.device,b->mem);
++    if(b->buf)pvkDestroyBuffer(s_vk.device,b->buf,NULL);
++    if(b->mem)pvkFreeMemory(s_vk.device,b->mem,NULL);
++    memset(b,0,sizeof *b);
++    return -1;
+ }
+ 
+ static void vk_destroy_buffer(vk_buffer* b)

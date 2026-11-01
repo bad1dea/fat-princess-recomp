@@ -3,6 +3,8 @@
 #include <atomic>
 #include <cstdio>
 #include <cmath>
+#include <chrono>
+#include <mach/mach.h>
 #include "ios_lifecycle.h"
 
 extern "C" void fp_audio_set_interrupted(int paused);
@@ -78,4 +80,23 @@ extern "C" void fp_ios_lifecycle_start(void) {
     });
     const UIApplicationState state = UIApplication.sharedApplication.applicationState;
     update(state == UIApplicationStateActive ? 0 : Inactive, state == UIApplicationStateActive ? Inactive : 0, "observer-start");
+}
+
+// Called after the host iteration's pool drains. One task query per five
+// seconds, rather than per poll, tracks physical use separately from the large
+// deliberately reserved guest arena and worker stacks.
+extern "C" void fp_ios_memory_sample(void) {
+    using Clock=std::chrono::steady_clock;
+    static Clock::time_point next{};
+    const auto now=Clock::now();
+    if(now<next)return;
+    next=now+std::chrono::seconds(5);
+    task_vm_info_data_t info{};
+    mach_msg_type_number_t count=TASK_VM_INFO_COUNT;
+    if(task_info(mach_task_self(),TASK_VM_INFO,reinterpret_cast<task_info_t>(&info),&count)!=KERN_SUCCESS)return;
+    static uint64_t peak=0;
+    if(info.phys_footprint>peak)peak=info.phys_footprint;
+    std::fprintf(stderr,"[ios-memory] ts_us=%llu resident_mb=%.2f footprint_mb=%.2f peak_mb=%.2f virtual_mb=%.2f pool=per-host-iteration\n",
+        (unsigned long long)std::chrono::duration_cast<std::chrono::microseconds>(now.time_since_epoch()).count(),
+        info.resident_size/1048576.,info.phys_footprint/1048576.,peak/1048576.,info.virtual_size/1048576.);
 }

@@ -959,6 +959,12 @@ extern "C" unsigned long fp_run_frame_clock(void (*present)(void)) {
 #endif
     };
     for (;;) {
+#if defined(__APPLE__) && TARGET_OS_IOS
+        // SDL_main never returns to UIKit's outer pool during this loop.
+        // Drain Foundation/GameController/Metal temporaries every iteration,
+        // including exits through continue and normal C++ stack unwinding.
+        @autoreleasepool {
+#endif
         // UIKit notifications and SDL lifecycle events must be processed BEFORE
         // walking commands or asking Vulkan to acquire a window image.
         if (fp_backend_pump_messages() != 0) std::exit(0);
@@ -1037,6 +1043,10 @@ extern "C" unsigned long fp_run_frame_clock(void (*present)(void)) {
         if (!g_d3d12) {FPHostTiming interp_timing(4);rsx_vulkan_backend_interp_service();}
         {FPHostTiming pending_timing(3);cellGcm_present_pending(present);}
         if (!cellGcm_flip_request_count()) fp_backend_present();
+#if defined(__APPLE__) && TARGET_OS_IOS
+        } // autoreleasepool
+        fp_ios_memory_sample();
+#endif
     }
 }
 
