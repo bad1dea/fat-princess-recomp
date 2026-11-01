@@ -14,7 +14,7 @@ index 328da532..137caad2 100644
      if(NOT PS3RECOMP_VULKAN_INCLUDE_DIR)
          message(FATAL_ERROR "Vulkan headers not found. Debian/Ubuntu: "
 @@ -66,7 +64,7 @@ endif()
- 
+
  # The Metal backend is Objective-C and Apple-only, so it is added explicitly
  # rather than globbed. It needs no platform #ifdef of its own as a result.
 -if(APPLE)
@@ -25,7 +25,7 @@ index 328da532..137caad2 100644
 @@ -163,7 +161,7 @@ else()
      target_link_libraries(ps3recomp_runtime PRIVATE Threads::Threads)
  endif()
- 
+
 -if(APPLE)
 +if(APPLE AND NOT IOS)
      target_link_libraries(ps3recomp_runtime PUBLIC
@@ -61,7 +61,7 @@ index 7da54660..138c07ae 100644
 @@ -907,6 +912,8 @@ static void* audio_adapt_thread(void* arg)
      }
  }
- 
+
 +void cellVoice_mix_output(float* out, int frames);
 +
  static void SDLCALL audio_sdl_pull(void* userdata, Uint8* stream, int len)
@@ -95,7 +95,7 @@ index 37c5ddb8..8877b431 100644
 @@ -311,6 +311,26 @@ static void play_callback(void* user, Uint8* stream, int len)
      free(acc);
  }
- 
+
 +/* Some hosts (iOS) offer one output device, already held by cellAudio. Voice then rides in the game mix:
 + * cellAudio calls this per output block and it adds 16 kHz voice upsampled to 48 kHz stereo. */
 +static volatile int s_play_mixed;
@@ -133,20 +133,20 @@ index 37c5ddb8..8877b431 100644
      if (s_play_dev) { SDL_CloseAudioDevice(s_play_dev); s_play_dev = 0; }
 +    s_play_mixed = 0;
  }
- 
+
  /* ---- API ------------------------------------------------------------------------------------------------- */
 diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
 index f78742c2..4cb04d86 100644
 --- a/libs/video/rsx_vulkan_backend.c
 +++ b/libs/video/rsx_vulkan_backend.c
 @@ -40,6 +40,9 @@
- 
+
  #define VK_NO_PROTOTYPES
  #include <vulkan/vulkan.h>
 +#if defined(__APPLE__)
 +#include <TargetConditionals.h>
 +#endif
- 
+
  #include "rsx_vulkan_backend.h"
  #include "rsx_debug_stats.h"
 @@ -258,6 +261,12 @@ static int vk_load_library(void)
@@ -178,11 +178,11 @@ index f78742c2..4cb04d86 100644
      u8       cube;                   /* TEXTURE: six layers, a CUBE view    */
 +    u8       decode;                 /* TEXTURE: BC1..3 kept as RGBA8 (no BC on the device) */
  } vk_eng_obj;
- 
+
  static vk_eng_obj s_eobj[VK_ENG_MAX_OBJ];
 @@ -2713,6 +2726,55 @@ static int vk_eng_upload_region(VkImage img, u32 layer, u32 mip, u32 x, u32 y,
  }
- 
+
  /* The same into the whole of a level, from its origin. */
 +/* Devices without textureCompressionBC (Apple's iOS GPUs) get BC1..3 decoded
 + * here into RGBA8, the same texels a BC image would sample. */
@@ -393,7 +393,7 @@ index 11a74804..aa296266 100644
 @@ -57,6 +60,20 @@
  #  include <ucontext.h>
  #endif
- 
+
 +#if defined(__APPLE__)
 +/* The guest arena must sit on a 4 GB boundary. vm_map's alignment mask gets
 + * that in one reservation of exactly the size asked for, which iOS allows
@@ -569,7 +569,7 @@ index 3a717d21..cb41a65c 100644
 @@ -8,6 +10,9 @@
  #include <stdlib.h>
  #include <time.h>
- 
+
 +__thread int g_spu_rz;
 +static int s_native;
 +
@@ -579,7 +579,7 @@ index 3a717d21..cb41a65c 100644
 @@ -29,12 +34,8 @@ static uint32_t rnd_float(void)
      return sign | (e << 23) | man;
  }
- 
+
 -int main(void)
 +static int suite(void)
  {
@@ -601,7 +601,7 @@ index 3a717d21..cb41a65c 100644
              return 1;
 @@ -160,8 +161,9 @@ int main(void)
      }
- 
+
      /* The NEON paths leave the thread in round-toward-zero; double precision
 -     * must still round to nearest: 1 + (2^-53 + 2^-60) -> 1 + 2^-52. */
 -    {
@@ -715,7 +715,7 @@ diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
 +static int s_adapt_stop;
 +#endif
  #endif
- 
+
  #ifndef _WIN32
 @@ -262,7 +267,11 @@
        /* the dummy driver sleeps for its timing, so its callbacks are always a little late */
@@ -731,7 +731,7 @@ diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
      printf("[cellAudio] SDL audio driver '%s', device buffer %u frames (%.1f ms), %s\n",
             SDL_GetCurrentAudioDriver() ? SDL_GetCurrentAudioDriver() : "?", (unsigned)have.samples,
 @@ -278,6 +287,10 @@
- 
+
  static void audio_backend_shutdown(void)
  {
 +#ifndef _WIN32
@@ -785,7 +785,7 @@ diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
 @@ -749,7 +750,10 @@
              s_mix_buffer[s * 2 + 1] += right;
          }
- 
+
 -        if (p == 0 && s_port_recent[p] > 0 && audio_block_all(src, nfloats, 0)) g_audio_zero_blocks++;
 +        if (p == 0 && s_port_recent[p] > 0) {
 +            if (audio_block_all(src, nfloats, 0)) g_audio_zero_blocks++;
@@ -793,7 +793,7 @@ diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
 +        }
          if (!audio_block_silent(src, nfloats)) s_port_recent[p] = 64;
          else if (s_port_recent[p] > 0) s_port_recent[p]--;
- 
+
 @@ -1064,10 +1068,10 @@
          const double p99 = nerr ? err_us[(unsigned)(nerr * 0.99)] : 0.0, pmax = nerr ? err_us[nerr - 1] : 0.0;
          fprintf(stderr, "[audio-rate] pull %.1f blocks/s (real time 187.5), callback period %.2f ms, timing error p99 %.2f ms max %.2f ms, "
@@ -888,7 +888,7 @@ diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
 +#if defined(__APPLE__)
 +#include <mach/mach_time.h>
 +#endif
- 
+
  /* Event-queue push/lookup (runtime/syscalls/sys_event.c). Forward-declared
   * rather than including sys_event.h to avoid pulling PPU context/syscall
 @@ -273,8 +276,8 @@
@@ -937,7 +937,7 @@ diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
      long long blocks = 0, last_mix = 0;
 +    long long wake_late_sum = 0, wake_late_max = 0;
 +    unsigned long long wake_count = 0, queue_waits = 0;
- 
+
      while (s_mix_thread_running) {
          struct timespec tn; clock_gettime(CLOCK_MONOTONIC, &tn);
 @@ -1184,19 +1211,16 @@
@@ -1123,7 +1123,7 @@ diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
          vk_guest_shutdown();
      }
 @@ -4761,21 +4801,53 @@
- 
+
  void rsx_vulkan_backend_set_debug_overlay(const uint8_t* rgba,u32 w,u32 h,const char* title) {
      if(s_vk.window && title) SDL_SetWindowTitle(s_vk.window,title);
 +    if(!s_vk.windowed || !rgba || !w || !h || w>2048 || h>1536) {
@@ -1180,7 +1180,7 @@ diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
 +    memcpy(s_debug_source_area,s_overlay_area,sizeof s_overlay_area);
 +    s_debug_source_opacity=s_overlay_opacity;
  }
- 
+
  /* The notification card (R, G, B, A bytes, w x h, corner radius in pixels); NULL hides it. */
 diff --git a/libs/video/rsx_vulkan_backend.h b/libs/video/rsx_vulkan_backend.h
 --- a/libs/video/rsx_vulkan_backend.h
@@ -1193,12 +1193,12 @@ diff --git a/libs/video/rsx_vulkan_backend.h b/libs/video/rsx_vulkan_backend.h
 +void rsx_vulkan_backend_set_overlay_area(const float area[6]);
  /* Host panel corner radius in pixels; non-zero also pads a top-left panel off the window corner. */
  void rsx_vulkan_backend_set_overlay_radius(uint32_t radius);
- 
+
 diff --git a/libs/video/vulkan/rsx_vk_hud.inc b/libs/video/vulkan/rsx_vk_hud.inc
 --- a/libs/video/vulkan/rsx_vk_hud.inc
 +++ b/libs/video/vulkan/rsx_vk_hud.inc
 @@ -22,7 +22,7 @@
- 
+
  static int vk_hud_create(void)
  {
 -    if (vk_create_image(&s_hud.t, VK_FORMAT_R8G8B8A8_UNORM, 1024, 512,
@@ -1218,7 +1218,7 @@ diff --git a/libs/video/vulkan/rsx_vk_hud.inc b/libs/video/vulkan/rsx_vk_hud.inc
 @@ -90,7 +90,7 @@
      pvkCmdBlitImage(s_vk.cmd, src, VK_IMAGE_LAYOUT_GENERAL, s_hud.t.img, VK_IMAGE_LAYOUT_GENERAL, 1, &under, VK_FILTER_LINEAR);
      pvkCmdPipelineBarrier(s_vk.cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
- 
+
 -    struct { uint32_t w, h; float opacity, radius; } pc = { w, h, s_overlay_opacity, (float)s_debug_radius };
 +    struct { uint32_t w, h; float opacity, radius; } pc = { w, h, s_overlay_opacity, (float)s_debug_draw_radius };
      pvkCmdBindPipeline(s_vk.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_hud.pipe);
@@ -1234,7 +1234,7 @@ diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
 +    unsigned long long mix_count = 0, mix_ns_sum = 0, mix_ns_max = 0;
 +    unsigned long long clipped_before = g_audio_clipped_samples, limited_before = g_audio_limited_blocks;
 +    unsigned long long nan_before = g_audio_nan_samples;
- 
+
      while (s_mix_thread_running) {
          struct timespec tn; clock_gettime(CLOCK_MONOTONIC, &tn);
 @@ -1225,11 +1228,15 @@
@@ -1330,9 +1330,9 @@ diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
  {
      const float g = g_audio_gain;
 @@ -781,40 +786,39 @@
- 
+
      mutex_unlock(&s_audio_mutex);
- 
+
 -    /* The game's own mix goes past full scale when many sounds overlap (peaks near 2.0 in a crowded fight). Clipping that
 -     * flat sounds like harsh distortion, so a limiter lowers the level instead: it drops at once to what the loudest
 -     * sample of the block needs and comes back up slowly (about 300 ms). Off (the AUDIO setting or FP_AUDIO_LIMITER=0) clips instead, as the console does.
@@ -1415,14 +1415,14 @@ diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
          return CELL_AUDIO_ERROR_ALREADY_INIT;
 +    memset(s_limiter_pending,0,sizeof s_limiter_pending);
 +    s_limiter_peak=0; s_limiter_gain=1;
- 
+
      memset(s_ports, 0, sizeof(s_ports));
      memset(s_notify_queues, 0, sizeof(s_notify_queues));
 diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
 --- a/libs/video/rsx_vulkan_backend.c
 +++ b/libs/video/rsx_vulkan_backend.c
 @@ -2647,7 +2647,16 @@
- 
+
  /* Defined with the E2 pipeline state further down. */
  static void vk_eng_drop_framebuffers(void);
 -#define VK_DRAW_BATCH_SIZE 96
@@ -1449,7 +1449,7 @@ diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
          if (P->cube_mask && !vk_eng_dummy_cube_view()) return;
          /* The set's slot buffers are written below, so its previous use must be finished. */
 @@ -4869,7 +4878,14 @@
- 
+
  void rsx_vulkan_backend_present(void)
  {
 -    vk_flush_at("rsx_vulkan_backend_present");
@@ -1470,7 +1470,7 @@ diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
 @@ -188,6 +188,26 @@
  int g_audio_jitter_blocks;   /* output delay in blocks, for the stats overlay */
  unsigned long long g_audio_late_blocks;   /* callbacks where the guest had not delivered a block in time */
- 
+
 +/* Lifecycle callbacks only publish state. The push worker owns close/reopen,
 + * so UIKit never blocks on an audio thread/device lock. */
 +static int s_audio_interrupted;
@@ -1492,12 +1492,12 @@ diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
 +}
 +
  #if AUDIO_BACKEND_SDL2
- 
+
  static SDL_AudioDeviceID s_sdl_audio_dev = 0;
 @@ -260,6 +280,13 @@
      if (s_pull) want.callback = audio_sdl_pull;
  #endif
- 
+
 +#ifndef _WIN32
 +    s_want=want;  /* retained even when activation is currently unavailable */
 +    if(!s_pull && __atomic_load_n(&s_audio_interrupted,__ATOMIC_ACQUIRE)) {
@@ -1511,7 +1511,7 @@ diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
 @@ -1184,6 +1211,28 @@
      return late > 0 ? late : 0;
  }
- 
+
 +#if AUDIO_BACKEND_SDL2
 +static int audio_push_reopen(void)
 +{
@@ -1547,7 +1547,7 @@ diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
 +    int reopen_pending=0;
 +    unsigned reopen_failures=0;
 +#endif
- 
+
      while (s_mix_thread_running) {
          struct timespec tn; clock_gettime(CLOCK_MONOTONIC, &tn);
          long long now = (long long)tn.tv_sec * 1000000000ll + tn.tv_nsec;
@@ -1628,7 +1628,7 @@ diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
 @@ -4238,6 +4251,34 @@
      return set;
  }
- 
+
 +/* All engine pipelines declare these states dynamic. Cache only inside a
 + * retained render pass, where no transfer/compute commands can intervene.
 + * Descriptor/vertex/index bindings remain private to each draw slot. */
@@ -1763,7 +1763,7 @@ diff --git a/runtime/spu/spu_workload.c b/runtime/spu/spu_workload.c
 +    }
 +    s_run_timing.resume=spu_task_us();s_run_timing.cpu_resume=spu_task_cpu_us();
  }
- 
+
  /* Deliver a signal to a task (callable from any PPU/host thread). */
 @@ -1300,6 +1357,7 @@
  int spu_taskset_wait_signal(uint32_t taskset_ea, uint32_t taskId)
@@ -1780,7 +1780,7 @@ diff --git a/runtime/spu/spu_workload.c b/runtime/spu/spu_workload.c
 +    task_run_after_wait();
      return 0;
  }
- 
+
 diff --git a/runtime/spu/spu_helpers.h b/runtime/spu/spu_helpers.h
 --- a/runtime/spu/spu_helpers.h
 +++ b/runtime/spu/spu_helpers.h
@@ -1830,10 +1830,10 @@ diff --git a/runtime/platform/win32_compat.h b/runtime/platform/win32_compat.h
 @@ -522,7 +522,7 @@
  typedef CONDITION_VARIABLE* PCONDITION_VARIABLE;
  #define CONDITION_VARIABLE_INIT NULL
- 
+
 -typedef struct { pthread_mutex_t m; pthread_cond_t c; unsigned gen; } ps3_condvar;
 +typedef struct { pthread_mutex_t m; pthread_cond_t c; unsigned gen; unsigned waiters; } ps3_condvar;
- 
+
  static inline void ps3__cv_init(void* p)
  {
 @@ -530,6 +530,7 @@
@@ -1876,7 +1876,7 @@ diff --git a/runtime/platform/win32_compat.h b/runtime/platform/win32_compat.h
 +    if (cv->waiters) pthread_cond_broadcast(&cv->c);
      pthread_mutex_unlock(&cv->m);
  }
- 
+
 @@ -562,6 +571,7 @@
      if (!cv) return FALSE;
      pthread_mutex_lock(&cv->m);
@@ -1929,14 +1929,14 @@ diff --git a/runtime/spu/spu_workload.c b/runtime/spu/spu_workload.c
 +    if(g_spu_task_run_observer)
 +        g_spu_task_run_observer(s_run_timing.taskset,s_run_timing.task,1,0,0);
  }
- 
+
  /* Deliver a signal to a task (callable from any PPU/host thread). */
 diff --git a/runtime/spu/spu_workload.h b/runtime/spu/spu_workload.h
 --- a/runtime/spu/spu_workload.h
 +++ b/runtime/spu/spu_workload.h
 @@ -33,6 +33,14 @@
  #endif
- 
+
  typedef void (*spu_lifted_entry_fn)(spu_context*);
 +
 +/* Optional host observer, installed before task threads start. Timing must be
@@ -1946,7 +1946,7 @@ diff --git a/runtime/spu/spu_workload.h b/runtime/spu/spu_workload.h
 +extern void (*g_spu_task_run_observer)(uint32_t taskset, uint32_t task,
 +    int running, uint64_t wall_us, uint64_t cpu_us);
 +
- 
+
  /* FNV-1a 64-bit over a byte range. The canonical workload fingerprint; the
   * offline extractor computes the same value so registrations and the images a
 diff --git a/runtime/spu/spu_helpers.h b/runtime/spu/spu_helpers.h
@@ -2015,7 +2015,7 @@ diff --git a/runtime/spu/spu_helpers.h b/runtime/spu/spu_helpers.h
 +static inline u128 spu_cflts(u128 a, int i8) { return spu_cflts_ref(a, i8); }
 +static inline u128 spu_cfltu(u128 a, int i8) { return spu_cfltu_ref(a, i8); }
 +#endif
- 
+
  /* fi -- Floating Interpolate (SPU ISA v1.2, p. 219; frest/frsqest output
   * format p. 215; single-precision rules section 9.1).
 diff --git a/runtime/spu/tests/test_spu_conversion_neon.c b/runtime/spu/tests/test_spu_conversion_neon.c
@@ -2235,10 +2235,10 @@ diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
      VkDescriptorSet normal, split;
 +    struct vk_eng_desc_state descriptors;
  } s_draw_slot[VK_DRAW_BATCH_SIZE * VK_ASYNC_SETS];
- 
+
  static void vk_eng2_shutdown(void* user);
 @@ -4154,11 +4172,14 @@
- 
+
  static int vk_draw_slot_prepare(struct vk_draw_slot* slot, VkDeviceSize vb, VkDeviceSize ib)
  {
 +    if(!slot->constants.buf || slot->constants.size<s_g.ubo.size)
@@ -2255,7 +2255,7 @@ diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
 @@ -4171,6 +4192,70 @@
      return 0;
  }
- 
+
 +/* Descriptor contents outlive command buffers. A draw slot is reused only
 + * after its fence; changing mapped constant bytes does not change a binding.
 + * Image-view destruction advances the epoch, even if a driver recycles handles. */
@@ -2372,7 +2372,7 @@ diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
 +    vk_eng_update_descriptor_state(set,split,enabled && slot?&slot->descriptors:NULL,bi,ii,si,vii,vsi);
      return set;
  }
- 
+
 
 --- a/runtime/spu/spu_helpers.h
 +++ b/runtime/spu/spu_helpers.h
@@ -2473,3 +2473,384 @@ diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
 + fesetround(FE_TONEAREST);
 + puts("PASS: extended repairs, 30 million random operations plus boundary triples, nearest/toward-zero");return 0;
 +}
+
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -48,6 +48,7 @@
+ #include "rsx_debug_stats.h"
+ #include "rsx_notify.h"
+ #include "rsx_overlay_layout.h"
++#include "rsx_stall_trace.h"
+ #include "rsx_vertex_fetch.h"
+ #include "rsx_texture_layout.h"
+ #include "rsx_vp_decompiler.h"
+@@ -701,6 +702,101 @@
+     return 0;
+ }
+
++/* Bounded five-second attribution. All operation durations are inclusive;
++ * frame records use a shared SDL monotonic clock and explicit phase bits.
++ * Try-lock drops diagnostics instead of blocking a rendering thread. */
++static SDL_atomic_t s_stall_mode,s_stall_dropped;
++static SDL_SpinLock s_stall_lock;
++static rsx_stall_trace s_stall;
++static int vk_stall_enabled(void) {
++    int mode=SDL_AtomicGet(&s_stall_mode);
++    if(!mode) {
++        const char* e=getenv("FP_STALL_TRACE");mode=e && !strcmp(e,"1")?2:1;
++        SDL_AtomicCAS(&s_stall_mode,0,mode);mode=SDL_AtomicGet(&s_stall_mode);
++    }
++    return mode==2;
++}
++static uint64_t vk_stall_start(void) {return vk_stall_enabled()?SDL_GetPerformanceCounter():0;}
++static void vk_stall_end(unsigned kind,uint64_t start,uint64_t bytes) {
++    if(!start)return;
++    const uint64_t end=SDL_GetPerformanceCounter();
++    if(!SDL_AtomicTryLock(&s_stall_lock)){SDL_AtomicAdd(&s_stall_dropped,1);return;}
++    extern uint32_t cellGcm_flip_request_count(void);
++    rsx_stall_record(&s_stall,kind,start,end,(uint64_t)SDL_ThreadID(),
++        cellGcm_flip_request_count(),bytes,SDL_GetPerformanceFrequency()/125);
++    SDL_AtomicUnlock(&s_stall_lock);
++}
++static void vk_stall_cache_result(int hit) {
++    if(!vk_stall_enabled())return;
++    if(!SDL_AtomicTryLock(&s_stall_lock)){SDL_AtomicAdd(&s_stall_dropped,1);return;}
++    if(hit)s_stall.shader_hits++;else s_stall.shader_misses++;
++    SDL_AtomicUnlock(&s_stall_lock);
++}
++void rsx_vulkan_backend_stall_frame(uint32_t frame,uint32_t flip,uint32_t draws,
++    double ms,double fifo,double cpu,double present,double pace,double guest,
++    uint32_t phase,uint32_t resume) {
++    if(!vk_stall_enabled())return;
++    static uint64_t window;
++    static uint32_t old_phase=~0u,old_resume=~0u;
++    const uint64_t now=SDL_GetPerformanceCounter(),freq=SDL_GetPerformanceFrequency();
++    const double us=1000000.0*(double)now/(double)freq;
++    if(!SDL_AtomicTryLock(&s_stall_lock)){SDL_AtomicAdd(&s_stall_dropped,1);return;}
++    if(!window)window=s_stall.begin?s_stall.begin:now;
++    if(old_resume!=~0u && old_resume!=resume){memset(&s_stall,0,sizeof s_stall);window=now;}
++    if(phase!=old_phase || resume!=old_resume) {
++        s_stall.phases[s_stall.phase_count++%8]=(rsx_stall_phase){now,frame,flip,phase,resume};
++        old_phase=phase;old_resume=resume;
++    }
++    if(ms>=0)rsx_stall_frame_add(&s_stall,(rsx_stall_frame){now,frame,flip,draws,phase,resume,ms,fifo,cpu,present,pace,guest});
++    if(now-window<freq*5){SDL_AtomicUnlock(&s_stall_lock);return;}
++    rsx_stall_trace snapshot=s_stall;memset(&s_stall,0,sizeof s_stall);
++    SDL_AtomicUnlock(&s_stall_lock);
++    static const char* names[]={"buffer_grow","shader_read","shader_write","translate",
++        "pipeline_create","cache_save","staging_alloc","upload_copy","upload_submit","bc_decode",
++        "set_fence","swap_acquire","queue_present","cache_serialize","cache_write","shader_module","driver_cache_read","driver_cache_create","texture_total","texture_create"};
++    _Static_assert(sizeof names/sizeof names[0]==RSX_STALL_KINDS,"stall kind names");
++    fprintf(stderr,"[stall-window] ts_us=%.0f frame=%u flip=%u window_ms=%.2f frames=%llu frame_avg=%.2f frame_max=%.2f draws_mean=%.1f draws_max=%u shader_hits=%llu shader_misses=%llu events=%llu overwritten=%llu dropped=%d over50=%llu over100=%llu over250=%llu inclusive_ops=1 gpu_timing=0\n",
++        us,frame,flip,1000.0*(double)(now-window)/freq,(unsigned long long)snapshot.frames,
++        snapshot.frames?snapshot.total_ms/snapshot.frames:0,snapshot.max_ms,
++        snapshot.frames?(double)snapshot.draws/snapshot.frames:0,snapshot.max_draws,
++        (unsigned long long)snapshot.shader_hits,(unsigned long long)snapshot.shader_misses,
++        (unsigned long long)snapshot.event_count,(unsigned long long)(snapshot.event_count>RSX_STALL_EVENTS?snapshot.event_count-RSX_STALL_EVENTS:0),
++        SDL_AtomicSet(&s_stall_dropped,0),(unsigned long long)snapshot.over50,(unsigned long long)snapshot.over100,(unsigned long long)snapshot.over250);
++    const uint64_t first_phase=snapshot.phase_count>8?snapshot.phase_count-8:0;
++    for(uint64_t i=first_phase;i<snapshot.phase_count;i++) {
++        const rsx_stall_phase*p=&snapshot.phases[i%8];
++        fprintf(stderr,"[stall-phase] ts_us=%.0f frame=%u flip=%u bits=%u resume=%u phase_changes=%llu (host_menu=1 ai=2 player=4; zero=unknown)\n",
++            1000000.0*(double)p->tick/freq,p->frame,p->flip,p->bits,p->resume,(unsigned long long)snapshot.phase_count);
++    }
++    for(unsigned i=0;i<RSX_STALL_FRAMES;i++) {
++        const rsx_stall_frame*f=&snapshot.worst[i];if(!f->tick)continue;
++        fprintf(stderr,"[stall-frame] ts_us=%.0f frame=%u flip=%u bits=%u resume=%u ms=%.2f draws=%u fifo_work=%.2f fifo_cpu=%.2f present=%.2f pacing=%.2f guest_release_to_queue=%.2f\n",
++            1000000.0*(double)f->tick/freq,f->frame,f->flip,f->phase,f->resume,f->ms,f->draws,f->fifo,f->cpu,f->present,f->pace,f->guest);
++    }
++    /* Summarize every category, rather than printing each operation. */
++    for(unsigned i=0;i<RSX_STALL_KINDS;i++) {
++        const rsx_stall_op*o=&snapshot.ops[i];if(!o->calls)continue;
++        fprintf(stderr,"[stall-op] ts_us=%.0f kind=%s calls=%llu total_ms=%.3f max_ms=%.3f bytes=%llu inclusive=1\n",
++            us,names[i],(unsigned long long)o->calls,1000.0*(double)o->ticks/freq,1000.0*(double)o->maximum/freq,(unsigned long long)o->bytes);
++    }
++    /* At most eight slow operations per window, longest first. */
++    for(unsigned n=0;n<8;n++) {
++        unsigned best=0;uint64_t longest=0;
++        for(unsigned i=0;i<RSX_STALL_EVENTS;i++) {
++            rsx_stall_event*e=&snapshot.events[i];
++            if(e->end-e->start>longest){longest=e->end-e->start;best=i;}
++        }
++        if(!longest)break;
++        rsx_stall_event*e=&snapshot.events[best];
++        fprintf(stderr,"[stall-event] begin_us=%.0f end_us=%.0f flip=%u thread=%llu kind=%s ms=%.3f inclusive=1\n",
++            1000000.0*(double)e->start/freq,1000000.0*(double)e->end/freq,e->flip,
++            (unsigned long long)e->thread,names[e->kind],1000.0*(double)longest/freq);
++        e->start=e->end;
++    }
++    fprintf(stderr,"[stall-overhead] ts_us=%.0f flush_ms=%.3f\n",us,1000.0*(double)(SDL_GetPerformanceCounter()-now)/freq);
++    window=now;
++}
++
+ static VkPipelineCache s_pipe_cache;
+ static unsigned s_pipe_cache_new;
+ /* The driver's pipeline cache is kept in FP_SHADER_CACHE_DIR (one file per GPU name; the driver ignores
+@@ -717,33 +813,47 @@
+ {
+     const char* dir = getenv("FP_SHADER_CACHE_DIR");
+     if (!dir || !*dir || s_pipe_cache) return;
++    const uint64_t read_start=vk_stall_start();
+     char path[600]; vk_pipe_cache_path(path, sizeof path);
+     void* data = NULL; size_t size = 0;
+     FILE* f = fopen(path, "rb");
+     if (f) { fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
+              if (n > 0 && (data = malloc((size_t)n)) && fread(data, 1, (size_t)n, f) == (size_t)n) size = (size_t)n; else { free(data); data = NULL; }
+              fclose(f); }
++    vk_stall_end(ST_CACHE_READ,read_start,size);
+     VkPipelineCacheCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO, .initialDataSize = size, .pInitialData = data };
++    const uint64_t create_start=vk_stall_start();
+     if (pvkCreatePipelineCache(s_vk.device, &ci, NULL, &s_pipe_cache) != VK_SUCCESS) s_pipe_cache = VK_NULL_HANDLE;
++    vk_stall_end(ST_CACHE_INIT,create_start,size);
+     VK_LOG("pipeline cache %s (%zu bytes loaded)\n", s_pipe_cache ? "on" : "unavailable", size);
+     free(data);
+ }
+ static int s_disk_cache_off;
+-static void vk_pipe_cache_save(void)
++static void vk_pipe_cache_save_impl(void)
+ {
+     if (!s_pipe_cache || s_disk_cache_off) return;
++    const uint64_t serialize_start=vk_stall_start();
+     size_t size = 0;
+     if (pvkGetPipelineCacheData(s_vk.device, s_pipe_cache, &size, NULL) != VK_SUCCESS || !size) return;
+     void* data = malloc(size);
+     if (!data) return;
+-    if (pvkGetPipelineCacheData(s_vk.device, s_pipe_cache, &size, data) == VK_SUCCESS) {
++    const VkResult cache_result=pvkGetPipelineCacheData(s_vk.device,s_pipe_cache,&size,data);
++    vk_stall_end(ST_CACHE_SERIALIZE,serialize_start,size);
++    if (cache_result == VK_SUCCESS) {
++        const uint64_t write_start=vk_stall_start();
+         char path[600], tmp[640]; vk_pipe_cache_path(path, sizeof path);
+         snprintf(tmp, sizeof tmp, "%s.tmp%d", path, (int)getpid());
+         FILE* f = fopen(tmp, "wb");
+         if (f) { const int ok = fwrite(data, 1, size, f) == size; fclose(f); if (ok) rename(tmp, path); else remove(tmp); }
++        vk_stall_end(ST_CACHE_WRITE,write_start,size);
+     }
+     free(data);
+     s_pipe_cache_new = 0;
++}
++
++static void vk_pipe_cache_save(void) {
++    if(!s_pipe_cache || s_disk_cache_off)return;
++    const uint64_t start=vk_stall_start();vk_pipe_cache_save_impl();vk_stall_end(ST_CACHE_SAVE,start,0);
+ }
+
+ /* FP_HITCH_MS=n: log engine operations that take longer than n ms (shader translation, pipeline
+@@ -756,6 +866,12 @@
+ void rsx_vulkan_backend_set_hitch_ms(double ms) { s_hitch_ms = ms > 0 ? ms : -1.0; }
+ static double vk_ms_since(uint64_t start);
+ static void vk_hitch(const char* what, uint64_t start) {
++    unsigned kind=RSX_STALL_KINDS;
++    if(!strcmp(what,"buffer_grow"))kind=ST_BUFFER;
++    else if(!strcmp(what,"hlsl_to_spirv"))kind=ST_TRANSLATE;
++    else if(!strcmp(what,"vkCreateGraphicsPipelines"))kind=ST_PIPELINE;
++    else if(!strcmp(what,"texture_upload"))kind=ST_TEXTURE_TOTAL;
++    vk_stall_end(kind,vk_stall_enabled()?start:0,0);
+     const double t = vk_hitch_threshold();
+     if (t < 0) return;
+     const double ms = vk_ms_since(start);
+@@ -773,6 +889,7 @@
+     VK_CHECK(pvkWaitForFences(s_vk.device, 1, &s_set_fence[set], VK_TRUE, UINT64_MAX), "vkWaitForFences");
+     s_set_inflight[set] = 0;
+     const double ms = vk_ms_since(start);
++    vk_stall_end(ST_SET_WAIT,vk_stall_enabled()?start:0,0);
+     vk_trace_submit(reason, 0, ms);
+     s_debug_stats.submit_wait_ms += ms;
+     return 0;
+@@ -2378,8 +2495,10 @@
+     /* Two acquire semaphores on alternate presents: by the second present after this one, the set this present's
+      * submit used has been waited on again, so its wait on the semaphore is complete before it is signalled anew. */
+     const VkSemaphore acquire_sem = (s_win_presents & 1u) && s_vk.sem_acquire2 ? s_vk.sem_acquire2 : s_vk.sem_acquire;
++    const uint64_t acquire_start=vk_stall_start();
+     VkResult r = pvkAcquireNextImageKHR(s_vk.device, s_vk.swapchain, UINT64_MAX,
+                                         acquire_sem, VK_NULL_HANDLE, &idx);
++    vk_stall_end(ST_ACQUIRE,acquire_start,0);
+     if (r == VK_ERROR_OUT_OF_DATE_KHR) { ++s_win_ood; vk_swapchain_lost(); return; }
+     if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) {
+         s_win_acq_last = (int)r;
+@@ -2534,7 +2653,9 @@
+         .waitSemaphoreCount = 1, .pWaitSemaphores = &s_vk.sc_done[idx],
+         .swapchainCount = 1, .pSwapchains = &s_vk.swapchain, .pImageIndices = &idx,
+     };
++    const uint64_t queue_present_start=vk_stall_start();
+     r = pvkQueuePresentKHR(s_vk.queue, &pi);
++    vk_stall_end(ST_PRESENT,queue_present_start,0);
+     ++s_win_presents;
+     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) { ++s_win_ood; vk_swapchain_lost(); }
+     else if (r != VK_SUCCESS) {
+@@ -2784,11 +2905,16 @@
+                                 const void* src, u32 row_bytes)
+ {
+     if (tight > row_bytes) tight = row_bytes;
++    const uint64_t alloc_start=vk_stall_start();
+     vk_buffer st = {0};
+     if (vk_create_host_buffer(&st, (VkDeviceSize)tight * rows, VK_BUFFER_USAGE_TRANSFER_SRC_BIT) ||
+         !st.coherent) { vk_destroy_buffer(&st); return -1; }
++    vk_stall_end(ST_STAGING,alloc_start,(uint64_t)tight*rows);
++    const uint64_t copy_start=vk_stall_start();
+     for (u32 y = 0; y < rows; y++)
+         memcpy((u8*)st.ptr + (size_t)y * tight, (const u8*)src + (size_t)y * row_bytes, tight);
++    vk_stall_end(ST_COPY,copy_start,(uint64_t)tight*rows);
++    const uint64_t submit_start=vk_stall_start();
+     int rc = (s_begin_reason="vk_eng_upload_region", vk_begin());
+     if (!rc) {
+         vk_barrier_image(img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
+@@ -2801,6 +2927,7 @@
+         rc = (s_submit_reason="vk_eng_upload_region", vk_submit_and_wait());
+     }
+     vk_destroy_buffer(&st);
++    vk_stall_end(ST_UPLOAD,submit_start,(uint64_t)tight*rows);
+     return rc;
+ }
+
+@@ -3258,7 +3385,7 @@
+  * six-layer cube-compatible image, each face uploaded into its layer, sampled
+  * through a CUBE view; the pipelines that sample one use the split set layout
+  * (vk_eng_split_layout). */
+-static u32 vk_eng_texture_create(void* user, rsx_be_format fmt, u32 w, u32 h,
++static u32 vk_eng_texture_create_impl(void* user, rsx_be_format fmt, u32 w, u32 h,
+                                  u32 mips, u32 faces, u32 remap, u32 rsx_fmt)
+ {
+     (void)user;
+@@ -3307,6 +3434,12 @@
+     return 0;
+ }
+
++static u32 vk_eng_texture_create(void* user,rsx_be_format fmt,u32 w,u32 h,u32 mips,u32 faces,u32 remap,u32 rsx_fmt) {
++    const uint64_t start=vk_stall_start();
++    const u32 result=vk_eng_texture_create_impl(user,fmt,w,h,mips,faces,remap,rsx_fmt);
++    vk_stall_end(ST_TEXTURE_CREATE,start,0);return result;
++}
++
+ static void vk_eng_texture_upload_impl(void* user, u32 texture, u32 face, u32 mip, u32 w, u32 h,
+                                        const void* src, u32 row_bytes, u32 rows)
+ {
+@@ -3320,10 +3453,12 @@
+         const size_t pitch = (size_t)pw * 4u;
+         u8* rgba = (u8*)malloc(pitch * bh * 4u);
+         if (!rgba) return;
++        const uint64_t decode_start=vk_stall_start();
+         for (u32 by = 0; by < bh; by++)
+             for (u32 bx = 0; bx < bw; bx++)
+                 vk_bc_decode_block(o->decode, (const u8*)src + (size_t)by * row_bytes + (size_t)bx * o->block,
+                                    rgba + (size_t)by * 4u * pitch + (size_t)bx * 16u, pitch);
++        vk_stall_end(ST_DECODE,decode_start,pitch*bh*4u);
+         u32 out_rows = bh * 4u < h ? bh * 4u : h;
+         vk_eng_upload_rows(o->im.img, face, mip, w, out_rows, (size_t)w * 4u, out_rows, rgba, (u32)pitch);
+         free(rgba);
+@@ -3666,7 +3801,7 @@
+     for (const unsigned char* c = (const unsigned char*)hlsl; *c; c++, n++) { h ^= *c; h *= 1099511628211ull; }
+     snprintf(out, cap, "%s/%016llx-%zx-%d.spv", vk_shader_cache_dir(), (unsigned long long)h, n, stage);
+ }
+-static int vk_shader_cache_load(const char* hlsl, int stage, u32* words)
++static int vk_shader_cache_load_impl(const char* hlsl, int stage, u32* words)
+ {
+     if (!vk_shader_cache_dir()) return 0;
+     char path[600];
+@@ -3679,7 +3814,12 @@
+     *words = (u32)got;
+     return 1;
+ }
+-static void vk_shader_cache_store(const char* hlsl, int stage, u32 words)
++static int vk_shader_cache_load(const char* hlsl,int stage,u32* words) {
++    const uint64_t start=vk_stall_start();
++    const int hit=vk_shader_cache_load_impl(hlsl,stage,words);
++    vk_stall_end(ST_SHADER_READ,start,hit?(uint64_t)*words*4:0);vk_stall_cache_result(hit);return hit;
++}
++static void vk_shader_cache_store_impl(const char* hlsl, int stage, u32 words)
+ {
+     if (!vk_shader_cache_dir()) return;
+     char path[600], tmp[640];
+@@ -3692,6 +3832,10 @@
+     if (ok) rename(tmp, path); else remove(tmp);
+ }
+
++static void vk_shader_cache_store(const char* hlsl,int stage,u32 words) {
++    const uint64_t start=vk_stall_start();vk_shader_cache_store_impl(hlsl,stage,words);
++    vk_stall_end(ST_SHADER_WRITE,start,(uint64_t)words*4);
++}
+ static int vk_eng_translate(const char* hlsl, int stage, VkShaderModule* out)
+ {
+     u32 words = 0;
+@@ -3708,7 +3852,10 @@
+     }
+     VkShaderModuleCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+                                     .codeSize = (size_t)words * 4u, .pCode = s_g.spv };
+-    return pvkCreateShaderModule(s_vk.device, &ci, NULL, out) == VK_SUCCESS ? 0 : -1;
++    const uint64_t module_start=vk_stall_start();
++    const VkResult result=pvkCreateShaderModule(s_vk.device,&ci,NULL,out);
++    vk_stall_end(ST_MODULE,module_start,(uint64_t)words*4);
++    return result==VK_SUCCESS?0:-1;
+ }
+
+ /* A pixel program with a cube unit declares all sixteen units one by one
+--- a/libs/video/rsx_vulkan_backend.h
++++ b/libs/video/rsx_vulkan_backend.h
+@@ -68,6 +68,14 @@
+ /* Unregister and destroy every Vulkan object, then unload the library. */
+ void rsx_vulkan_backend_shutdown(void);
+
++/* Opt-in bounded diagnostics; phase bits: menu=1, AI=2, player available=4.
++ * All times in milliseconds. fifo/cpu exclude nested host presentation;
++ * other categories can overlap. cpu=-1 means unavailable; frame_ms<0 skips
++ * an initial/resume sample. This never reads GPU timestamps or adds waits. */
++void rsx_vulkan_backend_stall_frame(uint32_t frame,uint32_t flip,uint32_t draws,
++    double frame_ms,double fifo,double cpu,double present,double pacing,double guest,
++    uint32_t phase,uint32_t resume);
++
+ /* Headless: always 0. Windowed: drains SDL's event queue; -1 once the
+  * window has been closed or Esc pressed. */
+ int  rsx_vulkan_backend_pump_messages(void);
+--- /dev/null
++++ b/libs/video/rsx_stall_trace.h
+@@ -0,0 +1,50 @@
++#ifndef RSX_STALL_TRACE_H
++#define RSX_STALL_TRACE_H
++#include <stdint.h>
++#include <string.h>
++/* Caller serializes access. No allocation, I/O, clock queries or GPU waits. */
++enum { RSX_STALL_KINDS=20, RSX_STALL_EVENTS=32, RSX_STALL_FRAMES=4 };
++enum rsx_stall_kind { ST_BUFFER, ST_SHADER_READ, ST_SHADER_WRITE, ST_TRANSLATE,
++    ST_PIPELINE, ST_CACHE_SAVE, ST_STAGING, ST_COPY, ST_UPLOAD, ST_DECODE,
++    ST_SET_WAIT, ST_ACQUIRE, ST_PRESENT, ST_CACHE_SERIALIZE, ST_CACHE_WRITE, ST_MODULE, ST_CACHE_READ, ST_CACHE_INIT, ST_TEXTURE_TOTAL, ST_TEXTURE_CREATE };
++typedef struct rsx_stall_op { uint64_t calls,ticks,maximum,bytes; } rsx_stall_op;
++typedef struct rsx_stall_event { uint64_t start,end,thread; uint32_t flip,kind; } rsx_stall_event;
++typedef struct rsx_stall_frame {
++    uint64_t tick; uint32_t frame,flip,draws,phase,resume;
++    double ms,fifo,cpu,present,pace,guest;
++} rsx_stall_frame;
++typedef struct rsx_stall_phase {uint64_t tick;uint32_t frame,flip,bits,resume;} rsx_stall_phase;
++typedef struct rsx_stall_trace {
++    rsx_stall_op ops[RSX_STALL_KINDS];
++    rsx_stall_event events[RSX_STALL_EVENTS];
++    rsx_stall_frame worst[RSX_STALL_FRAMES];
++    rsx_stall_phase phases[8];uint64_t phase_count;
++    uint64_t event_count,frames,shader_hits,shader_misses,over50,over100,over250;
++    uint64_t begin;
++    double total_ms,max_ms; uint64_t draws; uint32_t max_draws;
++} rsx_stall_trace;
++static inline void rsx_stall_record(rsx_stall_trace*t,unsigned kind,uint64_t start,
++    uint64_t end,uint64_t thread,uint32_t flip,uint64_t bytes,uint64_t threshold) {
++    if(kind>=RSX_STALL_KINDS || end<start) return;
++    if(!t->begin || start<t->begin)t->begin=start;
++    const uint64_t elapsed=end-start;
++    rsx_stall_op*o=&t->ops[kind];o->calls++;o->ticks+=elapsed;o->bytes+=bytes;
++    if(elapsed>o->maximum)o->maximum=elapsed;
++    if(elapsed>=threshold) {
++        rsx_stall_event*e=&t->events[t->event_count++%RSX_STALL_EVENTS];
++        *e=(rsx_stall_event){start,end,thread,flip,kind};
++    }
++}
++static inline void rsx_stall_frame_add(rsx_stall_trace*t,rsx_stall_frame f) {
++    if(f.ms<0)return;
++    if(!t->begin)t->begin=f.tick;
++    t->frames++;t->total_ms+=f.ms;t->draws+=f.draws;
++    t->over50+=f.ms>50.;t->over100+=f.ms>100.;t->over250+=f.ms>250.;
++    if(f.ms>t->max_ms)t->max_ms=f.ms;
++    if(f.draws>t->max_draws)t->max_draws=f.draws;
++    if(f.ms<40.)return;
++    unsigned smallest=0;
++    for(unsigned i=1;i<RSX_STALL_FRAMES;i++)if(t->worst[i].ms<t->worst[smallest].ms)smallest=i;
++    if(f.ms>t->worst[smallest].ms)t->worst[smallest]=f;
++}
++#endif

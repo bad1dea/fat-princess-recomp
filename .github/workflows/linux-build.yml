@@ -19,6 +19,11 @@ jobs:
       - uses: ./.github/actions/prepare
         with:
           lift-key: ${{ secrets.FP_LIFT_KEY }}
+      - name: Verify bounded stall capture
+        run: |
+          c++ -std=c++17 -O2 tests/stall_trace.cpp -o /tmp/stall-trace
+          /tmp/stall-trace
+          python3 tests/stall_trace_backend.py
       - name: Configure
         run: |
           cmake -S . -B build/native -G Ninja -DCMAKE_BUILD_TYPE=Release -DFP_BUILD_GAME=ON \

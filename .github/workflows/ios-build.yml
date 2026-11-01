@@ -67,6 +67,10 @@ jobs:
           "$RUNNER_TEMP/spu-extended"
           cc -O2 -frounding-math -ffp-contract=off -Ithird_party/ps3recomp/include -I"$rt" "$rt/spu/tests/test_spu_float_neon.c" -lm -o "$RUNNER_TEMP/spu-native"
           "$RUNNER_TEMP/spu-native"
+      - name: Verify bounded stall capture
+        run: |
+          c++ -std=c++17 -O2 tests/stall_trace.cpp -o "$RUNNER_TEMP/stall-trace"
+          "$RUNNER_TEMP/stall-trace"
       - name: Verify Vulkan descriptor reuse
         run: CPPFLAGS="-I$(brew --prefix vulkan-headers)/include" python3 tests/vulkan_descriptor_cache.py
       - name: Configure

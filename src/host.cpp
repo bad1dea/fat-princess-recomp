@@ -32,6 +32,7 @@ namespace {
 std::atomic<unsigned> g_resume_serial{0};
 std::atomic<double> g_pace_hz{60.0};          // rate the game is released and presented at
 std::atomic<long long> g_last_tick_ns{0};     // when the emulated vblank last released the game
+std::atomic<uint32_t> g_work_flip{0};
 std::atomic<double> g_work_ms{0.0};           // time from that release to the game queueing its next flip
 
 // FP_PACE_LOG=path: one line per event ("T tick_ns", "F flip_queued_ns", "P present_done_ns", CLOCK_MONOTONIC_RAW) for pacing analysis.
@@ -59,6 +60,7 @@ void pace_log(char kind) {
 #include <deque>
 #include <mutex>
 #include "self_test.h"
+#include "frame_timing.h"
 #include "room_password.h"
 #include "settings_panel.h"
 #include "../third_party/ps3recomp/libs/video/rsx_debug_stats.h"
@@ -303,6 +305,31 @@ static bool fp_stats_allowed() {
 }
 // Wall time on the host presenter thread; excludes parallel guest workers.
 static double fp_fifo_wall_ms;
+static bool fp_stall_enabled() {
+    static const bool on=[] {const char*e=std::getenv("FP_STALL_TRACE");return e && !std::strcmp(e,"1");}();return on;
+}
+static uint64_t fp_trace_cpu_ns() {
+#ifdef _WIN32
+    FILETIME c,e,k,u;
+    if(!GetThreadTimes(GetCurrentThread(),&c,&e,&k,&u))return 0;
+    return (((uint64_t)k.dwHighDateTime<<32)|k.dwLowDateTime)*100+
+           (((uint64_t)u.dwHighDateTime<<32)|u.dwLowDateTime)*100;
+#else
+    timespec t{};if(clock_gettime(CLOCK_THREAD_CPUTIME_ID,&t))return 0;
+    return (uint64_t)t.tv_sec*1000000000ull+(uint64_t)t.tv_nsec;
+#endif
+}
+static thread_local FPFifoTiming fp_fifo_timing;
+static void fp_trace_fifo_resume() {if(fp_stall_enabled())fp_fifo_timing.resume(SDL_GetPerformanceCounter(),fp_trace_cpu_ns());}
+static void fp_trace_fifo_pause() {if(fp_stall_enabled())fp_fifo_timing.pause(SDL_GetPerformanceCounter(),fp_trace_cpu_ns());}
+struct FPPresentTimingPause {
+    bool paused=fp_stall_enabled() && fp_fifo_timing.active;
+    FPPresentTimingPause(){if(paused)fp_trace_fifo_pause();}
+    ~FPPresentTimingPause(){if(paused)fp_trace_fifo_resume();}
+};
+extern "C" void rsx_vulkan_backend_stall_frame(uint32_t,uint32_t,uint32_t,
+    double,double,double,double,double,double,uint32_t,uint32_t);
+
 // FP_FRAME_RING=N keeps the last N presented guest frames (RGBA, ~3.7 MB each at 720p); F9 writes them to
 // FP_FRAME_RING_DIR (default ./frame-ring-<time>) as PPMs named by flip number. For catching one-frame glitches.
 static void fp_ring_store(uint32_t flip) {
@@ -356,6 +383,7 @@ static void fp_ring_store(uint32_t flip) {
 }
 static std::atomic<uint32_t> g_hang_presents{0};   // frames that reached fp_backend_present, for the hang watchdog
 extern "C" void fp_backend_present(void) {
+    FPPresentTimingPause fifo_scope;
     g_hang_presents.fetch_add(1, std::memory_order_relaxed);
     using Clock = std::chrono::steady_clock;
     static const bool trace = std::getenv("FP_PRESENT_TIMING") && std::strcmp(std::getenv("FP_PRESENT_TIMING"),"0");
@@ -365,7 +393,8 @@ extern "C" void fp_backend_present(void) {
     static auto last=Clock::now(), epoch=last;
     static const bool epoch_logged=[&]{ std::fprintf(stderr,"[fp-stats] epoch_us=%llu\n",(unsigned long long)std::chrono::duration_cast<std::chrono::microseconds>(epoch.time_since_epoch()).count()); return true; }();
     (void)epoch_logged;
-    static double window_ms=0, window_wait=0, window_fifo=0, window_present=0;
+    static double window_ms=0, window_wait=0, window_fifo=0, window_present=0, window_max=0;
+    static uint64_t window_draws=0;static uint32_t window_draws_max=0;
     static double previous_fifo_ms=0;
     static uint64_t window_submits=0;
     static uint32_t window_flip0=0;
@@ -386,6 +415,7 @@ extern "C" void fp_backend_present(void) {
         resume_serial=resume; last=Clock::now();
         filled=cursor=window_frames=0; window_ms=window_wait=window_fifo=window_present=0;
         window_submits=0;window_flip0=flip;previous_fifo_ms=fp_fifo_wall_ms;
+        window_max=0;window_draws=0;window_draws_max=0;
         if(!g_d3d12) rsx_vulkan_backend_get_debug_stats(&previous);
     }
     // Frame cap (FP_FPS_CAP, default 60, 0 = unlimited). Paces presents only; the guest's own
@@ -472,6 +502,7 @@ extern "C" void fp_backend_present(void) {
         while(Clock::now()<target) {}
     }
     paced:
+    const double pacing_ms=std::chrono::duration<double,std::milli>(Clock::now()-ready).count();
     // FP_DUMP_MEM_AT_S=t1,t2,... with FP_DUMP_MEM_DIR=dir: write the guest heap (0x40000000 to 0x50000000) at those times.
     {
         static const char* when=std::getenv("FP_DUMP_MEM_AT_S");
@@ -659,7 +690,8 @@ extern "C" void fp_backend_present(void) {
             std::fprintf(stderr,"[fp-shot] %u t=%.1f\n",shots-1,std::chrono::duration<double>(last_shot-started).count());
         }
     }
-    const bool ai_control = fp::player_control_state().ai;
+    const auto player_control=fp::player_control_state();
+    const bool ai_control = player_control.ai;
     static bool ai_badge_was_active = false;
     if (!ai_control && ai_badge_was_active && !fp::settings_stats_visible() &&
         !fp::settings_menu_open() && !fp::settings_osk_active() && !fp::trophy_ui_active())
@@ -680,6 +712,7 @@ extern "C" void fp_backend_present(void) {
         intervals[cursor++ % intervals.size()]=ms;filled=std::min(filled+1,unsigned(intervals.size()));
         window_ms+=ms;window_wait+=wait;window_submits+=submits;
         window_fifo+=fifo_ms;window_present+=present_ms;++window_frames;
+        window_max=std::max(window_max,ms);window_draws+=draws;window_draws_max=std::max(window_draws_max,draws);
     }
     ++count;duplicates+=duplicate;drops+=drop;
     if(!window_flip0) window_flip0=flip;
@@ -704,6 +737,16 @@ extern "C" void fp_backend_present(void) {
         stats.mean_luma,stats.dark_samples,unsigned(duplicate),unsigned(drop),
         count==1?0.:fp_fifo_wall_ms-previous_fifo_ms,present_ms,(unsigned long long)stats.submissions);
     previous_fifo_ms=fp_fifo_wall_ms;
+    if(fp_stall_enabled() && !g_d3d12) {
+        static uint64_t previous_wall=0,previous_cpu=0;
+        if(just_resumed){previous_wall=fp_fifo_timing.wall_total;previous_cpu=fp_fifo_timing.cpu_total;}
+        const double work=1000.0*double(fp_fifo_timing.wall_total-previous_wall)/SDL_GetPerformanceFrequency();
+        const double cpu=fp_fifo_timing.cpu_valid && fp_fifo_timing.cpu_total?
+            double(fp_fifo_timing.cpu_total-previous_cpu)/1000000.0:-1.;
+        rsx_vulkan_backend_stall_frame(count,flip,draws,count>1 && !just_resumed?ms:-1.,work,cpu,
+            present_ms,pacing_ms,g_work_flip.load()==flip?g_work_ms.load():-1.,(fp::settings_menu_open()?1u:0u)|(ai_control?2u:0u)|(player_control.available?4u:0u),resume);
+        previous_wall=fp_fifo_timing.wall_total;previous_cpu=fp_fifo_timing.cpu_total;
+    }
     if(window_frames && window_ms>=500) {
         auto sorted=intervals;std::sort(sorted.begin(),sorted.begin()+filled);
         const double fps=1000.*window_frames/window_ms;
@@ -729,11 +772,12 @@ extern "C" void fp_backend_present(void) {
             fp_dump_overlay(pixels,w,h,"stats");
             fp_set_overlay(pixels.data(),w,h,title);
         } else fp_set_overlay(nullptr,0,0,title);
-        if(trace) std::fprintf(stderr,"[fp-stats] fps=%.2f frame=%.2f p95=%.2f max=%.2f draws=%u submits=%.1f wait=%.2f flip=%u dup=%u surface=%u luma=%u dark=%u/64 drops=%u fifo=%.2f present=%.2f\n",
+        if(trace) std::fprintf(stderr,"[fp-stats] fps=%.2f frame=%.2f p95=%.2f max=%.2f draws=%u submits=%.1f wait=%.2f flip=%u dup=%u surface=%u luma=%u dark=%u/64 drops=%u fifo=%.2f present=%.2f window_max=%.2f draws_mean=%.1f draws_max=%u ts_us=%.0f rolling_frames=%u\n",
             fps,window_ms/window_frames,p95,maximum,draws,double(window_submits)/window_frames,
             window_wait/window_frames,flip,duplicates,stats.surface,stats.mean_luma,stats.dark_samples,drops,
-            window_fifo/window_frames,window_present/window_frames);
-        window_ms=window_wait=window_fifo=window_present=0;window_submits=0;window_frames=0;window_flip0=flip;
+            window_fifo/window_frames,window_present/window_frames,window_max,double(window_draws)/window_frames,window_draws_max,
+            1000000.0*double(SDL_GetPerformanceCounter())/SDL_GetPerformanceFrequency(),filled);
+        window_ms=window_wait=window_fifo=window_present=0;window_submits=0;window_frames=0;window_flip0=flip;window_max=0;window_draws=0;window_draws_max=0;
     }
     last=now;last_flip=flip;previous_luma=stats.mean_luma;previous=stats;
 }
@@ -890,7 +934,7 @@ extern "C" unsigned long fp_run_frame_clock(void (*present)(void)) {
         const auto resumed=Clock::now();
         next=resumed+tick;
         g_last_tick_ns.store(std::chrono::duration_cast<std::chrono::nanoseconds>(resumed.time_since_epoch()).count());
-        g_work_ms=0;g_resume_serial.fetch_add(1);
+        g_work_ms=0;g_work_flip=0;g_resume_serial.fetch_add(1);
 #if defined(__APPLE__) && TARGET_OS_IOS
         native_resume=fp_ios_resume_generation();
 #endif
@@ -951,7 +995,9 @@ extern "C" unsigned long fp_run_frame_clock(void (*present)(void)) {
         if (!ready) continue;
         cellGcm_present_pending(present);
         const auto fifo_start=Clock::now();
+        fp_trace_fifo_resume();
         cellGcm_rsx_process_fifo();
+        fp_trace_fifo_pause();
         {
             // The game's frame work is the time from the vblank that released it to the moment its flip is queued;
             // after that it only waits for the next vblank. That wait is the headroom AUTO pacing looks at.
@@ -962,6 +1008,7 @@ extern "C" unsigned long fp_run_frame_clock(void (*present)(void)) {
                 const auto queued=Clock::now();
                 g_work_ms.store(std::chrono::duration<double,std::milli>(
                     queued-Clock::time_point(std::chrono::nanoseconds(g_last_tick_ns.load()))).count());
+                g_work_flip.store(flips);
             }
         }
         fp_fifo_wall_ms+=std::chrono::duration<double,std::milli>(Clock::now()-fifo_start).count();
