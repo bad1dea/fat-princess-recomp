@@ -1949,3 +1949,163 @@ diff --git a/runtime/spu/spu_workload.h b/runtime/spu/spu_workload.h
  
  /* FNV-1a 64-bit over a byte range. The canonical workload fingerprint; the
   * offline extractor computes the same value so registrations and the images a
+diff --git a/runtime/spu/spu_helpers.h b/runtime/spu/spu_helpers.h
+--- a/runtime/spu/spu_helpers.h
++++ b/runtime/spu/spu_helpers.h
+@@ -1092,12 +1092,61 @@
+     const uint32_t v = sh >= 0 ? m << sh : (sh <= -24 ? 0 : m >> -sh);
+     return neg ? 0u - v : v;
+ }
+-static inline u128 spu_cflts(u128 a, int i8) { u128 r; for (int i = 0; i < 4; i++) r._u32[i] = spu__cfl_lane(a._u32[i], 173 - (i8 & 0xFF), 0); return r; }
+-static inline u128 spu_cfltu(u128 a, int i8) { u128 r; for (int i = 0; i < 4; i++) r._u32[i] = spu__cfl_lane(a._u32[i], 173 - (i8 & 0xFF), 1); return r; }
+-static inline u128 spu_csflt(u128 a, int i8) { u128 r; for (int i = 0; i < 4; i++) { const int32_t v = a._s32[i];
++static inline u128 spu_cflts_ref(u128 a, int i8) { u128 r; for (int i = 0; i < 4; i++) r._u32[i] = spu__cfl_lane(a._u32[i], 173 - (i8 & 0xFF), 0); return r; }
++static inline u128 spu_cfltu_ref(u128 a, int i8) { u128 r; for (int i = 0; i < 4; i++) r._u32[i] = spu__cfl_lane(a._u32[i], 173 - (i8 & 0xFF), 1); return r; }
++static inline u128 spu_csflt_ref(u128 a, int i8) { u128 r; for (int i = 0; i < 4; i++) { const int32_t v = a._s32[i];
+     r._u32[i] = v ? spu__sf_pack(v < 0 ? 0x80000000u : 0, v < 0 ? 0u - (uint32_t)v : (uint32_t)v, -(155 - (i8 & 0xFF))) : 0; } return r; }
+-static inline u128 spu_cuflt(u128 a, int i8) { u128 r; for (int i = 0; i < 4; i++) { const uint32_t v = a._u32[i];
++static inline u128 spu_cuflt_ref(u128 a, int i8) { u128 r; for (int i = 0; i < 4; i++) { const uint32_t v = a._u32[i];
+     r._u32[i] = v ? spu__sf_pack(0, v, -(155 - (i8 & 0xFF))) : 0; } return r; }
++
++#if defined(__ARM_NEON) && !defined(SPU_SCALAR_HELPERS) && !defined(SPU_SCALAR_INT)
++/* Pack integer magnitudes directly, four lanes at once. No host floating
++ * rounding mode, f64 conversion, or 128-bit scalar packing is needed. */
++static inline u128 spu__int_to_sf(uint32x4_t magnitude, uint32x4_t sign, int i8) {
++    const int32x4_t leading = vreinterpretq_s32_u32(vclzq_u32(magnitude));
++    const int32x4_t exponent = vsubq_s32(vdupq_n_s32((i8 & 255) + 3), leading);
++    const uint32x4_t fraction = vandq_u32(vshrq_n_u32(vshlq_u32(magnitude, leading), 8), vdupq_n_u32(0x7FFFFF));
++    uint32x4_t result = vorrq_u32(sign, vorrq_u32(vshlq_n_u32(vreinterpretq_u32_s32(exponent), 23), fraction));
++    result = vbslq_u32(vcgtq_s32(exponent, vdupq_n_s32(255)), vorrq_u32(sign, vdupq_n_u32(0x7FFFFFFF)), result);
++    result = vandq_u32(result, vandq_u32(vcgtq_s32(exponent, vdupq_n_s32(0)), vcgtq_u32(magnitude, vdupq_n_u32(0))));
++    return spu__st(result);
++}
++static inline u128 spu_csflt(u128 a, int i8) {
++    const int32x4_t x = vreinterpretq_s32_u32(spu__ld(a));
++    return spu__int_to_sf(vreinterpretq_u32_s32(vabsq_s32(x)), vandq_u32(vreinterpretq_u32_s32(x), vdupq_n_u32(0x80000000)), i8);
++}
++static inline u128 spu_cuflt(u128 a, int i8) {
++    return spu__int_to_sf(spu__ld(a), vdupq_n_u32(0), i8);
++}
++static inline u128 spu__sf_to_int(u128 a, int i8, int is_unsigned) {
++    const uint32x4_t x = spu__ld(a);
++    const uint32x4_t exponent = vandq_u32(vshrq_n_u32(x, 23), vdupq_n_u32(255));
++    const uint32x4_t negative = vreinterpretq_u32_s32(vshrq_n_s32(vreinterpretq_s32_u32(x), 31));
++    const uint32x4_t magnitude = vorrq_u32(vandq_u32(x, vdupq_n_u32(0x7FFFFF)), vdupq_n_u32(0x800000));
++    const int32x4_t shift = vsubq_s32(vreinterpretq_s32_u32(exponent), vdupq_n_s32((i8 & 255) - 23));
++    const int limit = is_unsigned ? 8 : 7;
++    // NEON variable shifts interpret only the low byte. Clamp first so large
++    // exponents cannot wrap into an unrelated shift direction or count.
++    const int32x4_t bounded = vminq_s32(vmaxq_s32(shift, vdupq_n_s32(-32)), vdupq_n_s32(limit));
++    uint32x4_t result = vshlq_u32(magnitude, bounded);
++    if (is_unsigned) {
++        result = vorrq_u32(result, vcgtq_s32(shift, vdupq_n_s32(limit)));
++        result = vbicq_u32(result, negative);
++    } else {
++        result = vbslq_u32(negative, vsubq_u32(vdupq_n_u32(0), result), result);
++        const uint32x4_t saturated = vbslq_u32(negative, vdupq_n_u32(0x80000000), vdupq_n_u32(0x7FFFFFFF));
++        result = vbslq_u32(vcgtq_s32(shift, vdupq_n_s32(limit)), saturated, result);
++    }
++    return spu__st(vandq_u32(result, vcgtq_u32(exponent, vdupq_n_u32(0))));
++}
++static inline u128 spu_cflts(u128 a, int i8) { return spu__sf_to_int(a, i8, 0); }
++static inline u128 spu_cfltu(u128 a, int i8) { return spu__sf_to_int(a, i8, 1); }
++#else
++static inline u128 spu_csflt(u128 a, int i8) { return spu_csflt_ref(a, i8); }
++static inline u128 spu_cuflt(u128 a, int i8) { return spu_cuflt_ref(a, i8); }
++static inline u128 spu_cflts(u128 a, int i8) { return spu_cflts_ref(a, i8); }
++static inline u128 spu_cfltu(u128 a, int i8) { return spu_cfltu_ref(a, i8); }
++#endif
+ 
+ /* fi -- Floating Interpolate (SPU ISA v1.2, p. 219; frest/frsqest output
+  * format p. 215; single-precision rules section 9.1).
+diff --git a/runtime/spu/tests/test_spu_conversion_neon.c b/runtime/spu/tests/test_spu_conversion_neon.c
+new file mode 100644
+--- /dev/null
++++ b/runtime/spu/tests/test_spu_conversion_neon.c
+@@ -0,0 +1,86 @@
++/* Exact integer/extended-single conversions at every encoded scale, including
++ * scales outside the ISA-defined range, against the scalar implementation.
++ * ARM64: clang -O2 -Iinclude runtime/spu/tests/test_spu_conversion_neon.c -o test */
++#include "../spu_helpers.h"
++#include <time.h>
++#if defined(_MSC_VER)
++__declspec(thread) int g_spu_rz;
++#else
++__thread int g_spu_rz;
++#endif
++static uint64_t rng = 0xD1B54A32D192ED03ull;
++static uint32_t random_word(void) {
++    rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
++    return (uint32_t)(rng >> 16);
++}
++static __attribute__((noinline)) u128 scalar(u128 a, int scale, int op) {
++    switch (op) {
++    case 0: return spu_csflt_ref(a,scale);
++    case 1: return spu_cuflt_ref(a,scale);
++    case 2: return spu_cflts_ref(a,scale);
++    default:return spu_cfltu_ref(a,scale);
++    }
++}
++static __attribute__((noinline)) u128 vector(u128 a, int scale, int op) {
++    switch (op) {
++    case 0: return spu_csflt(a,scale);
++    case 1: return spu_cuflt(a,scale);
++    case 2: return spu_cflts(a,scale);
++    default:return spu_cfltu(a,scale);
++    }
++}
++static int check(u128 a,int scale) {
++    for(int op=0;op<4;op++) {
++        u128 got=vector(a,scale,op),want=scalar(a,scale,op);
++        if(memcmp(&got,&want,16)) {
++            for(int i=0;i<4;i++) if(got._u32[i]!=want._u32[i])
++                printf("FAIL op=%d scale=%d lane=%d in=%08X got=%08X want=%08X\n",op,scale,i,a._u32[i],got._u32[i],want._u32[i]);
++            return 1;
++        }
++    }
++    return 0;
++}
++static volatile uint32_t sink;
++int main(void) {
++#if !defined(__ARM_NEON)
++    puts("SKIP: native conversion test requires ARM64 NEON");return 0;
++#else
++    unsigned long long cases=0;
++    const uint32_t edges[]={0,1,0x7fffff,0x800000,0xffffff,0x1000000,0x1000001,
++        0x7fffffff,0x80000000,0xffffffff,0x007fffff,0x00800000,0x3f800000,
++        0x4effffff,0x4f000000,0x4f7fffff,0x4f800000,0xcf000000,0xcf800000,
++        0x7f000000,0x7f7fffff,0x7f800000,0x7fffffff,0xff800000,0xffffffff};
++    for(int scale=0;scale<256;scale++) {
++        for(unsigned j=0;j<sizeof(edges)/sizeof(edges[0]);j++) {
++            u128 a;for(int i=0;i<4;i++)a._u32[i]=edges[(j+i)% (sizeof(edges)/sizeof(edges[0]))];
++            if(check(a,scale))return 1;cases+=4;
++        }
++        // Every normalization position, sign, and adjacent integer/float boundary.
++        for(int bit=0;bit<32;bit++) for(int delta=-1;delta<=1;delta++) {
++            u128 a;for(int i=0;i<4;i++)a._u32[i]=((1u<<bit)+(uint32_t)delta) ^ ((i&1)?0x80000000u:0);
++            if(check(a,scale))return 1;cases+=4;
++        }
++        for(int j=0;j<32768;j++) {
++            u128 a;for(int i=0;i<4;i++)a._u32[i]=random_word();
++            if(check(a,scale))return 1;cases+=4;
++        }
++    }
++    // Immediate decoding masks to eight bits, including negative C arguments.
++    for(int scale=-513;scale<=513;scale++) {
++        u128 a;for(int i=0;i<4;i++)a._u32[i]=random_word();
++        if(check(a,scale))return 1;cases+=4;
++    }
++    printf("PASS: %llu vector conversions (%llu lanes), all 256 scales + boundary/decoded immediates\n",cases,cases*4);
++    u128 inputs[64];for(int j=0;j<64;j++)for(int i=0;i<4;i++)inputs[j]._u32[i]=random_word();
++    for(int op=0;op<4;op++) {
++        const int scale=op<2?155:173,N=4000000;
++        uint32_t sum=0;clock_t start=clock();
++        for(int n=0;n<N;n++){u128 r=scalar(inputs[n&63],scale,op);sum+=r._u32[n&3];}
++        double before=(double)(clock()-start)*1e9/CLOCKS_PER_SEC/N;sink=sum;start=clock();
++        for(int n=0;n<N;n++){u128 r=vector(inputs[n&63],scale,op);sum+=r._u32[n&3];}
++        double after=(double)(clock()-start)*1e9/CLOCKS_PER_SEC/N;sink=sum;
++        printf("op=%d scale=%d scalar_ns=%.2f vector_ns=%.2f speedup=%.2f\n",op,scale,before,after,before/after);
++    }
++    return 0;
++#endif
++}
