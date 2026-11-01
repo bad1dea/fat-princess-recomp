@@ -697,7 +697,7 @@ extern "C" void fp_backend_present(void) {
         !fp::settings_menu_open() && !fp::settings_osk_active() && !fp::trophy_ui_active())
         fp_set_overlay(nullptr,0,0,nullptr);
     ai_badge_was_active = ai_control;
-    if(!flip || (!fp_stats_allowed() && !trace && !csv && !ai_control && !fp::self_test_status().running)) return;
+    if(!flip || (!fp_stats_allowed() && !trace && !csv && !ai_control && !fp::self_test_status().running && !fp_stall_enabled())) return;
     auto now=Clock::now();
     const double ms=std::chrono::duration<double,std::milli>(now-last).count();
     rsx_debug_stats stats{};if(!g_d3d12) rsx_vulkan_backend_get_debug_stats(&stats);

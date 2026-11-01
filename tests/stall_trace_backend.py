@@ -17,6 +17,7 @@ pre=r'''
 #include <stdlib.h>
 #include <assert.h>
 #include <stdatomic.h>
+#include <stdarg.h>
 #include "rsx_stall_trace.h"
 #ifndef REAL_CLOCK
 static _Atomic uint64_t clock_value=10000000;
@@ -44,6 +45,10 @@ int main(void){
  SDL_Thread*threads[4];for(int i=0;i<4;i++)threads[i]=SDL_CreateThread(worker,"capture",NULL);
  for(int i=0;i<4;i++)SDL_WaitThread(threads[i],NULL);
  assert(s_stall.ops[ST_SET_WAIT].calls+(uint64_t)SDL_AtomicGet(&s_stall_dropped)==80000);
+ for(unsigned kind=0;kind<RSX_STALL_KINDS;kind++)vk_stall_end(kind,vk_stall_start()-10000,1);
+ vk_stall_log log={0};vk_stall_append(&log,"prefix\n");
+ char huge[17000];memset(huge,'x',sizeof huge-1);huge[sizeof huge-1]=0;
+ vk_stall_append(&log,"%s",huge);assert(log.truncated && !strcmp(log.data,"prefix\n"));
  // No event logging happens during record; phase changes also wait for flush.
  for(unsigned i=0;i<100;i++)rsx_vulkan_backend_stall_frame(i,i,100,45,10,5,2,3,20,i%8,0);
  assert(s_stall.phase_count==100 && s_stall.frames==100);
@@ -77,7 +82,7 @@ with tempfile.TemporaryDirectory(prefix='stall-trace-') as temporary:
             args.output_dir.mkdir(parents=True,exist_ok=True)
             (args.output_dir/(mode+'.log')).write_text(result.stdout+result.stderr)
         if mode=='mock':
-            assert len(result.stderr.splitlines())<=40
+            assert len(result.stderr.splitlines())<=48
             assert result.stderr.count('[stall-phase]')<=8
             assert result.stderr.count('[stall-event]')<=8
             assert result.stderr.count('[stall-frame]')<=4
