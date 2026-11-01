@@ -595,6 +595,8 @@ void export_environment() {
     set("SPU_MFC_LOOKUP_CACHE", "1");
     set("RSX_RENDERPASS_BATCH", "1");
     set("RSX_DRAW_BATCH", "1");
+    set("RSX_DESCRIPTOR_CACHE", "1");
+    set("RSX_DRAW_STATE_CACHE", "1");
     set("SPURS_SYNTHETIC_CHAIN_EVENTS", "0");
     set("PS3_NET_SOCKETS", "1");
     // The main thread's two per-frame poll loops (a worker hand-off waited with usleep(500) once a frame, and

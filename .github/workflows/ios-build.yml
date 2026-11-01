@@ -60,6 +60,13 @@ jobs:
       - uses: ./.github/actions/prepare
         with:
           lift-key: ${{ secrets.FP_LIFT_KEY }}
+      - name: Verify SPU extended-range arithmetic
+        run: |
+          rt=third_party/ps3recomp/runtime
+          cc -O2 -frounding-math -ffp-contract=off -Ithird_party/ps3recomp/include -I"$rt" "$rt/spu/tests/test_spu_extended_fast.c" -lm -o "$RUNNER_TEMP/spu-extended"
+          "$RUNNER_TEMP/spu-extended"
+          cc -O2 -ffp-contract=off -Ithird_party/ps3recomp/include -I"$rt" "$rt/spu/tests/test_spu_float_neon.c" -lm -o "$RUNNER_TEMP/spu-native"
+          "$RUNNER_TEMP/spu-native"
       - name: Verify Vulkan descriptor reuse
         run: CPPFLAGS="-I$(brew --prefix vulkan-headers)/include" python3 tests/vulkan_descriptor_cache.py
       - name: Configure
