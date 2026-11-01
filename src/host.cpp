@@ -310,6 +310,11 @@ static bool fp_stall_enabled() {
     static const bool on=[] {const char*e=std::getenv("FP_STALL_TRACE");return e && !std::strcmp(e,"1");}();return on;
 }
 static uint64_t fp_trace_cpu_ns() {
+    // Apple CLOCK_THREAD_CPUTIME_ID enters the kernel. Thousands of idle
+    // FIFO polls per second made detailed tracing a measurable CPU cost.
+    // Wall timings remain available; request per-poll CPU timing explicitly.
+    static const bool enabled=[] {const char*e=std::getenv("FP_STALL_CPU");return e && !std::strcmp(e,"1");}();
+    if(!enabled)return 0;
 #ifdef _WIN32
     FILETIME c,e,k,u;
     if(!GetThreadTimes(GetCurrentThread(),&c,&e,&k,&u))return 0;

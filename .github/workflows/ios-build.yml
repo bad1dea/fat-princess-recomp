@@ -71,6 +71,13 @@ jobs:
           "$RUNNER_TEMP/spu-extended"
           cc -O2 -frounding-math -ffp-contract=off -Ithird_party/ps3recomp/include -I"$rt" "$rt/spu/tests/test_spu_float_neon.c" -lm -o "$RUNNER_TEMP/spu-native"
           "$RUNNER_TEMP/spu-native"
+      - name: Verify Apple SPU job transfers
+        run: |
+          cc -std=gnu17 -O2 -DFP_SPU_SAVE_SIGNAL_MASK=1 tests/spu_jump.c -o "$RUNNER_TEMP/spu-jump-reference"
+          "$RUNNER_TEMP/spu-jump-reference"
+          cc -std=gnu17 -O2 tests/spu_jump.c -o "$RUNNER_TEMP/spu-jump"
+          "$RUNNER_TEMP/spu-jump"
+          python3 third_party/ps3recomp/tools/test_spu_interpreter_handoff.py
       - name: Verify Bluetooth burst clock
         run: |
           cc -O2 tests/audio_queue_budget.c -o "$RUNNER_TEMP/audio-budget"
