@@ -34,6 +34,9 @@ int FUNCTION(void){return FP_INCLUDE_FLAG-1;}
     cmake = """cmake_minimum_required(VERSION 3.20)
 project(SPUCompileFlags C)
 set(PS3RECOMP_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+if(FP_CHECK_MSVC)
+  set(MSVC 1)
+endif()
 add_subdirectory(engine)
 set(FP_SPU_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/task.c")
 set(FP_OVERLAY_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/overlay.c")
@@ -46,4 +49,9 @@ target_sources(MyGameRecomp PRIVATE ${FP_SPU_SOURCES} ${FP_OVERLAY_SOURCES})
         command = next(c["command"] for c in commands if c["file"].endswith(f"/{name}.c"))
         assert "-frounding-math" in command, f"dynamic rounding missing for {name}"
     subprocess.run(["cmake", "--build", str(project / "build")], check=True, stdout=subprocess.DEVNULL)
-print("SPU flags: include path, lean access and indirect dispatch reached both source groups")
+    subprocess.run(["cmake", "-S", str(project), "-B", str(project / "msvc"), "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON", "-DFP_CHECK_MSVC=ON"], check=True, stdout=subprocess.DEVNULL)
+    commands = json.loads((project / "msvc/compile_commands.json").read_text())
+    for name in ("task", "overlay"):
+        command = next(c["command"] for c in commands if c["file"].endswith(f"/{name}.c"))
+        assert "/fp:strict" in command and "-frounding-math" not in command, f"MSVC rounding flag missing for {name}"
+print("SPU flags: both source groups receive lean/dispatch options and the compiler's dynamic rounding flag")
