@@ -24,7 +24,7 @@ namespace {
 using Clock = std::chrono::steady_clock;
 constexpr unsigned sample_limit = 800;
 std::atomic<mach_port_t> request{MACH_PORT_NULL};
-std::atomic<bool> busy{false}, audio_running{false};
+std::atomic<bool> busy{false}, audio_running{false}, finished{false};
 std::atomic<uint64_t> trigger_cpu{0}, target_id{0};
 std::string output;
 uint64_t now_us() {
@@ -35,7 +35,7 @@ void note_round(uint32_t taskset, uint32_t task, int running, uint64_t, uint64_t
     // deadlines and must not trigger an audio capture.
     if (taskset != 0x00F9BB80 || task != 0) return;
     audio_running.store(running != 0, std::memory_order_release);
-    if (running || busy.load(std::memory_order_acquire)) return;
+    if (running || finished.load(std::memory_order_acquire) || busy.load(std::memory_order_acquire)) return;
     static thread_local FPAudioProfileGate gate;
     if (!gate.note(cpu, now_us())) return;
     uint64_t id = 0;
@@ -141,6 +141,7 @@ extern "C" void fp_ios_audio_profile_start(const char* docs) {
             const mach_port_t target = request.exchange(MACH_PORT_NULL,std::memory_order_acquire);
             if (target != MACH_PORT_NULL) {
                 capture(target,++number);
+                if (number == 2) finished.store(true,std::memory_order_release);
                 busy.store(false,std::memory_order_release);
                 if (number == 2) return;
             }
