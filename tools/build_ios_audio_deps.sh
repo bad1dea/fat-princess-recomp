@@ -10,8 +10,8 @@ git clone -q --depth 1 -b "${SDL_TAG:-release-2.32.10}" https://github.com/libsd
 git -C "$work/sdl" apply --whitespace=nowarn "$root/patches/sdl2-queue-probe.diff"
 for platform in ios host; do
     destination=$prefix
-    target=()
-    sdl_extra=()
+    target=(-DCMAKE_BUILD_TYPE=Release)
+    sdl_extra=(-DSDL_TEST=OFF)
     if [[ $platform == ios ]]; then
         target=(-DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET="$minimum")
     else
