@@ -1,4 +1,4 @@
-// On-screen controller (iOS). Bits follow the PS3 pad; the stick is -32767..32767.
+// On-screen controller (iOS). Bits follow the PS3 pad; sticks are -32767..32767.
 #pragma once
 #include <stdint.h>
 
@@ -8,7 +8,7 @@ enum {
     FP_TOUCH_L3 = 1u << 8, FP_TOUCH_R3 = 1u << 9, FP_TOUCH_L2 = 1u << 14, FP_TOUCH_R2 = 1u << 15, FP_TOUCH_MENU = 1u << 16,
 };
 
-typedef struct fp_touch_state { uint32_t buttons; int32_t lx, ly; } fp_touch_state;
+typedef struct fp_touch_state { uint32_t buttons; int32_t lx, ly, rx, ry; } fp_touch_state;
 
 #ifdef __cplusplus
 extern "C" {

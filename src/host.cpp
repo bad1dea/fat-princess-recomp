@@ -16,7 +16,7 @@
 #include "ios_touch.h"
 #include "ios_lifecycle.h"
 #else
-struct fp_touch_state { uint32_t buttons; int32_t lx, ly; };
+struct fp_touch_state { uint32_t buttons; int32_t lx, ly, rx, ry; };
 #endif
 #include <cstdint>
 #include <cstdio>
@@ -836,6 +836,10 @@ extern "C" int fp_backend_pump_messages(void) {
             static_cast<Sint16>(menu_open ? 0 : key_x ? key_x : touch.lx));
         SDL_JoystickSetVirtualAxis(keyboard_pad, SDL_CONTROLLER_AXIS_LEFTY,
             static_cast<Sint16>(menu_open ? 0 : key_y ? key_y : touch.ly));
+        SDL_JoystickSetVirtualAxis(keyboard_pad, SDL_CONTROLLER_AXIS_RIGHTX,
+            static_cast<Sint16>(menu_open ? 0 : touch.rx));
+        SDL_JoystickSetVirtualAxis(keyboard_pad, SDL_CONTROLLER_AXIS_RIGHTY,
+            static_cast<Sint16>(menu_open ? 0 : touch.ry));
         SDL_JoystickSetVirtualAxis(keyboard_pad, SDL_CONTROLLER_AXIS_TRIGGERLEFT,
             !menu_open && (down(bound("l2")) || (touch.buttons & (1u << 14))) ? 32767 : -32768);
         SDL_JoystickSetVirtualAxis(keyboard_pad, SDL_CONTROLLER_AXIS_TRIGGERRIGHT,

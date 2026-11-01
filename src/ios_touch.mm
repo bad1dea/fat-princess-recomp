@@ -10,10 +10,17 @@
 
 namespace {
 std::atomic<uint32_t> g_buttons{0};
-std::atomic<int32_t> g_lx{0}, g_ly{0};
+std::atomic<int32_t> g_lx{0}, g_ly{0}, g_rx{0}, g_ry{0};
 std::atomic<int> g_menu{0};
 
-enum Control { kNone = -1, kStick = -2 };
+enum Control { kNone = -1 };
+
+struct Stick {
+    CAShapeLayer* base;
+    CAShapeLayer* knob;
+    UITouch* touch;
+    CGPoint home, origin;
+};
 
 struct Button {
     uint32_t bit;
@@ -34,10 +41,7 @@ static bool g_forced_visible;
     bool _collapsed;
     Button _buttons[13];
     int _count;
-    CAShapeLayer* _base;
-    CAShapeLayer* _knob;
-    UITouch* _stickTouch;
-    CGPoint _stickOrigin;
+    Stick _sticks[2];
     NSMutableDictionary<NSValue*, NSNumber*>* _held;   // touch -> button index
 }
 
@@ -67,12 +71,13 @@ static bool g_forced_visible;
         [self.layer addSublayer:t];
         _buttons[i].text = t;
     }
-    _base = [self circleLayer];
-    _knob = [self circleLayer];
-    _knob.fillColor = [UIColor colorWithWhite:1 alpha:0.35].CGColor;
-    _base.hidden = _knob.hidden = YES;
-    [self.layer addSublayer:_base];
-    [self.layer addSublayer:_knob];
+    for (int i = 0; i < 2; ++i) {
+        _sticks[i].base = [self circleLayer];
+        _sticks[i].knob = [self circleLayer];
+        _sticks[i].knob.fillColor = [UIColor colorWithWhite:1 alpha:0.35].CGColor;
+        [self.layer addSublayer:_sticks[i].base];
+        [self.layer addSublayer:_sticks[i].knob];
+    }
     return self;
 }
 
@@ -121,6 +126,10 @@ static bool g_forced_visible;
     [self place:10 at:CGPointMake(minX + 6.0 * u, maxY - 1.0 * u) radius:r * 0.6];  // L3
     [self place:11 at:CGPointMake(maxX - 6.6 * u, maxY - 1.0 * u) radius:r * 0.6]; // R3
     [self place:12 at:CGPointMake(CGRectGetMidX(b), minY + 1.0 * u) radius:r * 0.6];      // settings menu
+    _sticks[0].home = CGPointMake(minX + 3.4 * u, maxY - 3.0 * u);
+    _sticks[1].home = CGPointMake(maxX - 8.4 * u, maxY - 3.0 * u);
+    for (int i = 0; i < 2; ++i)
+        if (!_sticks[i].touch) [self showStick:i at:_sticks[i].home knob:_sticks[i].home];
     [CATransaction commit];
 }
 
@@ -136,29 +145,31 @@ static bool g_forced_visible;
     return best;
 }
 
-- (void)showStickAt:(CGPoint)o knob:(CGPoint)k {
+- (void)showStick:(int)i at:(CGPoint)o knob:(CGPoint)k {
+    Stick& stick = _sticks[i];
     const CGFloat range = [self stickRange];
     [CATransaction begin];
     [CATransaction setDisableActions:YES];
-    _base.path = [UIBezierPath bezierPathWithArcCenter:o radius:range startAngle:0 endAngle:2 * M_PI clockwise:YES].CGPath;
-    _knob.path = [UIBezierPath bezierPathWithArcCenter:k radius:range * 0.45 startAngle:0 endAngle:2 * M_PI clockwise:YES].CGPath;
-    _base.hidden = _knob.hidden = NO;
+    stick.base.path = [UIBezierPath bezierPathWithArcCenter:o radius:range startAngle:0 endAngle:2 * M_PI clockwise:YES].CGPath;
+    stick.knob.path = [UIBezierPath bezierPathWithArcCenter:k radius:range * 0.45 startAngle:0 endAngle:2 * M_PI clockwise:YES].CGPath;
     [CATransaction commit];
 }
 
-- (void)moveStick:(CGPoint)p {
+- (void)moveStick:(int)i to:(CGPoint)p {
+    Stick& stick = _sticks[i];
     const CGFloat range = [self stickRange];
-    CGFloat dx = p.x - _stickOrigin.x, dy = p.y - _stickOrigin.y;
+    CGFloat dx = p.x - stick.origin.x, dy = p.y - stick.origin.y;
     const CGFloat len = hypot(dx, dy);
     if (len > range) { dx *= range / len; dy *= range / len; }
-    g_lx = (int32_t)lround(dx / range * 32767);
-    g_ly = (int32_t)lround(dy / range * 32767);
-    [self showStickAt:_stickOrigin knob:CGPointMake(_stickOrigin.x + dx, _stickOrigin.y + dy)];
+    (i == 0 ? g_lx : g_rx) = (int32_t)lround(dx / range * 32767);
+    (i == 0 ? g_ly : g_ry) = (int32_t)lround(dy / range * 32767);
+    [self showStick:i at:stick.origin knob:CGPointMake(stick.origin.x + dx, stick.origin.y + dy)];
 }
 
 - (void)refreshButtons {
     uint32_t mask = 0;
-    for (NSNumber* n in _held.allValues) mask |= _buttons[n.intValue].bit;
+    for (NSNumber* n in _held.allValues)
+        if (n.intValue >= 0 && n.intValue < _count) mask |= _buttons[n.intValue].bit;
     if ((mask & FP_TOUCH_MENU) && !(g_buttons.load() & FP_TOUCH_MENU)) g_menu = 1;
     g_buttons = mask;
     for (int i = 0; i < _count; i++)
@@ -172,7 +183,14 @@ static bool g_forced_visible;
     if (_collapsed == collapsed) return;
     _collapsed = collapsed;
     for (CALayer* l in self.layer.sublayers) l.opacity = collapsed ? 0 : 1;
-    if (collapsed) { [_held removeAllObjects]; _stickTouch = nil; g_buttons = 0; g_lx = 0; g_ly = 0; }
+    if (collapsed) {
+        [_held removeAllObjects];
+        for (int i = 0; i < 2; ++i) {
+            _sticks[i].touch = nil;
+            [self showStick:i at:_sticks[i].home knob:_sticks[i].home];
+        }
+        g_buttons = 0; g_lx = 0; g_ly = 0; g_rx = 0; g_ry = 0;
+    }
 }
 
 - (void)touchesBegan:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
@@ -182,10 +200,13 @@ static bool g_forced_visible;
         const int b = [self buttonAt:p];
         if (b != kNone) {
             _held[[NSValue valueWithNonretainedObject:t]] = @(b);
-        } else if (!_stickTouch && p.x < self.bounds.size.width * 0.5) {
-            _stickTouch = t;
-            _stickOrigin = p;
-            [self moveStick:p];
+        } else {
+            const int i = p.x < self.bounds.size.width * 0.5 ? 0 : 1;
+            if (!_sticks[i].touch) {
+                _sticks[i].touch = t;
+                _sticks[i].origin = p;
+                [self moveStick:i to:p];
+            }
         }
     }
     [self refreshButtons];
@@ -194,21 +215,31 @@ static bool g_forced_visible;
 - (void)touchesMoved:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
     if (_collapsed) return;
     for (UITouch* t in touches) {
-        if (t == _stickTouch) { [self moveStick:[t locationInView:self]]; continue; }
+        bool stickTouch = false;
+        for (int i = 0; i < 2; ++i) {
+            if (t == _sticks[i].touch) {
+                [self moveStick:i to:[t locationInView:self]];
+                stickTouch = true;
+                break;
+            }
+        }
+        if (stickTouch) continue;
         NSValue* key = [NSValue valueWithNonretainedObject:t];
         if (!_held[key]) continue;
         const int b = [self buttonAt:[t locationInView:self]];   // sliding across the face buttons
-        if (b != kNone) _held[key] = @(b);
+        _held[key] = @(b);
     }
     [self refreshButtons];
 }
 
 - (void)touchesEnded:(NSSet<UITouch*>*)touches withEvent:(UIEvent*)event {
     for (UITouch* t in touches) {
-        if (t == _stickTouch) {
-            _stickTouch = nil;
-            g_lx = 0; g_ly = 0;
-            _base.hidden = _knob.hidden = YES;
+        for (int i = 0; i < 2; ++i) {
+            if (t != _sticks[i].touch) continue;
+            _sticks[i].touch = nil;
+            (i == 0 ? g_lx : g_rx) = 0;
+            (i == 0 ? g_ly : g_ry) = 0;
+            [self showStick:i at:_sticks[i].home knob:_sticks[i].home];
         }
         [_held removeObjectForKey:[NSValue valueWithNonretainedObject:t]];
     }
@@ -302,4 +333,6 @@ extern "C" void fp_touch_read(fp_touch_state* out) {
     out->buttons = g_buttons.load();
     out->lx = g_lx.load();
     out->ly = g_ly.load();
+    out->rx = g_rx.load();
+    out->ry = g_ry.load();
 }
