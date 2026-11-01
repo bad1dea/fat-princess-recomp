@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Compile SPU sources with a target created in a child directory, as in the game."""
 from pathlib import Path
+import json
 import re
 import subprocess
 import tempfile
@@ -39,6 +40,10 @@ set(FP_OVERLAY_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/overlay.c")
 target_sources(MyGameRecomp PRIVATE ${FP_SPU_SOURCES} ${FP_OVERLAY_SOURCES})
 """
     (project / "CMakeLists.txt").write_text(cmake + "\n".join(blocks))
-    subprocess.run(["cmake", "-S", str(project), "-B", str(project / "build")], check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(["cmake", "-S", str(project), "-B", str(project / "build"), "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON"], check=True, stdout=subprocess.DEVNULL)
+    commands = json.loads((project / "build/compile_commands.json").read_text())
+    for name in ("task", "overlay"):
+        command = next(c["command"] for c in commands if c["file"].endswith(f"/{name}.c"))
+        assert "-frounding-math" in command, f"dynamic rounding missing for {name}"
     subprocess.run(["cmake", "--build", str(project / "build")], check=True, stdout=subprocess.DEVNULL)
 print("SPU flags: include path, lean access and indirect dispatch reached both source groups")

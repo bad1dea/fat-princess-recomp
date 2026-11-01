@@ -75,7 +75,8 @@ if(FP_BUILD_GAME)
   # must be set in that target's directory scope to affect its compile commands.
   set_source_files_properties(${FP_SPU_SOURCES} TARGET_DIRECTORY MyGameRecomp PROPERTIES
     INCLUDE_DIRECTORIES "${PS3RECOMP_DIR}/runtime/spu"
-    COMPILE_DEFINITIONS "SPU_USE_DISPATCH_MT;SPU_LS_LEAN")
+    COMPILE_DEFINITIONS "SPU_USE_DISPATCH_MT;SPU_LS_LEAN"
+    COMPILE_OPTIONS "-frounding-math")
   set(FP_OVERLAY_DIR "" CACHE PATH "Private lifts of modules at observed local-store addresses")
   if(FP_OVERLAY_DIR)
     file(GLOB_RECURSE FP_OVERLAY_SOURCES CONFIGURE_DEPENDS "${FP_OVERLAY_DIR}/*.c")
@@ -83,7 +84,7 @@ if(FP_BUILD_GAME)
     set_source_files_properties(${FP_OVERLAY_SOURCES} TARGET_DIRECTORY MyGameRecomp PROPERTIES
       INCLUDE_DIRECTORIES "${PS3RECOMP_DIR}/runtime/spu"
       COMPILE_DEFINITIONS "SPU_USE_DISPATCH_MT;SPU_LS_LEAN"
-      COMPILE_OPTIONS "-O3")
+      COMPILE_OPTIONS "-O3;-frounding-math")
   endif()
   # The POSIX template uses calloc for the guest arena. Its unaligned base
   # makes vm_commit's mprotect fail, and violates the HLE pointer truncation
