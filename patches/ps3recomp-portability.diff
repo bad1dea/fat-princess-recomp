@@ -2182,3 +2182,194 @@ diff --git a/runtime/spu/tests/test_spu_shufb.c b/runtime/spu/tests/test_spu_shu
      srand(12345);
      for (int it = 0; it < 200000; it++) {
          u128 a, b, c;
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -483,6 +483,8 @@
+     return vk_batch_flush_ex(0);
+ }
+ static uint64_t s_state_issued,s_state_skipped;
++static uint64_t s_descriptor_epoch=1;
++static uint64_t s_descriptor_calls,s_descriptor_skipped,s_descriptor_written,s_descriptor_reused;
+ static void vk_trace_submit(const char* reason, unsigned draws, double ms) {
+     static FILE* file;
+     static int initialized;
+@@ -515,6 +517,10 @@
+         fprintf(stderr,"[rsx-state] window_ms=%u issued=%llu skipped=%llu\n",now-window,
+                 (unsigned long long)s_state_issued,(unsigned long long)s_state_skipped);
+         s_state_issued=s_state_skipped=0;
++        fprintf(stderr,"[rsx-descriptors] window_ms=%u calls=%llu skipped_calls=%llu written=%llu reused=%llu\n",now-window,
++            (unsigned long long)s_descriptor_calls,(unsigned long long)s_descriptor_skipped,
++            (unsigned long long)s_descriptor_written,(unsigned long long)s_descriptor_reused);
++        s_descriptor_calls=s_descriptor_skipped=s_descriptor_written=s_descriptor_reused=0;
+         for(unsigned j=0;j<used;j++) {
+             const struct WaitBucket* b=&buckets[j];
+             fprintf(stderr,"[rsx-wait] window_ms=%u reason=%s calls=%u draws=%u wait_ms=%.3f max_ms=%.3f\n",
+@@ -568,7 +574,10 @@
+ static void vk_destroy_image(vk_image* im)
+ {
+     vk_flush_at("vk_destroy_image");
+-    if (im->view) pvkDestroyImageView(s_vk.device, im->view, NULL);
++    if (im->view) {
++        ++s_descriptor_epoch;  /* a recreated view may reuse this numeric handle */
++        pvkDestroyImageView(s_vk.device, im->view, NULL);
++    }
+     if (im->img)  pvkDestroyImage(s_vk.device, im->img, NULL);
+     if (im->mem)  pvkFreeMemory(s_vk.device, im->mem, NULL);
+     memset(im, 0, sizeof *im);
+@@ -2671,10 +2680,19 @@
+     return limit;
+ }
+ static unsigned char* s_batch_constants;
++struct vk_eng_desc_state {
++    VkDescriptorSet set;
++    uint64_t epoch;
++    int valid,split;
++    VkDescriptorBufferInfo buffers[2];
++    VkDescriptorImageInfo images[RSX_MAX_TEXTURES],samplers[RSX_MAX_TEXTURES];
++    VkDescriptorImageInfo vertex_images[RSX_MAX_VERTEX_TEXTURES],vertex_samplers[RSX_MAX_VERTEX_TEXTURES];
++};
+ static struct vk_draw_slot {
+     vk_buffer vertices, indices, constants;
+     VkDescriptorPool pool;
+     VkDescriptorSet normal, split;
++    struct vk_eng_desc_state descriptors;
+ } s_draw_slot[VK_DRAW_BATCH_SIZE * VK_ASYNC_SETS];
+ 
+ static void vk_eng2_shutdown(void* user);
+@@ -4154,11 +4172,14 @@
+ 
+ static int vk_draw_slot_prepare(struct vk_draw_slot* slot, VkDeviceSize vb, VkDeviceSize ib)
+ {
++    if(!slot->constants.buf || slot->constants.size<s_g.ubo.size)
++        slot->descriptors.valid=0;  /* buffer recreation may recycle the handle */
+     if (vk_ensure_buffer(&slot->vertices, vb, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT) ||
+         (ib && vk_ensure_buffer(&slot->indices, ib, VK_BUFFER_USAGE_INDEX_BUFFER_BIT)) ||
+         vk_ensure_buffer(&slot->constants, s_g.ubo.size, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT)) return -1;
+     if (!slot->vertices.coherent || !slot->constants.coherent || (ib && !slot->indices.coherent)) return -1;
+     if (!slot->pool) {
++        slot->descriptors.valid=0;
+         VkDescriptorPoolSize sizes[] = {
+             {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 4},
+             {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 2*(RSX_MAX_TEXTURES+RSX_MAX_VERTEX_TEXTURES)},
+@@ -4171,6 +4192,70 @@
+     return 0;
+ }
+ 
++/* Descriptor contents outlive command buffers. A draw slot is reused only
++ * after its fence; changing mapped constant bytes does not change a binding.
++ * Image-view destruction advances the epoch, even if a driver recycles handles. */
++static int vk_desc_buffer_equal(const VkDescriptorBufferInfo* a,const VkDescriptorBufferInfo* b)
++{
++    return a->buffer==b->buffer && a->offset==b->offset && a->range==b->range;
++}
++static int vk_desc_image_equal(const VkDescriptorImageInfo* a,const VkDescriptorImageInfo* b)
++{
++    return a->sampler==b->sampler && a->imageView==b->imageView && a->imageLayout==b->imageLayout;
++}
++static void vk_desc_image_writes(VkWriteDescriptorSet* writes,u32* count,VkDescriptorSet set,
++                                 u32 binding,VkDescriptorType type,const VkDescriptorImageInfo* value,
++                                 const VkDescriptorImageInfo* previous,u32 size,int separate,int reusable)
++{
++    for(u32 u=0;u<size;) {
++        if(reusable && vk_desc_image_equal(&value[u],&previous[u])) {++u;continue;}
++        const u32 first=u++;
++        if(!separate)
++            while(u<size && (!reusable || !vk_desc_image_equal(&value[u],&previous[u]))) ++u;
++        writes[(*count)++]=(VkWriteDescriptorSet){.sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
++            .dstSet=set,.dstBinding=binding+(separate?first:0),.dstArrayElement=separate?0:first,
++            .descriptorCount=u-first,.descriptorType=type,.pImageInfo=&value[first]};
++    }
++}
++static void vk_eng_update_descriptor_state(VkDescriptorSet set,int split,struct vk_eng_desc_state* cache,
++                                            const VkDescriptorBufferInfo bi[2],
++                                            const VkDescriptorImageInfo ii[RSX_MAX_TEXTURES],
++                                            const VkDescriptorImageInfo si[RSX_MAX_TEXTURES],
++                                            const VkDescriptorImageInfo vii[RSX_MAX_VERTEX_TEXTURES],
++                                            const VkDescriptorImageInfo vsi[RSX_MAX_VERTEX_TEXTURES])
++{
++    const int reusable=cache && cache->valid && cache->set==set && cache->split==split && cache->epoch==s_descriptor_epoch;
++    VkWriteDescriptorSet writes[2+2*RSX_MAX_TEXTURES+2*RSX_MAX_VERTEX_TEXTURES];
++    u32 n=0;
++    for(u32 u=0;u<2;u++) {
++        if(reusable && vk_desc_buffer_equal(&bi[u],&cache->buffers[u])) continue;
++        writes[n++]=(VkWriteDescriptorSet){.sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,.dstSet=set,
++            .dstBinding=u?RSX_SPIRV_PSCONST_BINDING:RSX_SPIRV_VPCONST_BINDING,.descriptorCount=1,
++            .descriptorType=VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,.pBufferInfo=&bi[u]};
++    }
++    vk_desc_image_writes(writes,&n,set,RSX_SPIRV_TEXTURE_BINDING,VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
++        ii,reusable?cache->images:NULL,RSX_MAX_TEXTURES,split,reusable);
++    vk_desc_image_writes(writes,&n,set,RSX_SPIRV_SAMPLER_BINDING,VK_DESCRIPTOR_TYPE_SAMPLER,
++        si,reusable?cache->samplers:NULL,RSX_MAX_TEXTURES,0,reusable);
++    vk_desc_image_writes(writes,&n,set,RSX_SPIRV_TEXTURE_BINDING+RSX_MAX_TEXTURES,VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
++        vii,reusable?cache->vertex_images:NULL,RSX_MAX_VERTEX_TEXTURES,1,reusable);
++    vk_desc_image_writes(writes,&n,set,RSX_SPIRV_SAMPLER_BINDING+RSX_MAX_TEXTURES,VK_DESCRIPTOR_TYPE_SAMPLER,
++        vsi,reusable?cache->vertex_samplers:NULL,RSX_MAX_VERTEX_TEXTURES,1,reusable);
++    u32 descriptors=0;
++    for(u32 u=0;u<n;u++) descriptors+=writes[u].descriptorCount;
++    if(n) {pvkUpdateDescriptorSets(s_vk.device,n,writes,0,NULL);++s_descriptor_calls;}
++    else ++s_descriptor_skipped;
++    s_descriptor_written+=descriptors;
++    s_descriptor_reused+=2+2*RSX_MAX_TEXTURES+2*RSX_MAX_VERTEX_TEXTURES-descriptors;
++    if(cache && n) {
++        cache->valid=1;cache->set=set;cache->split=split;cache->epoch=s_descriptor_epoch;
++        memcpy(cache->buffers,bi,sizeof cache->buffers);
++        memcpy(cache->images,ii,sizeof cache->images);memcpy(cache->samplers,si,sizeof cache->samplers);
++        memcpy(cache->vertex_images,vii,sizeof cache->vertex_images);
++        memcpy(cache->vertex_samplers,vsi,sizeof cache->vertex_samplers);
++    }
++}
++
+ /* Fill the set the bound pipeline uses: the shared one (sixteen textures in
+  * one binding), or for a pipeline with cube units the split one (one binding
+  * per unit). Returns the set, or VK_NULL_HANDLE. */
+@@ -4181,6 +4266,7 @@
+     if (slot) {
+         VkDescriptorSet* target = split ? &slot->split : &slot->normal;
+         if (!*target) {
++            slot->descriptors.valid=0;
+             VkDescriptorSetLayout layout = split ? s_e2.split_layout : s_g.set_layout;
+             VkDescriptorSetAllocateInfo ai = {.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+                 .descriptorPool=slot->pool,.descriptorSetCount=1,.pSetLayouts=&layout};
+@@ -4216,38 +4302,9 @@
+                                           VK_IMAGE_LAYOUT_GENERAL };
+         vsi[u] = (VkDescriptorImageInfo){ smp, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED };
+     }
+-    VkWriteDescriptorSet w[3 + RSX_MAX_TEXTURES + 2 * RSX_MAX_VERTEX_TEXTURES];
+-    u32 n = 0;
+-    w[n++] = (VkWriteDescriptorSet){ .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set,
+-          .dstBinding = RSX_SPIRV_VPCONST_BINDING, .descriptorCount = 1,
+-          .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .pBufferInfo = &bi[0] };
+-    w[n++] = (VkWriteDescriptorSet){ .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set,
+-          .dstBinding = RSX_SPIRV_PSCONST_BINDING, .descriptorCount = 1,
+-          .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .pBufferInfo = &bi[1] };
+-    w[n++] = (VkWriteDescriptorSet){ .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set,
+-          .dstBinding = RSX_SPIRV_SAMPLER_BINDING, .descriptorCount = RSX_MAX_TEXTURES,
+-          .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER, .pImageInfo = si };
+-    if (split) {
+-        for (u32 u = 0; u < RSX_MAX_TEXTURES; u++)
+-            w[n++] = (VkWriteDescriptorSet){ .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+-                  .dstSet = set, .dstBinding = RSX_SPIRV_TEXTURE_BINDING + u, .descriptorCount = 1,
+-                  .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, .pImageInfo = &ii[u] };
+-    } else {
+-        w[n++] = (VkWriteDescriptorSet){ .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set,
+-              .dstBinding = RSX_SPIRV_TEXTURE_BINDING, .descriptorCount = RSX_MAX_TEXTURES,
+-              .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, .pImageInfo = ii };
+-    }
+-    for (u32 u = 0; u < RSX_MAX_VERTEX_TEXTURES; u++)
+-        w[n++] = (VkWriteDescriptorSet){ .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+-            .dstSet = set, .dstBinding = RSX_SPIRV_TEXTURE_BINDING + RSX_MAX_TEXTURES + u,
+-            .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+-            .pImageInfo = &vii[u] };
+-    for (u32 u = 0; u < RSX_MAX_VERTEX_TEXTURES; u++)
+-        w[n++] = (VkWriteDescriptorSet){ .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+-            .dstSet = set, .dstBinding = RSX_SPIRV_SAMPLER_BINDING + RSX_MAX_TEXTURES + u,
+-            .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER,
+-            .pImageInfo = &vsi[u] };
+-    pvkUpdateDescriptorSets(s_vk.device, n, w, 0, NULL);
++    static int enabled=-1;
++    if(enabled<0) {const char* option=getenv("RSX_DESCRIPTOR_CACHE");enabled=option && !strcmp(option,"1");}
++    vk_eng_update_descriptor_state(set,split,enabled && slot?&slot->descriptors:NULL,bi,ii,si,vii,vsi);
+     return set;
+ }
+ 

@@ -186,7 +186,7 @@ extern "C" void fp_ios_prepare(int* argc, char*** argv) {
         // Diagnostic image copies drain the graphics queue; sample them less often on phones.
         {"PS3RECOMP_VK_READBACK_EVERY", "300"}, {"FP_VK_SC_CHECK_MS", "0"}, {"RSX_SUBMIT_SUMMARY", "1"},
         {"PS3RECOMP_VK_FRAME_ASYNC", "1"}, {"RSX_DRAW_BATCH_LIMIT", "192"},
-        {"RSX_DRAW_STATE_CACHE", "1"}, {"SPU_TASK_RUN_STATS", "1"},
+        {"RSX_DESCRIPTOR_CACHE", "1"}, {"RSX_DRAW_STATE_CACHE", "1"}, {"SPU_TASK_RUN_STATS", "1"},
     };
     // env.txt in the documents folder (KEY=VALUE per line) overrides and adds settings, for testing over USB.
     if (FILE* f = std::fopen((docs + "/env.txt").c_str(), "r")) {

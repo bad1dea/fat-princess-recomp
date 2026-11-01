@@ -60,6 +60,8 @@ jobs:
       - uses: ./.github/actions/prepare
         with:
           lift-key: ${{ secrets.FP_LIFT_KEY }}
+      - name: Verify Vulkan descriptor reuse
+        run: CPPFLAGS="-I$(brew --prefix vulkan-headers)/include" python3 tests/vulkan_descriptor_cache.py
       - name: Configure
         run: |
           cmake -S . -B build/ios -G Ninja -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_ARCHITECTURES=arm64 \
