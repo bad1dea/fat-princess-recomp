@@ -3182,3 +3182,37 @@ diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
  
  extern "C" void lv2_syscall(ppu_context* ctx)
  {
+--- a/runtime/spu/tests/test_spu_interpreter_handoff.c
++++ b/runtime/spu/tests/test_spu_interpreter_handoff.c
+@@ -9,6 +9,11 @@
+ #include <stdlib.h>
+ #include <string.h>
+ 
++#if defined(__APPLE__)
++/* The fixture has no device audio thread or QoS policy. Keep only this
++ * platform scheduling hint inert; real dispatch/jump/guest state still run. */
++void fp_audio_boost_this_thread(const char* what) { (void)what; }
++#endif
+ uint8_t* vm_base;
+ uint32_t ppu_vm_size;
+ extern void spu_begin_image(int);
+--- a/tools/test_spu_interpreter_handoff.py
++++ b/tools/test_spu_interpreter_handoff.py
+@@ -1,6 +1,7 @@
+ #!/usr/bin/env python3
+ """Exercise real SPU interpretation/drain boundaries without game binaries."""
+ import os
++import shlex
+ import subprocess
+ import tempfile
+ from pathlib import Path
+@@ -15,7 +16,8 @@
+            'spu_vm_pagemap.c', 'spurs_policy_blob_weak.c', 'spu_interp.c']
+ with tempfile.TemporaryDirectory(prefix='spu-interp-handoff-') as tmp:
+     binary = Path(tmp) / 'test'
+-    subprocess.run([os.environ.get('CC', 'cc'), '-std=gnu17', '-O1', '-UNDEBUG',
++    subprocess.run([os.environ.get('CC', 'cc'), '-std=gnu17', '-O1', '-UNDEBUG', '-D_GNU_SOURCE',
++                    *shlex.split(os.environ.get('CFLAGS', '')),
+                     '-I'+str(root/'include'), '-I'+str(spu),
+                     '-I'+str(root/'runtime/platform'),
+                     str(spu/'tests/test_spu_interpreter_handoff.c'),
