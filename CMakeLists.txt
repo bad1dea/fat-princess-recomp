@@ -182,6 +182,7 @@ if(FP_BUILD_GAME)
         FP_BOOT_MAIN "${FP_BOOT_MAIN}")
       string(PREPEND FP_BOOT_MAIN "#include <pthread.h>\n")
       target_sources(MyGameRecomp PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/ios_launch.cpp"
+                                         "${CMAKE_CURRENT_SOURCE_DIR}/src/ios_audio_profile.cpp"
                                          "${CMAKE_CURRENT_SOURCE_DIR}/src/ios_touch.mm"
                                          "${CMAKE_CURRENT_SOURCE_DIR}/src/ios_setup.mm"
                                          "${CMAKE_CURRENT_SOURCE_DIR}/src/ios_lifecycle.mm"

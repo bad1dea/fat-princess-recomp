@@ -1781,3 +1781,171 @@ diff --git a/runtime/spu/spu_workload.c b/runtime/spu/spu_workload.c
      return 0;
  }
  
+diff --git a/runtime/spu/spu_helpers.h b/runtime/spu/spu_helpers.h
+--- a/runtime/spu/spu_helpers.h
++++ b/runtime/spu/spu_helpers.h
+@@ -855,21 +855,25 @@
+ #else
+ extern __thread int g_spu_rz __attribute__((tls_model("initial-exec")));
+ #endif
+-SPU__NV_INLINE int spu__nv_native(uint32x4_t* r) {
++/* Retain the native lanes even when a sibling needs extended-range repair.
++ * The old all-zero repair mask recomputed all four lanes for one exception. */
++SPU__NV_INLINE uint32x4_t spu__nv_native(uint32x4_t* r) {
+     const uint32x4_t e = spu__nv_bexp(*r);
+     *r = vbicq_u32(*r, vceqzq_u32(e));
+-    return vmaxvq_u32(vcgtq_u32(e, vdupq_n_u32(253))) == 0;
++    return vcleq_u32(e, vdupq_n_u32(253));
+ }
+ SPU__NV_INLINE u128 spu__nv_rz_fa(u128 a, u128 b, uint32_t negb) {
+     const uint32x4_t x = vld1q_u32(a._u32), yb = vld1q_u32(b._u32), y = veorq_u32(yb, vdupq_n_u32(negb));
+     uint32x4_t r = vreinterpretq_u32_f32(vaddq_f32(vreinterpretq_f32_u32(x), vreinterpretq_f32_u32(y)));
+-    if (__builtin_expect(!spu__nv_native(&r), 0)) r = spu__fa_fix(r, vdupq_n_u32(0), x, yb, negb);
++    const uint32x4_t ok = spu__nv_native(&r);
++    if (__builtin_expect(!spu__nv_all4(ok), 0)) r = spu__fa_fix(r, ok, x, yb, negb);
+     return spu__nv_u128(r);
+ }
+ SPU__NV_INLINE u128 spu__nv_rz_fm(u128 a, u128 b) {
+     const uint32x4_t x = vld1q_u32(a._u32), y = vld1q_u32(b._u32);
+     uint32x4_t r = vreinterpretq_u32_f32(vmulq_f32(vreinterpretq_f32_u32(x), vreinterpretq_f32_u32(y)));
+-    if (__builtin_expect(!spu__nv_native(&r), 0)) r = spu__fm_fix(r, vdupq_n_u32(0), x, y);
++    const uint32x4_t ok = spu__nv_native(&r);
++    if (__builtin_expect(!spu__nv_all4(ok), 0)) r = spu__fm_fix(r, ok, x, y);
+     return spu__nv_u128(r);
+ }
+ SPU__NV_INLINE u128 spu__nv_rz_fma(u128 a, u128 b, u128 c, uint32_t negp, uint32_t negc) {
+@@ -877,7 +881,8 @@
+     const float32x4_t x = vreinterpretq_f32_u32(veorq_u32(xa, vdupq_n_u32(negp)));
+     const float32x4_t z = vreinterpretq_f32_u32(veorq_u32(zc, vdupq_n_u32(negc)));
+     uint32x4_t r = vreinterpretq_u32_f32(vfmaq_f32(z, x, vreinterpretq_f32_u32(y)));
+-    if (__builtin_expect(!spu__nv_native(&r), 0)) r = spu__fma_fix(r, vdupq_n_u32(0), xa, y, zc, negp, negc);
++    const uint32x4_t ok = spu__nv_native(&r);
++    if (__builtin_expect(!spu__nv_all4(ok), 0)) r = spu__fma_fix(r, ok, xa, y, zc, negp, negc);
+     return spu__nv_u128(r);
+ }
+ SPU__NV_INLINE u128 spu_fa(u128 a, u128 b) { return g_spu_rz ? spu__nv_rz_fa(a, b, 0) : spu__nv_fa(a, b, 0); }
+diff --git a/runtime/platform/win32_compat.h b/runtime/platform/win32_compat.h
+--- a/runtime/platform/win32_compat.h
++++ b/runtime/platform/win32_compat.h
+@@ -522,7 +522,7 @@
+ typedef CONDITION_VARIABLE* PCONDITION_VARIABLE;
+ #define CONDITION_VARIABLE_INIT NULL
+ 
+-typedef struct { pthread_mutex_t m; pthread_cond_t c; unsigned gen; } ps3_condvar;
++typedef struct { pthread_mutex_t m; pthread_cond_t c; unsigned gen; unsigned waiters; } ps3_condvar;
+ 
+ static inline void ps3__cv_init(void* p)
+ {
+@@ -530,6 +530,7 @@
+     pthread_mutex_init(&cv->m, NULL);
+     pthread_cond_init(&cv->c, NULL);
+     cv->gen = 0;
++    cv->waiters = 0;
+ }
+ static inline ps3_condvar* ps3_cv(CONDITION_VARIABLE* c)
+ { return (ps3_condvar*)ps3_lazy_obj((void**)c, sizeof(ps3_condvar), ps3__cv_init); }
+@@ -537,20 +538,28 @@
+ static inline void InitializeConditionVariable(CONDITION_VARIABLE* c) { *c = NULL; }
+ static inline void WakeConditionVariable(CONDITION_VARIABLE* c)
+ {
+-    ps3_condvar* cv = ps3_cv(c);
++    /* A wake has no memory for a future wait. Avoid allocating an object
++     * for SPU channel notifications that have never had a sleeper. */
++    ps3_condvar* cv = (ps3_condvar*)__atomic_load_n(c, __ATOMIC_ACQUIRE);
+     if (!cv) return;
+     pthread_mutex_lock(&cv->m);
+     cv->gen++;
+-    pthread_cond_signal(&cv->c);
++    /* Registration and this test share cv->m: a sleeper cannot enter
++     * between the test and the generation change. */
++    if (cv->waiters) pthread_cond_signal(&cv->c);
+     pthread_mutex_unlock(&cv->m);
+ }
+ static inline void WakeAllConditionVariable(CONDITION_VARIABLE* c)
+ {
+-    ps3_condvar* cv = ps3_cv(c);
++    /* A wake has no memory for a future wait. Avoid allocating an object
++     * for SPU channel notifications that have never had a sleeper. */
++    ps3_condvar* cv = (ps3_condvar*)__atomic_load_n(c, __ATOMIC_ACQUIRE);
+     if (!cv) return;
+     pthread_mutex_lock(&cv->m);
+     cv->gen++;
+-    pthread_cond_broadcast(&cv->c);
++    /* Registration and this test share cv->m: a sleeper cannot enter
++     * between the test and the generation change. */
++    if (cv->waiters) pthread_cond_broadcast(&cv->c);
+     pthread_mutex_unlock(&cv->m);
+ }
+ 
+@@ -562,6 +571,7 @@
+     if (!cv) return FALSE;
+     pthread_mutex_lock(&cv->m);
+     unsigned g = cv->gen;
++    cv->waiters++;
+     unlock(lock);
+     int rc = 0;
+     if (ms == INFINITE) {
+@@ -570,6 +580,7 @@
+         struct timespec ts = ps3__deadline_ms(ms);
+         while (cv->gen == g && rc == 0) rc = pthread_cond_timedwait(&cv->c, &cv->m, &ts);
+     }
++    cv->waiters--;
+     BOOL woke = (cv->gen != g);
+     pthread_mutex_unlock(&cv->m);
+     relock(lock);
+diff --git a/runtime/spu/spu_workload.c b/runtime/spu/spu_workload.c
+--- a/runtime/spu/spu_workload.c
++++ b/runtime/spu/spu_workload.c
+@@ -1225,6 +1225,7 @@
+  * Compare run CPU with run wall time to distinguish expensive decode/mix work
+  * from descheduling/other waits inside the work cycle. Park is the whole wait,
+  * including time until the producer signals; it is NOT a signal-wakeup latency. */
++void (*g_spu_task_run_observer)(uint32_t, uint32_t, int, uint64_t, uint64_t);
+ static int task_run_timing_on(void)
+ {
+     static _Thread_local int on=-1;
+@@ -1246,13 +1247,17 @@
+     if(!s_run_timing.epoch) s_run_timing.epoch=now;
+     if(s_run_timing.resume && now>=s_run_timing.resume) {
+         const unsigned long long run=now-s_run_timing.resume;
++        unsigned long long observed_cpu=0;
+         s_run_timing.run_n++;s_run_timing.run_sum+=run;
+         if(run>s_run_timing.run_max) s_run_timing.run_max=run;
+         if(cpu && s_run_timing.cpu_resume && cpu>=s_run_timing.cpu_resume) {
+             const unsigned long long used=cpu-s_run_timing.cpu_resume;
++            observed_cpu=used;
+             s_run_timing.cpu_n++;s_run_timing.cpu_sum+=used;
+             if(used>s_run_timing.cpu_max) s_run_timing.cpu_max=used;
+         }
++        if(g_spu_task_run_observer)
++            g_spu_task_run_observer(taskset,task,0,run,observed_cpu);
+     }
+     s_run_timing.enter=now;
+ }
+@@ -1276,6 +1281,8 @@
+         s_run_timing.run_sum=s_run_timing.run_max=s_run_timing.cpu_sum=s_run_timing.cpu_max=s_run_timing.park_sum=s_run_timing.park_max=0;
+     }
+     s_run_timing.resume=spu_task_us();s_run_timing.cpu_resume=spu_task_cpu_us();
++    if(g_spu_task_run_observer)
++        g_spu_task_run_observer(s_run_timing.taskset,s_run_timing.task,1,0,0);
+ }
+ 
+ /* Deliver a signal to a task (callable from any PPU/host thread). */
+diff --git a/runtime/spu/spu_workload.h b/runtime/spu/spu_workload.h
+--- a/runtime/spu/spu_workload.h
++++ b/runtime/spu/spu_workload.h
+@@ -33,6 +33,14 @@
+ #endif
+ 
+ typedef void (*spu_lifted_entry_fn)(spu_context*);
++
++/* Optional host observer, installed before task threads start. Timing must be
++ * enabled with SPU_TASK_RUN_STATS. running=1 begins a work round; running=0
++ * ends it, with measured wall/CPU microseconds (zero CPU means unavailable).
++ * The callback runs on the task's execution thread and must remain short. */
++extern void (*g_spu_task_run_observer)(uint32_t taskset, uint32_t task,
++    int running, uint64_t wall_us, uint64_t cpu_us);
++
+ 
+ /* FNV-1a 64-bit over a byte range. The canonical workload fingerprint; the
+  * offline extractor computes the same value so registrations and the images a

@@ -51,6 +51,7 @@ static NSData* tailFile(NSString* path, NSUInteger limit) {
             [routes componentsJoinedByString:@","], audio.category, audio.mode];
         NSMutableData* snapshot = [[header dataUsingEncoding:NSUTF8StringEncoding] mutableCopy];
         [snapshot appendData:tailFile([self.docs stringByAppendingPathComponent:@"play.log"], 512 * 1024)];
+        [snapshot appendData:tailFile([self.docs stringByAppendingPathComponent:@"audio-profile.txt"], 128 * 1024)];
         [snapshot appendData:[@"\n\nPROFILE MAPS\n" dataUsingEncoding:NSUTF8StringEncoding]];
         const char* prof = getenv("FP_PROF");
         if (prof) {
