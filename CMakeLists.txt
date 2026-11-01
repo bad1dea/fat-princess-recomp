@@ -44,6 +44,9 @@ if(FP_BUILD_GAME)
   endif()
   set(PS3RECOMP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/ps3recomp" CACHE PATH "Pinned ps3recomp checkout")
   set(RECOMP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/private/lift/game" CACHE PATH "Private game lift")
+  if(IOS)
+    find_package(SampleRate CONFIG REQUIRED)
+  endif()
   # Integrate the pinned upstream scaffold with the project-local boot and HLE adapters.
   add_subdirectory("${PS3RECOMP_DIR}/templates/project" game)
   target_sources(MyGameRecomp PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/diagnostics.cpp")
@@ -176,16 +179,17 @@ if(FP_BUILD_GAME)
     if(IOS)
       # No launcher or command line on iOS: Documents is the game folder, and SDL owns the UIKit entry point.
       string(REPLACE "int main(int argc, char** argv)\n{" "int main(int argc, char** argv)\n{\n    fp_ios_prepare(&argc, &argv);" FP_BOOT_MAIN "${FP_BOOT_MAIN}")
-      string(PREPEND FP_BOOT_MAIN "#include <SDL2/SDL_main.h>\nextern \"C\" void fp_ios_prepare(int*, char***);\n")
+      string(PREPEND FP_BOOT_MAIN "#include <SDL2/SDL_main.h>\nextern \"C\" void fp_ios_prepare(int*, char***);\nextern \"C\" void fp_ios_stall_register_thread(unsigned,const char*);\n")
       # UIKit wants the window, presentation and event pump on the main thread: run the frame clock there and the
       # game's own entry on a worker with a deep stack (lifted code recurses as the original did).
       string(REPLACE "    CreateThread(NULL, 4u * 1024 * 1024, frame_clock, NULL, 0, NULL);\n" "" FP_BOOT_MAIN "${FP_BOOT_MAIN}")
       string(REPLACE "    int rc = ppu_run(entry, STACK_TOP);"
-        "    static uint32_t fp_ios_entry; fp_ios_entry = entry;\n    {\n        pthread_attr_t fa; pthread_attr_init(&fa); pthread_attr_setstacksize(&fa, 64u << 20);\n        pthread_t ft;\n        pthread_create(&ft, &fa, [](void*) -> void* {\n            int r = ppu_run(fp_ios_entry, STACK_TOP);\n            printf(\"\\n[boot] ppu_run returned %d (entry function unwound)\\n\", r);\n            exit(g_sys_process_exit_called ? (int)g_sys_process_exit_code : r);\n            return nullptr;\n        }, nullptr);\n    }\n    frame_clock(NULL);\n    int rc = 0;"
+        "    static uint32_t fp_ios_entry; fp_ios_entry = entry;\n    {\n        pthread_attr_t fa; pthread_attr_init(&fa); pthread_attr_setstacksize(&fa, 64u << 20);\n        pthread_t ft;\n        pthread_create(&ft, &fa, [](void*) -> void* {\n            fp_ios_stall_register_thread(1, \"ppu-main\");\n            int r = ppu_run(fp_ios_entry, STACK_TOP);\n            printf(\"\\n[boot] ppu_run returned %d (entry function unwound)\\n\", r);\n            exit(g_sys_process_exit_called ? (int)g_sys_process_exit_code : r);\n            return nullptr;\n        }, nullptr);\n    }\n    frame_clock(NULL);\n    int rc = 0;"
         FP_BOOT_MAIN "${FP_BOOT_MAIN}")
       string(PREPEND FP_BOOT_MAIN "#include <pthread.h>\n")
       target_sources(MyGameRecomp PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/ios_launch.cpp"
                                          "${CMAKE_CURRENT_SOURCE_DIR}/src/ios_audio_profile.cpp"
+                                         "${CMAKE_CURRENT_SOURCE_DIR}/src/ios_stall_profile.cpp"
                                          "${CMAKE_CURRENT_SOURCE_DIR}/src/ios_touch.mm"
                                          "${CMAKE_CURRENT_SOURCE_DIR}/src/ios_setup.mm"
                                          "${CMAKE_CURRENT_SOURCE_DIR}/src/ios_lifecycle.mm"

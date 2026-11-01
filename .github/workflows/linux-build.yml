@@ -24,6 +24,8 @@ jobs:
           c++ -std=c++17 -O2 tests/stall_trace.cpp -o /tmp/stall-trace
           /tmp/stall-trace
           python3 tests/stall_trace_backend.py
+          cc -O2 tests/audio_queue_budget.c -o /tmp/audio-budget
+          /tmp/audio-budget
       - name: Configure
         run: |
           cmake -S . -B build/native -G Ninja -DCMAKE_BUILD_TYPE=Release -DFP_BUILD_GAME=ON \

@@ -15,6 +15,7 @@
 #if defined(__APPLE__) && TARGET_OS_IOS
 #include "ios_touch.h"
 #include "ios_lifecycle.h"
+#include "ios_stall_profile.h"
 #else
 struct fp_touch_state { uint32_t buttons; int32_t lx, ly, rx, ry; };
 #endif
@@ -326,6 +327,12 @@ struct FPPresentTimingPause {
     bool paused=fp_stall_enabled() && fp_fifo_timing.active;
     FPPresentTimingPause(){if(paused)fp_trace_fifo_pause();}
     ~FPPresentTimingPause(){if(paused)fp_trace_fifo_resume();}
+};
+extern "C" void rsx_vulkan_backend_stall_host_op(unsigned,uint64_t);
+struct FPHostTiming {
+    unsigned kind;uint64_t start;
+    explicit FPHostTiming(unsigned k):kind(k),start(fp_stall_enabled() && !g_d3d12?SDL_GetPerformanceCounter():0){}
+    ~FPHostTiming(){if(start)rsx_vulkan_backend_stall_host_op(kind,start);}
 };
 extern "C" void rsx_vulkan_backend_stall_frame(uint32_t,uint32_t,uint32_t,
     double,double,double,double,double,double,uint32_t,uint32_t);
@@ -737,6 +744,9 @@ extern "C" void fp_backend_present(void) {
         stats.mean_luma,stats.dark_samples,unsigned(duplicate),unsigned(drop),
         count==1?0.:fp_fifo_wall_ms-previous_fifo_ms,present_ms,(unsigned long long)stats.submissions);
     previous_fifo_ms=fp_fifo_wall_ms;
+#if defined(__APPLE__) && TARGET_OS_IOS
+    fp_ios_stall_profile_frame(ms,ai_control && player_control.available && !fp::settings_menu_open() && !just_resumed);
+#endif
     if(fp_stall_enabled() && !g_d3d12) {
         static uint64_t previous_wall=0,previous_cpu=0;
         if(just_resumed){previous_wall=fp_fifo_timing.wall_total;previous_cpu=fp_fifo_timing.cpu_total;}
@@ -783,6 +793,7 @@ extern "C" void fp_backend_present(void) {
 }
 
 extern "C" int fp_backend_pump_messages(void) {
+    FPHostTiming pump_timing(0);
 #ifdef _WIN32
     const int result = g_d3d12 ? fp_d3d12_pump_messages() : rsx_vulkan_backend_pump_messages();
 #else
@@ -911,6 +922,9 @@ static int SDLCALL background_watch(void*, SDL_Event* e) {
 // The command walker holds at a flip until its completed image is presented.
 // Keep simulation/vblank signals independent of whether a new image is ready.
 extern "C" unsigned long fp_run_frame_clock(void (*present)(void)) {
+#if defined(__APPLE__) && TARGET_OS_IOS
+    fp_ios_stall_register_thread(0,"host-main");
+#endif
     using Clock = std::chrono::steady_clock;
     const char* title = std::getenv("PS3_TITLE");
     // PS3_VIDEO_RES fixes guest buffer geometry at boot; host output can change live.
@@ -971,13 +985,14 @@ extern "C" unsigned long fp_run_frame_clock(void (*present)(void)) {
         // Sleep in poll_us steps for the flip queue, but never past the next vblank: wake 150 us early and spin the rest,
         // so the tick lands within microseconds instead of up to a whole poll step late.
         {
+            FPHostTiming poll_timing(1);
             const auto until = next - std::chrono::microseconds(150);
             const auto t = Clock::now();
             if (poll_us > 0 && t < until) std::this_thread::sleep_for(std::min<Clock::duration>(std::chrono::microseconds(poll_us), until - t));
             else if (poll_us <= 0) std::this_thread::yield();
             if (Clock::now() < next && next - Clock::now() <= std::chrono::microseconds(150)) while (Clock::now() < next) {}
         }
-        if (!g_d3d12) rsx_vulkan_backend_interp_service();
+        if (!g_d3d12) {FPHostTiming interp_timing(4);rsx_vulkan_backend_interp_service();}
         auto now = Clock::now();
         const double want_hz = forced_hz > 1.0 ? forced_hz : g_pace_hz.load();
         if (want_hz != tick_hz) {
@@ -986,14 +1001,16 @@ extern "C" unsigned long fp_run_frame_clock(void (*present)(void)) {
             next = now + tick;
         }
         unsigned catchup = 0;
+        { FPHostTiming tick_timing(2);
         while (now >= next && catchup++ < 8) {
             g_last_tick_ns.store(std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch()).count());
             pace_log('T');
             cellGcmTickVBlank(); cellGcmTickFlip(); next += tick;
         }
+        }
         if (catchup >= 8) next = now + tick;
         if (!ready) continue;
-        cellGcm_present_pending(present);
+        {FPHostTiming pending_timing(3);cellGcm_present_pending(present);}
         const auto fifo_start=Clock::now();
         fp_trace_fifo_resume();
         cellGcm_rsx_process_fifo();
@@ -1012,8 +1029,8 @@ extern "C" unsigned long fp_run_frame_clock(void (*present)(void)) {
             }
         }
         fp_fifo_wall_ms+=std::chrono::duration<double,std::milli>(Clock::now()-fifo_start).count();
-        if (!g_d3d12) rsx_vulkan_backend_interp_service();
-        cellGcm_present_pending(present);
+        if (!g_d3d12) {FPHostTiming interp_timing(4);rsx_vulkan_backend_interp_service();}
+        {FPHostTiming pending_timing(3);cellGcm_present_pending(present);}
         if (!cellGcm_flip_request_count()) fp_backend_present();
     }
 }

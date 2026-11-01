@@ -2,6 +2,7 @@
 #import <AVFAudio/AVFAudio.h>
 #include <atomic>
 #include <cstdio>
+#include <cmath>
 #include "ios_lifecycle.h"
 
 extern "C" void fp_audio_set_interrupted(int paused);
@@ -28,6 +29,14 @@ extern "C" int fp_ios_is_active(void) {
 }
 extern "C" unsigned fp_ios_resume_generation(void) { return resume_generation.load(); }
 
+extern "C" int fp_ios_audio_output_info(unsigned*rate,unsigned*frames) {
+    AVAudioSession*session=AVAudioSession.sharedInstance;
+    const double hz=session.sampleRate,seconds=session.IOBufferDuration;
+    if(!std::isfinite(hz) || !std::isfinite(seconds) || hz<8000 || hz>192000 || seconds<=0 || seconds>0.25)return 0;
+    *rate=(unsigned)std::lround(hz);*frames=(unsigned)std::lround(hz*seconds);
+    return *frames!=0;
+}
+
 extern "C" void fp_ios_lifecycle_start(void) {
     static NSMutableArray* observers;
     if (observers) return;
@@ -46,6 +55,18 @@ extern "C" void fp_ios_lifecycle_start(void) {
     observe(AVAudioSessionInterruptionNotification, ^(NSNotification* notification) {
         const bool began = [notification.userInfo[AVAudioSessionInterruptionTypeKey] unsignedIntegerValue] == AVAudioSessionInterruptionTypeBegan;
         update(began ? AudioInterrupted : 0, began ? 0 : AudioInterrupted, began ? "audio-interruption-began" : "audio-interruption-ended");
+    });
+    __block unsigned route_rate=0,route_frames=0;
+    fp_ios_audio_output_info(&route_rate,&route_frames);
+    observe(AVAudioSessionRouteChangeNotification, ^(NSNotification*note) {
+        unsigned rate=0,frames=0;
+        if(!fp_ios_audio_output_info(&rate,&frames))return;
+        const bool changed=route_rate && (route_rate!=rate || route_frames!=frames);
+        route_rate=rate;route_frames=frames;
+        // Reopening SDL must not recursively reset for an unchanged category/format.
+        if(changed)fp_audio_reset_output();
+        std::fprintf(stderr,"[ios-state] audio-route-clock rate=%u io_frames=%u reason=%lu reset=%d\n",
+            rate,frames,(unsigned long)[note.userInfo[AVAudioSessionRouteChangeReasonKey] unsignedIntegerValue],changed);
     });
     observe(AVAudioSessionMediaServicesWereResetNotification, ^(NSNotification*) {
         fp_audio_reset_output();

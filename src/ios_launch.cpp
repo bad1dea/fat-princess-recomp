@@ -1,3 +1,4 @@
+#include "ios_stall_profile.h"
 // iOS start-up: there is no launcher script or command line, so do what run.sh does on the desktop. Game files
 // live in the app's Documents folder (shared through the Files app): game/ and elf/ as in the desktop package,
 // or one .zip of them dropped there (or opened with the app), which is unpacked on the next launch.
@@ -186,7 +187,7 @@ extern "C" void fp_ios_prepare(int* argc, char*** argv) {
         // Diagnostic image copies drain the graphics queue; sample them less often on phones.
         {"PS3RECOMP_VK_READBACK_EVERY", "300"}, {"FP_VK_SC_CHECK_MS", "0"}, {"RSX_SUBMIT_SUMMARY", "1"},
         {"PS3RECOMP_VK_FRAME_ASYNC", "1"}, {"RSX_DRAW_BATCH_LIMIT", "192"},
-        {"FP_STALL_TRACE", "1"}, {"RSX_DESCRIPTOR_CACHE", "1"}, {"RSX_DRAW_STATE_CACHE", "1"}, {"SPU_TASK_RUN_STATS", "1"},
+        {"FP_STALL_PROFILE", "1"}, {"SDL_AUDIO_RESAMPLING_MODE", "medium"}, {"FP_STALL_TRACE", "1"}, {"RSX_DESCRIPTOR_CACHE", "1"}, {"RSX_DRAW_STATE_CACHE", "1"}, {"SPU_TASK_RUN_STATS", "1"},
     };
     // env.txt in the documents folder (KEY=VALUE per line) overrides and adds settings, for testing over USB.
     if (FILE* f = std::fopen((docs + "/env.txt").c_str(), "r")) {
@@ -214,6 +215,7 @@ extern "C" void fp_ios_prepare(int* argc, char*** argv) {
     fp_ios_diagnostics_start(docs.c_str());
     fp_prof_start();
     fp_ios_audio_profile_start(docs.c_str());
+    fp_ios_stall_profile_start(docs.c_str());
     // SDL's window only finds MoltenVK through an explicit path; it ships inside the app bundle.
     char exe[1024];
     uint32_t len = sizeof exe;

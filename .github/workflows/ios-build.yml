@@ -11,6 +11,7 @@ on:
 
 env:
   SDL_TAG: release-2.32.10
+  SRC_TAG: 0.2.2
   GLSLANG_TAG: 16.6.0
   MVK_TAG: v1.4.2
   IOS_MIN: "16.0"
@@ -31,6 +32,11 @@ jobs:
           brew install ninja zstd openssl@3 vulkan-headers
           echo "$(brew --prefix openssl@3)/bin" >> "$GITHUB_PATH"
           echo "DEPS=$RUNNER_TEMP/deps-ios" >> "$GITHUB_ENV"
+      - name: Verify Apple capture interfaces
+        run: |
+          c++ -std=c++17 -Werror=format -fsyntax-only src/ios_stall_profile.cpp
+          sdk=$(xcrun --sdk iphoneos --show-sdk-path)
+          xcrun --sdk iphoneos clang++ -std=c++17 -fobjc-arc -x objective-c++ -fsyntax-only -Werror=format -isysroot "$sdk" -target arm64-apple-ios${IOS_MIN} src/ios_lifecycle.mm
       - name: Verify SPU compile flags
         run: python3 tests/spu_compile_flags.py
       - name: Cache iOS dependencies
@@ -38,15 +44,13 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/deps-ios
-          key: ios-deps-${{ env.SDL_TAG }}-${{ env.GLSLANG_TAG }}-${{ env.MVK_TAG }}-${{ env.IOS_MIN }}
+          key: ios-deps-${{ env.SDL_TAG }}-${{ env.GLSLANG_TAG }}-${{ env.MVK_TAG }}-${{ env.IOS_MIN }}-src${{ env.SRC_TAG }}-burst-v1
       - name: Build SDL2, glslang and fetch MoltenVK for iOS
         if: steps.deps.outputs.cache-hit != 'true'
         run: |
           set -euo pipefail
           ios=(-G Ninja -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=$IOS_MIN -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=$DEPS)
-          git clone -q --depth 1 -b $SDL_TAG https://github.com/libsdl-org/SDL.git "$RUNNER_TEMP/sdl"
-          cmake -S "$RUNNER_TEMP/sdl" -B "$RUNNER_TEMP/sdl/b" "${ios[@]}" -DSDL_SHARED=OFF -DSDL_STATIC=ON -DSDL_TEST=OFF
-          cmake --build "$RUNNER_TEMP/sdl/b" && cmake --install "$RUNNER_TEMP/sdl/b"
+          bash tools/build_ios_audio_deps.sh "$DEPS" "$IOS_MIN"
           git clone -q --depth 1 -b $GLSLANG_TAG https://github.com/KhronosGroup/glslang.git "$RUNNER_TEMP/glslang"
           cmake -S "$RUNNER_TEMP/glslang" -B "$RUNNER_TEMP/glslang/b" "${ios[@]}" -DENABLE_OPT=OFF -DGLSLANG_TESTS=OFF \
             -DENABLE_GLSLANG_BINARIES=OFF -DBUILD_SHARED_LIBS=OFF -DGLSLANG_ENABLE_INSTALL=ON
@@ -67,6 +71,13 @@ jobs:
           "$RUNNER_TEMP/spu-extended"
           cc -O2 -frounding-math -ffp-contract=off -Ithird_party/ps3recomp/include -I"$rt" "$rt/spu/tests/test_spu_float_neon.c" -lm -o "$RUNNER_TEMP/spu-native"
           "$RUNNER_TEMP/spu-native"
+      - name: Verify Bluetooth burst clock
+        run: |
+          cc -O2 tests/audio_queue_budget.c -o "$RUNNER_TEMP/audio-budget"
+          "$RUNNER_TEMP/audio-budget"
+          cmake -S tests/audio_burst -B "$RUNNER_TEMP/audio-burst" -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$DEPS/host-audio"
+          cmake --build "$RUNNER_TEMP/audio-burst"
+          "$RUNNER_TEMP/audio-burst/audio_burst_model"
       - name: Verify bounded stall capture
         run: |
           c++ -std=c++17 -O2 tests/stall_trace.cpp -o "$RUNNER_TEMP/stall-trace"
@@ -78,7 +89,7 @@ jobs:
           cmake -S . -B build/ios -G Ninja -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_ARCHITECTURES=arm64 \
             -DCMAKE_OSX_DEPLOYMENT_TARGET=$IOS_MIN -DCMAKE_BUILD_TYPE=Release -DCMAKE_MACOSX_BUNDLE=OFF -DFP_BUILD_GAME=ON -DFP_X86_V3=OFF \
             -DFP_DEFAULT_SERVER="${{ secrets.FP_SERVER }}" -DFP_FILES_URL="${{ secrets.FP_FILES_URL }}" -DFP_REPORT_URL="${{ secrets.FP_REPORT_URL }}" \
-            -DCMAKE_PREFIX_PATH="$DEPS" -DCMAKE_FIND_ROOT_PATH="$DEPS" -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=BOTH \
+            -DSampleRate_DIR="$DEPS/lib/cmake/SampleRate" -DCMAKE_PREFIX_PATH="$DEPS" -DCMAKE_FIND_ROOT_PATH="$DEPS" -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=BOTH \
             -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=BOTH -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=BOTH \
             -DPS3RECOMP_VULKAN_INCLUDE_DIR="$(brew --prefix vulkan-headers)/include" \
             -DSPU_DIR="$PWD/private/lift/spu" -DFP_OVERLAY_DIR="$PWD/private/lift/overlays"
@@ -102,6 +113,8 @@ jobs:
           mkdir -p "$app/Frameworks"
           cp "$(find build/ios -name fp_native -type f | head -1)" "$app/fp_native"
           strip -S "$app/fp_native"
+          mkdir -p "$app/licenses"
+          cp "$DEPS/licenses/libsamplerate.txt" "$app/licenses/"
           cp ios/Info.plist "$app/Info.plist"
           plutil -replace CFBundleVersion -string "${{ github.run_number }}" "$app/Info.plist"
           cp -R "$DEPS/Frameworks/MoltenVK.framework" "$app/Frameworks/"

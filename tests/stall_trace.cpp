@@ -1,9 +1,33 @@
 #include "../src/frame_timing.h"
+#include "../src/stall_profile_gate.h"
+#include "../src/profile_query.h"
+#include <stdexcept>
 #include "../third_party/ps3recomp/libs/video/rsx_stall_trace.h"
 #include <cassert>
 #include <cstdio>
 #include <chrono>
+struct QueryFixture {
+    unsigned holds=0,reads=0,resumes=0;bool held=false,fail_hold=false,fail_read=false,throw_read=false;
+    int suspend(int){holds++;if(fail_hold)return 1;held=true;return 0;}
+    int read(int,int&,unsigned&){assert(held);reads++;if(throw_read)throw std::runtime_error("mock read");return fail_read?2:0;}
+    int resume(int){assert(held);held=false;resumes++;return 0;}
+};
 int main() {
+    int registers=0;unsigned count=0;QueryFixture query;
+    auto result=fp_profile_query(query,1,registers,count);assert(result.held && !result.read && query.resumes==1 && !query.held);
+    query.fail_read=true;result=fp_profile_query(query,1,registers,count);assert(result.read==2 && query.resumes==2 && !query.held);
+    query.fail_hold=true;result=fp_profile_query(query,1,registers,count);assert(!result.held && query.resumes==2);
+    query.fail_hold=false;query.throw_read=true;
+    try{fp_profile_query(query,1,registers,count);assert(false);}catch(const std::runtime_error&){assert(query.resumes==3 && !query.held);}
+
+    FPStallProfileGate gate;
+    assert(!gate.note(1,100,false));assert(!gate.note(1000,100,true));
+    assert(!gate.note(120000999,100,true));assert(!gate.note(120001000,51,true));
+    assert(!gate.note(120001001,49,true));assert(!gate.note(120001002,51,true));
+    assert(gate.note(120001003,51,true));assert(!gate.note(130000000,100,true));
+    FPStallProfileGate reset;assert(!reset.note(1000,100,true));
+    assert(!reset.note(100000000,100,false));assert(!reset.note(130000000,100,true));
+    assert(!reset.note(240000000,100,true));
     FPFifoTiming fifo;
     fifo.resume(100,10);fifo.resume(150,20); // nested resume cannot lose work
     fifo.pause(200,40);assert(fifo.wall_total==100 && fifo.cpu_total==30);
