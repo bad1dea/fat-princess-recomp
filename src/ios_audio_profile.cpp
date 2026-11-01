@@ -132,7 +132,10 @@ extern "C" void fp_ios_audio_profile_start(const char* docs) {
     output = std::string(docs) + "/audio-profile.txt";
     unlink(output.c_str()); // discard a preceding process/build's addresses
     const char* option = std::getenv("FP_AUDIO_PROFILE");
-    if (std::getenv("FP_PROF") || (option && option[0] == '0')) return;
+    if (std::getenv("FP_PROF") || !option || option[0] != '1') {
+        std::fprintf(stderr,"[audio-profile] instruction sampling off; CPU timing and diagnostic uploads remain enabled\n");
+        return;
+    }
     g_spu_task_run_observer = note_round;
     std::thread([] {
         pthread_setname_np("audio-profile");

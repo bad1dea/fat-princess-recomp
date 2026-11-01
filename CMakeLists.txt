@@ -71,14 +71,16 @@ if(FP_BUILD_GAME)
     message(FATAL_ERROR "No lifted SPU sources found under ${FP_SPU_LIFT_DIR}")
   endif()
   target_sources(MyGameRecomp PRIVATE ${FP_SPU_SOURCES})
-  set_source_files_properties(${FP_SPU_SOURCES} PROPERTIES
+  # The target is created in the framework subdirectory. Source properties
+  # must be set in that target's directory scope to affect its compile commands.
+  set_source_files_properties(${FP_SPU_SOURCES} TARGET_DIRECTORY MyGameRecomp PROPERTIES
     INCLUDE_DIRECTORIES "${PS3RECOMP_DIR}/runtime/spu"
     COMPILE_DEFINITIONS "SPU_USE_DISPATCH_MT;SPU_LS_LEAN")
   set(FP_OVERLAY_DIR "" CACHE PATH "Private lifts of modules at observed local-store addresses")
   if(FP_OVERLAY_DIR)
     file(GLOB_RECURSE FP_OVERLAY_SOURCES CONFIGURE_DEPENDS "${FP_OVERLAY_DIR}/*.c")
     target_sources(MyGameRecomp PRIVATE ${FP_OVERLAY_SOURCES})
-    set_source_files_properties(${FP_OVERLAY_SOURCES} PROPERTIES
+    set_source_files_properties(${FP_OVERLAY_SOURCES} TARGET_DIRECTORY MyGameRecomp PROPERTIES
       INCLUDE_DIRECTORIES "${PS3RECOMP_DIR}/runtime/spu"
       COMPILE_DEFINITIONS "SPU_USE_DISPATCH_MT;SPU_LS_LEAN"
       COMPILE_OPTIONS "-O3")

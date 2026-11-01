@@ -2109,3 +2109,76 @@ new file mode 100644
 +    return 0;
 +#endif
 +}
+diff --git a/runtime/spu/spu_helpers.h b/runtime/spu/spu_helpers.h
+--- a/runtime/spu/spu_helpers.h
++++ b/runtime/spu/spu_helpers.h
+@@ -402,22 +402,23 @@
+ }
+ #elif defined(__ARM_NEON)
+ #include <arm_neon.h>
+-/* NEON version: tbl over the 32-byte {a,b} concatenation. SPU byte P lives at
+- * host byte P^3 (each word's bytes reversed), so rev32 into SPU order,
+- * select, and rev32 back. */
++/* Select directly in host byte order. Host byte j uses control c[j], and
++ * SPU source byte n resides at host byte n^3. This avoids reversing both
++ * sources, the control and the result for every shuffle in mixer loops. */
+ static inline u128 spu_shufb(u128 a, u128 b, u128 c) {
+     uint8x16x2_t t;
+-    t.val[0] = vrev32q_u8(vld1q_u8(a._u8));
+-    t.val[1] = vrev32q_u8(vld1q_u8(b._u8));
+-    const uint8x16_t C = vrev32q_u8(vld1q_u8(c._u8));
+-    uint8x16_t r = vqtbl2q_u8(t, vandq_u8(C, vdupq_n_u8(0x1F)));
+-    /* Special selectors: 10x -> 0x00, 110 -> 0xFF, 111 -> 0x80. */
+-    const uint8x16_t m80 = vtstq_u8(C, vdupq_n_u8(0x80));
+-    const uint8x16_t mC0 = vceqq_u8(vandq_u8(C, vdupq_n_u8(0xC0)), vdupq_n_u8(0xC0));
+-    const uint8x16_t mE0 = vceqq_u8(vandq_u8(C, vdupq_n_u8(0xE0)), vdupq_n_u8(0xE0));
+-    const uint8x16_t special = vbslq_u8(mE0, vdupq_n_u8(0x80), mC0);
+-    r = vrev32q_u8(vbslq_u8(m80, special, r));
+-    u128 out; vst1q_u8(out._u8, r); return out;
++    t.val[0] = vld1q_u8(a._u8);
++    t.val[1] = vld1q_u8(b._u8);
++    const uint8x16_t control = vld1q_u8(c._u8);
++    const uint8x16_t index = veorq_u8(vandq_u8(control, vdupq_n_u8(31)), vdupq_n_u8(3));
++    const uint8x16_t selected = vqtbl2q_u8(t, index);
++    /* Top-nibble specials: 8..B -> zero, C..D -> FF, E..F -> 80. */
++    static const uint8_t special_bytes[16] = {0,0,0,0,0,0,0,0,0,0,0,0,255,255,128,128};
++    const uint8x16_t special = vqtbl1q_u8(vld1q_u8(special_bytes), vshrq_n_u8(control, 4));
++    const uint8x16_t special_mask = vcltq_s8(vreinterpretq_s8_u8(control), vdupq_n_s8(0));
++    u128 out;
++    vst1q_u8(out._u8, vbslq_u8(special_mask, special, selected));
++    return out;
+ }
+ #endif
+ #if defined(__SSE4_1__) || defined(__ARM_NEON)
+diff --git a/runtime/spu/tests/test_spu_shufb.c b/runtime/spu/tests/test_spu_shufb.c
+--- a/runtime/spu/tests/test_spu_shufb.c
++++ b/runtime/spu/tests/test_spu_shufb.c
+@@ -12,6 +12,28 @@
+     puts("test_spu_shufb: built without SSE4.1 or NEON, nothing to compare");
+     return 0;
+ #else
++    /* Cover every control value at every host byte position explicitly.
++     * Distinct source bytes expose endian or a/b selection mistakes. */
++    for (int seed = 0; seed < 16; ++seed) {
++        u128 a, b;
++        for (int i = 0; i < 16; ++i) {
++            a._u8[i] = (uint8_t)(37 * i + 17 * seed);
++            b._u8[i] = (uint8_t)(119 * i + seed);
++        }
++        for (int control = 0; control < 256; ++control) {
++            for (int position = 0; position < 16; ++position) {
++                u128 c;
++                for (int i = 0; i < 16; ++i) c._u8[i] = (uint8_t)(control + 19 * i);
++                c._u8[position] = (uint8_t)control;
++                const u128 got = spu_shufb(a,b,c), ref = spu_shufb_ref(a,b,c);
++                if (memcmp(&got,&ref,16)) {
++                    printf("test_spu_shufb: selector mismatch seed=%d control=%d position=%d\n",seed,control,position);
++                    return 1;
++                }
++            }
++        }
++    }
++    puts("test_spu_shufb: ok (65536 exhaustive selector/position cases)");
+     srand(12345);
+     for (int it = 0; it < 200000; it++) {
+         u128 a, b, c;
