@@ -365,7 +365,7 @@ extern "C" void fp_backend_present(void) {
     static auto last=Clock::now(), epoch=last;
     static const bool epoch_logged=[&]{ std::fprintf(stderr,"[fp-stats] epoch_us=%llu\n",(unsigned long long)std::chrono::duration_cast<std::chrono::microseconds>(epoch.time_since_epoch()).count()); return true; }();
     (void)epoch_logged;
-    static double window_ms=0, window_wait=0;
+    static double window_ms=0, window_wait=0, window_fifo=0, window_present=0;
     static double previous_fifo_ms=0;
     static uint64_t window_submits=0;
     static uint32_t window_flip0=0;
@@ -384,7 +384,7 @@ extern "C" void fp_backend_present(void) {
     const bool just_resumed=resume!=resume_serial;
     if(just_resumed) {
         resume_serial=resume; last=Clock::now();
-        filled=cursor=window_frames=0; window_ms=window_wait=0;
+        filled=cursor=window_frames=0; window_ms=window_wait=window_fifo=window_present=0;
         window_submits=0;window_flip0=flip;previous_fifo_ms=fp_fifo_wall_ms;
         if(!g_d3d12) rsx_vulkan_backend_get_debug_stats(&previous);
     }
@@ -675,9 +675,11 @@ extern "C" void fp_backend_present(void) {
     const bool duplicate=count && flip==last_flip;
     // A brightness drop is a clue, including legitimate transitions, not a flicker verdict.
     const bool drop=count && previous_luma>=24 && stats.mean_luma*100 < previous_luma*35;
+    const double fifo_ms=fp_fifo_wall_ms-previous_fifo_ms;
     if(count && !just_resumed) {
         intervals[cursor++ % intervals.size()]=ms;filled=std::min(filled+1,unsigned(intervals.size()));
-        window_ms+=ms;window_wait+=wait;window_submits+=submits;++window_frames;
+        window_ms+=ms;window_wait+=wait;window_submits+=submits;
+        window_fifo+=fifo_ms;window_present+=present_ms;++window_frames;
     }
     ++count;duplicates+=duplicate;drops+=drop;
     if(!window_flip0) window_flip0=flip;
@@ -727,10 +729,11 @@ extern "C" void fp_backend_present(void) {
             fp_dump_overlay(pixels,w,h,"stats");
             fp_set_overlay(pixels.data(),w,h,title);
         } else fp_set_overlay(nullptr,0,0,title);
-        if(trace) std::fprintf(stderr,"[fp-stats] fps=%.2f frame=%.2f p95=%.2f max=%.2f draws=%u submits=%.1f wait=%.2f flip=%u dup=%u surface=%u luma=%u dark=%u/64 drops=%u\n",
+        if(trace) std::fprintf(stderr,"[fp-stats] fps=%.2f frame=%.2f p95=%.2f max=%.2f draws=%u submits=%.1f wait=%.2f flip=%u dup=%u surface=%u luma=%u dark=%u/64 drops=%u fifo=%.2f present=%.2f\n",
             fps,window_ms/window_frames,p95,maximum,draws,double(window_submits)/window_frames,
-            window_wait/window_frames,flip,duplicates,stats.surface,stats.mean_luma,stats.dark_samples,drops);
-        window_ms=window_wait=0;window_submits=0;window_frames=0;window_flip0=flip;
+            window_wait/window_frames,flip,duplicates,stats.surface,stats.mean_luma,stats.dark_samples,drops,
+            window_fifo/window_frames,window_present/window_frames);
+        window_ms=window_wait=window_fifo=window_present=0;window_submits=0;window_frames=0;window_flip0=flip;
     }
     last=now;last_flip=flip;previous_luma=stats.mean_luma;previous=stats;
 }

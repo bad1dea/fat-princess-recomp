@@ -1587,3 +1587,197 @@ diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
              if (!t0) t0 = now;
              n++;
              { const u32 q = audio_backend_queued_samples(); if (q == 0) gaps++; qsum += q; if (q > qmax) qmax = q; }
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -482,6 +482,7 @@
+     s_submit_reason = reason;
+     return vk_batch_flush_ex(0);
+ }
++static uint64_t s_state_issued,s_state_skipped;
+ static void vk_trace_submit(const char* reason, unsigned draws, double ms) {
+     static FILE* file;
+     static int initialized;
+@@ -511,6 +512,9 @@
+         if(ms>b->max) b->max=ms;
+     }
+     if(now-window>=5000) {
++        fprintf(stderr,"[rsx-state] window_ms=%u issued=%llu skipped=%llu\n",now-window,
++                (unsigned long long)s_state_issued,(unsigned long long)s_state_skipped);
++        s_state_issued=s_state_skipped=0;
+         for(unsigned j=0;j<used;j++) {
+             const struct WaitBucket* b=&buckets[j];
+             fprintf(stderr,"[rsx-wait] window_ms=%u reason=%s calls=%u draws=%u wait_ms=%.3f max_ms=%.3f\n",
+@@ -541,7 +545,16 @@
+ static int s_batch_recording, s_batch_draw;
+ static int s_batch_renderpass;
+ static VkFramebuffer s_batch_framebuffer;
++static struct {
++    int valid;
++    VkPipeline pipeline;
++    VkViewport viewport;
++    VkRect2D scissor;
++    u32 stencil;
++    float line_width,depth_min,depth_max;
++} s_draw_state;
+ static void vk_batch_end_pass(void) {
++    s_draw_state.valid=0;   /* never carry state into another pass/command buffer */
+     if(s_batch_renderpass) {
+         pvkCmdEndRenderPass(s_vk.cmd);
+         s_batch_renderpass=0;s_batch_framebuffer=VK_NULL_HANDLE;
+@@ -4238,6 +4251,34 @@
+     return set;
+ }
+ 
++/* All engine pipelines declare these states dynamic. Cache only inside a
++ * retained render pass, where no transfer/compute commands can intervene.
++ * Descriptor/vertex/index bindings remain private to each draw slot. */
++static void vk_eng_record_draw_state(VkPipeline pipe,const VkViewport* vp,const VkRect2D* sc,
++                                     u32 stencil,float line_width,float depth_min,float depth_max)
++{
++    static int enabled=-1;
++    if(enabled<0) {const char* e=getenv("RSX_DRAW_STATE_CACHE");enabled=e && !strcmp(e,"1");}
++    const int keep=enabled && s_batch_renderpass;
++    const int valid=keep && s_draw_state.valid;
++    if(!valid || s_draw_state.pipeline!=pipe) {pvkCmdBindPipeline(s_vk.cmd,VK_PIPELINE_BIND_POINT_GRAPHICS,pipe);s_state_issued++;}
++    else s_state_skipped++;
++    if(!valid || memcmp(&s_draw_state.viewport,vp,sizeof *vp)) {pvkCmdSetViewport(s_vk.cmd,0,1,vp);s_state_issued++;}
++    else s_state_skipped++;
++    if(!valid || memcmp(&s_draw_state.scissor,sc,sizeof *sc)) {pvkCmdSetScissor(s_vk.cmd,0,1,sc);s_state_issued++;}
++    else s_state_skipped++;
++    if(!valid || s_draw_state.stencil!=stencil) {pvkCmdSetStencilReference(s_vk.cmd,VK_STENCIL_FACE_FRONT_AND_BACK,stencil);s_state_issued++;}
++    else s_state_skipped++;
++    if(!valid || s_draw_state.line_width!=line_width) {pvkCmdSetLineWidth(s_vk.cmd,line_width);s_state_issued++;}
++    else s_state_skipped++;
++    if(s_vk.depth_bounds_ok) {
++        if(!valid || s_draw_state.depth_min!=depth_min || s_draw_state.depth_max!=depth_max) {pvkCmdSetDepthBounds(s_vk.cmd,depth_min,depth_max);s_state_issued++;}
++        else s_state_skipped++;
++    }
++    s_draw_state.valid=keep;s_draw_state.pipeline=pipe;s_draw_state.viewport=*vp;s_draw_state.scissor=*sc;
++    s_draw_state.stencil=stencil;s_draw_state.line_width=line_width;s_draw_state.depth_min=depth_min;s_draw_state.depth_max=depth_max;
++}
++
+ static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices, u32 vertex_count,
+                         u32 stride, const u32* indices, u32 index_count)
+ {
+@@ -4328,7 +4369,6 @@
+     pvkCmdBeginRenderPass(s_vk.cmd, &rbi, VK_SUBPASS_CONTENTS_INLINE);
+     if(keep_pass) {s_batch_renderpass=1;s_batch_framebuffer=fb;}
+     }
+-    pvkCmdBindPipeline(s_vk.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+     VkViewport vp = { 0.0f, 0.0f, (float)w, (float)h, 0.0f, 1.0f };
+     if (s_e2.have_vp && s_e2.vp[2] > 0.0f && s_e2.vp[3] > 0.0f) {
+         vp.x = s_e2.vp[0] * fx; vp.y = s_e2.vp[1] * fy; vp.width = s_e2.vp[2] * fx; vp.height = s_e2.vp[3] * fy;
+@@ -4343,17 +4383,10 @@
+         sc.offset.x = (int32_t)x0; sc.offset.y = (int32_t)y0;
+         sc.extent.width = x1 > x0 ? x1 - x0 : 0; sc.extent.height = y1 > y0 ? y1 - y0 : 0;
+     }
+-    pvkCmdSetViewport(s_vk.cmd, 0, 1, &vp);
+-    pvkCmdSetScissor(s_vk.cmd, 0, 1, &sc);
+-    pvkCmdSetStencilReference(s_vk.cmd, VK_STENCIL_FACE_FRONT_AND_BACK, s_e2.stencil_ref & 0xFFu);
+-    {   /* guest pixels to target pixels, as the viewport above */
+-        float lw = s_vk.wide_lines_ok ? s_e2.line_width * fy : 1.0f;
+-        if (lw < 1.0f) lw = 1.0f;
+-        if (lw > s_vk.line_width_max) lw = s_vk.line_width_max;
+-        pvkCmdSetLineWidth(s_vk.cmd, lw);
+-    }
+-    if (s_vk.depth_bounds_ok)
+-        pvkCmdSetDepthBounds(s_vk.cmd, s_e2.depth_bounds[0], s_e2.depth_bounds[1]);
++    float line_width=s_vk.wide_lines_ok?s_e2.line_width*fy:1.0f;
++    if(line_width<1.0f) line_width=1.0f;
++    if(line_width>s_vk.line_width_max) line_width=s_vk.line_width_max;
++    vk_eng_record_draw_state(pipe,&vp,&sc,s_e2.stencil_ref&0xFFu,line_width,s_e2.depth_bounds[0],s_e2.depth_bounds[1]);
+     pvkCmdBindDescriptorSets(s_vk.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                              P->cube_mask ? s_e2.split_pipe_layout : s_g.pipe_layout,
+                              0, 1, &set, 0, NULL);
+diff --git a/runtime/spu/spu_workload.c b/runtime/spu/spu_workload.c
+--- a/runtime/spu/spu_workload.c
++++ b/runtime/spu/spu_workload.c
+@@ -1213,12 +1213,69 @@
+ static unsigned long long spu_task_cpu_us(void)
+ {
+ #ifdef _WIN32
+-    FILETIME c, e, k, u; GetThreadTimes(GetCurrentThread(), &c, &e, &k, &u);
++    FILETIME c, e, k, u; if(!GetThreadTimes(GetCurrentThread(), &c, &e, &k, &u)) return 0;
+     return (((unsigned long long)u.dwHighDateTime << 32 | u.dwLowDateTime) + ((unsigned long long)k.dwHighDateTime << 32 | k.dwLowDateTime)) / 10ull;
+ #else
+-    struct timespec t; clock_gettime(CLOCK_THREAD_CPUTIME_ID, &t);
++    struct timespec t; if(clock_gettime(CLOCK_THREAD_CPUTIME_ID, &t)!=0) return 0;
+     return (unsigned long long)t.tv_sec * 1000000ull + (unsigned long long)t.tv_nsec / 1000ull;
+ #endif
++}
++
++/* Optional per-thread timing, without sampling or cross-task signal timestamps.
++ * Compare run CPU with run wall time to distinguish expensive decode/mix work
++ * from descheduling/other waits inside the work cycle. Park is the whole wait,
++ * including time until the producer signals; it is NOT a signal-wakeup latency. */
++static int task_run_timing_on(void)
++{
++    static _Thread_local int on=-1;
++    if(on<0) {const char* e=getenv("SPU_TASK_RUN_STATS");on=e && !strcmp(e,"1");}
++    return on;
++}
++static _Thread_local struct {
++    uint32_t taskset,task;
++    unsigned long long epoch,resume,cpu_resume,enter,run_n,park_n,cpu_n;
++    unsigned long long run_sum,run_max,cpu_sum,cpu_max,park_sum,park_max;
++} s_run_timing;
++static void task_run_before_wait(uint32_t taskset,uint32_t task)
++{
++    if(!task_run_timing_on()) return;
++    const unsigned long long now=spu_task_us(),cpu=spu_task_cpu_us();
++    if(s_run_timing.taskset!=taskset || s_run_timing.task!=task) {
++        memset(&s_run_timing,0,sizeof s_run_timing);s_run_timing.taskset=taskset;s_run_timing.task=task;
++    }
++    if(!s_run_timing.epoch) s_run_timing.epoch=now;
++    if(s_run_timing.resume && now>=s_run_timing.resume) {
++        const unsigned long long run=now-s_run_timing.resume;
++        s_run_timing.run_n++;s_run_timing.run_sum+=run;
++        if(run>s_run_timing.run_max) s_run_timing.run_max=run;
++        if(cpu && s_run_timing.cpu_resume && cpu>=s_run_timing.cpu_resume) {
++            const unsigned long long used=cpu-s_run_timing.cpu_resume;
++            s_run_timing.cpu_n++;s_run_timing.cpu_sum+=used;
++            if(used>s_run_timing.cpu_max) s_run_timing.cpu_max=used;
++        }
++    }
++    s_run_timing.enter=now;
++}
++static void task_run_after_wait(void)
++{
++    if(!task_run_timing_on()) return;
++    const unsigned long long now=spu_task_us();
++    if(s_run_timing.enter && now>=s_run_timing.enter) {
++        const unsigned long long park=now-s_run_timing.enter;
++        s_run_timing.park_n++;s_run_timing.park_sum+=park;
++        if(park>s_run_timing.park_max) s_run_timing.park_max=park;
++    }
++    const unsigned long long elapsed=now-s_run_timing.epoch;
++    if(elapsed>=5000000 && s_run_timing.run_n) {
++        fprintf(stderr,"[task-run] taskset=%08X task=%u rounds=%.1f/s run_wall_avg=%.3f max=%.3f ms run_cpu_avg=%.3f max=%.3f ms cpu_samples=%llu park_avg=%.3f max=%.3f ms\n",
++                s_run_timing.taskset,s_run_timing.task,s_run_timing.park_n*1e6/(double)elapsed,
++                s_run_timing.run_sum/1000.0/s_run_timing.run_n,s_run_timing.run_max/1000.0,
++                s_run_timing.cpu_n?s_run_timing.cpu_sum/1000.0/s_run_timing.cpu_n:0.0,s_run_timing.cpu_max/1000.0,s_run_timing.cpu_n,
++                s_run_timing.park_n?s_run_timing.park_sum/1000.0/s_run_timing.park_n:0.0,s_run_timing.park_max/1000.0);
++        s_run_timing.epoch=now;s_run_timing.run_n=s_run_timing.park_n=s_run_timing.cpu_n=0;
++        s_run_timing.run_sum=s_run_timing.run_max=s_run_timing.cpu_sum=s_run_timing.cpu_max=s_run_timing.park_sum=s_run_timing.park_max=0;
++    }
++    s_run_timing.resume=spu_task_us();s_run_timing.cpu_resume=spu_task_cpu_us();
+ }
+ 
+ /* Deliver a signal to a task (callable from any PPU/host thread). */
+@@ -1300,6 +1357,7 @@
+ int spu_taskset_wait_signal(uint32_t taskset_ea, uint32_t taskId)
+ {
+     if (!taskset_ea || taskId >= 128) return 0;
++    task_run_before_wait(taskset_ea,taskId);
+     /* ran= is the wall time this task spent OUT of the wait (decode/mix work
+      * per round) -- decisive for "is the Bink decode CPU-bound". TLS: each
+      * task runs on its own host thread. */
+@@ -1422,6 +1480,7 @@
+         }
+         t_resume = now;
+     }
++    task_run_after_wait();
+     return 0;
+ }
+ 
