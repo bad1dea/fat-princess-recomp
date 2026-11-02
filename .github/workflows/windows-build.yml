@@ -20,6 +20,9 @@ jobs:
           lift-key: ${{ secrets.FP_LIFT_KEY }}
       - name: Build (Visual Studio clang-cl)
         shell: pwsh
+        env:
+          FP_DEFAULT_SERVER: ${{ secrets.FP_SERVER }}
+          FP_DEFAULT_JOIN_URL: ${{ secrets.FP_JOIN_URL }}
         run: |
           $env:VCPKG_ROOT = $env:VCPKG_INSTALLATION_ROOT
           powershell -ExecutionPolicy Bypass -File tools\windows\build_vs.ps1 -Yes
