@@ -32,7 +32,6 @@ jobs:
         run: |
           cmake -S . -B build/native -G Ninja -DCMAKE_BUILD_TYPE=Release -DFP_BUILD_GAME=ON \
             -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
-            -DFP_DEFAULT_SERVER="${{ secrets.FP_SERVER }}" -DFP_DEFAULT_JOIN_URL="${{ secrets.FP_JOIN_URL }}" \
             -DSPU_DIR="$PWD/private/lift/spu" -DFP_OVERLAY_DIR="$PWD/private/lift/overlays"
       - name: Build
         run: |
@@ -50,9 +49,9 @@ jobs:
         run: |
           exe=$(find build/native -name fp_native -type f -perm -u+x | head -1)
           mkdir -p out && cp "$exe" out/fp_native && strip --strip-debug out/fp_native
-      - uses: actions/upload-artifact@v5
+      - uses: ./.github/actions/seal
         if: success()
         with:
           name: fat-princess-linux
           path: out/
-          retention-days: 14
+          key: ${{ secrets.FP_ART_KEY }}

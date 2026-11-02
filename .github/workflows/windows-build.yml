@@ -20,9 +20,6 @@ jobs:
           lift-key: ${{ secrets.FP_LIFT_KEY }}
       - name: Build (Visual Studio clang-cl)
         shell: pwsh
-        env:
-          FP_DEFAULT_SERVER: ${{ secrets.FP_SERVER }}
-          FP_DEFAULT_JOIN_URL: ${{ secrets.FP_JOIN_URL }}
         run: |
           $env:VCPKG_ROOT = $env:VCPKG_INSTALLATION_ROOT
           powershell -ExecutionPolicy Bypass -File tools\windows\build_vs.ps1 -Yes
@@ -30,9 +27,9 @@ jobs:
         if: always()
         shell: bash
         run: grep -E "error|Error" build/vs-build.log | head -80 || true
-      - uses: actions/upload-artifact@v5
+      - uses: ./.github/actions/seal
         if: success()
         with:
           name: fat-princess-windows
           path: dist/fat-princess-windows-vs/
-          retention-days: 14
+          key: ${{ secrets.FP_ART_KEY }}

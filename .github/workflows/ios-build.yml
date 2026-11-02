@@ -99,7 +99,7 @@ jobs:
         run: |
           cmake -S . -B build/ios -G Ninja -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_ARCHITECTURES=arm64 \
             -DCMAKE_OSX_DEPLOYMENT_TARGET=$IOS_MIN -DCMAKE_BUILD_TYPE=Release -DCMAKE_MACOSX_BUNDLE=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DFP_BUILD_GAME=ON -DFP_X86_V3=OFF \
-            -DFP_DEFAULT_SERVER="${{ secrets.FP_SERVER }}" -DFP_DEFAULT_JOIN_URL="${{ secrets.FP_JOIN_URL }}" -DFP_FILES_URL="${{ secrets.FP_FILES_URL }}" -DFP_REPORT_URL="${{ secrets.FP_REPORT_URL }}" \
+            -DFP_DEFAULT_SERVER="${{ secrets.FP_SERVER }}" -DFP_FILES_URL="${{ secrets.FP_FILES_URL }}" -DFP_REPORT_URL="${{ secrets.FP_REPORT_URL }}" \
             -DSampleRate_DIR="$DEPS/lib/cmake/SampleRate" -DCMAKE_PREFIX_PATH="$DEPS" -DCMAKE_FIND_ROOT_PATH="$DEPS" -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=BOTH \
             -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=BOTH -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=BOTH \
             -DPS3RECOMP_VULKAN_INCLUDE_DIR="$(brew --prefix vulkan-headers)/include" \
@@ -146,8 +146,8 @@ jobs:
           codesign -dv --entitlements - "$app" 2>&1 | tail -6 || true
           zip -qry FatPrincess.ipa Payload
           ls -la FatPrincess.ipa
-      - uses: actions/upload-artifact@v5
+      - uses: ./.github/actions/seal
         with:
           name: fat-princess-ios-ipa
           path: FatPrincess.ipa
-          retention-days: 14
+          key: ${{ secrets.FP_ART_KEY }}

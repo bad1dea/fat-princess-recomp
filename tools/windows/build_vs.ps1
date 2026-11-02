@@ -209,10 +209,7 @@ if ($Clean -and (Test-Path $buildDir)) {
     Say ('  -Clean: removing build\' + $preset)
     Remove-Item -Recurse -Force $buildDir
 }
-$cfgArgs = @('--preset', $preset, ('-DCMAKE_BUILD_TYPE=' + $Config), ('-DPS3RECOMP_VULKAN_INCLUDE_DIR=' + $vkInclude))
-if ($env:FP_DEFAULT_SERVER) { $cfgArgs += ('-DFP_DEFAULT_SERVER=' + $env:FP_DEFAULT_SERVER) }
-if ($env:FP_DEFAULT_JOIN_URL) { $cfgArgs += ('-DFP_DEFAULT_JOIN_URL=' + $env:FP_DEFAULT_JOIN_URL) }
-$code = Run 'cmake' $cfgArgs
+$code = Run 'cmake' @('--preset', $preset, ('-DCMAKE_BUILD_TYPE=' + $Config), ('-DPS3RECOMP_VULKAN_INCLUDE_DIR=' + $vkInclude))
 if ($code -ne 0) { Fail 'CMake configure failed. The first "CMake Error" above says what is missing.' }
 
 Say '== Build (several minutes; the lifted game is a few hundred source files)'

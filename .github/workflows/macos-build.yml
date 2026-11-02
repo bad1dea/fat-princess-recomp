@@ -29,7 +29,6 @@ jobs:
       - name: Configure
         run: |
           cmake -S . -B build/mac -G Ninja -DCMAKE_BUILD_TYPE=Release -DFP_BUILD_GAME=ON -DFP_X86_V3=OFF -DCMAKE_PREFIX_PATH="$(brew --prefix)" \
-            -DFP_DEFAULT_SERVER="${{ secrets.FP_SERVER }}" -DFP_DEFAULT_JOIN_URL="${{ secrets.FP_JOIN_URL }}" \
             -DSPU_DIR="$PWD/private/lift/spu" -DFP_OVERLAY_DIR="$PWD/private/lift/overlays"
       - name: Build
         run: |
@@ -49,9 +48,9 @@ jobs:
           mkdir -p out && cp "$exe" out/fp_native && strip -S out/fp_native
           printf '%s\n' 'Needs the Vulkan loader and MoltenVK: brew install vulkan-loader molten-vk' \
             'Run from your game folder (game/ and elf/retail-game-verified.elf next to it).' > out/README.txt
-      - uses: actions/upload-artifact@v5
+      - uses: ./.github/actions/seal
         if: success()
         with:
           name: fat-princess-macos-arm64
           path: out/
-          retention-days: 14
+          key: ${{ secrets.FP_ART_KEY }}
