@@ -109,7 +109,7 @@ if(FP_BUILD_GAME)
     string(REPLACE "lv2_init_syscalls();" "lv2_init_syscalls();\n    extern void fp_platform_init_cpp();\n    fp_platform_init_cpp();" FP_BOOT_MAIN "${FP_BOOT_MAIN}")
     string(APPEND FP_BOOT_MAIN "\nextern \"C\" void fp_platform_init(void);\nvoid fp_platform_init_cpp() { fp_platform_init(); }\n")
     if(PS3RECOMP_RSX_VULKAN)
-      target_sources(MyGameRecomp PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/host.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/src/settings.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/src/game_controls.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/src/self_test.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/src/overlay_stats.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/src/patches.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/src/menu_bridge.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/src/game_stats.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/src/game_art.cpp")
+      target_sources(MyGameRecomp PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/host.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/src/settings.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/src/game_controls.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/src/self_test.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/src/overlay_stats.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/src/patches.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/src/menu_bridge.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/src/game_stats.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/src/trophy_book.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/src/trophy_icons.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/src/game_art.cpp")
       # Route guards default off; the AI settings menu or FP_AI_NAV_GRAPH enables them.
       target_sources(MyGameRecomp PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/ai_route_policy.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/src/ai_ground_route.cpp")
       if(WIN32)

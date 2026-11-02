@@ -89,6 +89,14 @@ fp::TrophyRow row_of(const sceNpTrophyHostEntry& e) {
 namespace fp {
 bool trophy_ui_active() { return st().screen != Screen::None; }
 
+std::vector<TrophyRow> trophy_ui_rows(std::string* title) {
+    const char* t = "";
+    std::vector<TrophyRow> rows;
+    for (const auto& e : entries(&t)) rows.push_back(row_of(e));
+    if (title) *title = t ? t : "";
+    return rows;
+}
+
 std::string trophy_ui_detail(int id) {
     for (const auto& e : entries(nullptr)) if (e.id == id) return e.detail ? e.detail : "";
     return {};

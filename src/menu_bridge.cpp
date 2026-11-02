@@ -20,6 +20,7 @@
 #include <vector>
 #include "ppu_recomp.h"
 #include "settings.h"
+#include "trophy_book.h"
 using namespace fp;
 extern "C" void fp_game_stats_collect(void);
 
@@ -169,6 +170,10 @@ void fp_menu_echo(ppu_context* ctx) {
         const bool ok = t[3] == "register" && settings_open_url("join_url", query);
         std::printf("[fp-menu] open registration page: %s\n", ok ? "browser started" : "failed");
         queue_text("FpV_acct_note", ok ? "BROWSER OPENED. SIGN IN HERE" : "OPEN JOIN.SRSLY.COOL IN A BROWSER");
+    } else if (verb == "trophy" && t.size() >= 4) {   // the native trophy book (src/trophy_book.cpp)
+        SymbolReplies replies;
+        trophy_book_command(std::vector<std::string>(t.begin() + 3, t.end()), replies);
+        for (const auto& r : replies) queue_text(r.first.c_str(), r.second);
     } else if (verb == "stats") {                     // trophy progress counters (src/game_stats.cpp)
         fp_game_stats_collect();
     } else if (verb == "poll" && t.size() >= 4 && t[3] == "account") {

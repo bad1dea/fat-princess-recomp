@@ -2,21 +2,40 @@
 #pragma once
 struct FpMenuEdit { const char* file; const char* from; const char* to; };
 static const FpMenuEdit kFpMenuEdits[] = {
-    {"data/gamescripts/menufinal/menuoptionsl2.txt",
-R"FPM(set Focus 273 FocusUp 272
+    {"data/gamescripts/menufinal/menuoptions.txt",
+R"FPM(set RenderCB_Text MenuOptionsStore
 )FPM",
-R"FPM(set Focus 273 FocusUp 272 FocusDown 274
+R"FPM(set RenderCB_Text FpFatOptions
 )FPM"},
-    {"data/gamescripts/menufinal/menuoptionsl2.txt",
+    {"data/gamescripts/menufinal/menuoptions.txt",
+R"FPM(set CommandPress "if !demo menuCmd FEOnlineStore"
+set CommandPress "if demo menuCmd FEOnlineStore"
+)FPM",
+R"FPM(set CommandPress "gameUI focusName DummyObject"
+set CommandPress "addUIAnim $MenuBackgroundObject mas_BackBarLeft"
+set CommandPress "sym set MenuToHide MenuOptionsMaster"
+set CommandPress "sym set MenuToShow MenuFpHubMaster"
+set CommandPress "menuCmd MenuBackgroundSize5"
+set CommandPress "addUIAnim $$MenuToHide mas_MenuLeft"
+set CommandPress "addUIAnim $$MenuToShow mas_MenuCenter"
+set CommandPress "pCmd 0.2 gameUI focusName MenuFpHubAccount"
+set CommandPress "playSound MenuChoose"
+)FPM"},
+    {"data/gamescripts/menufinal/menuscores.txt",
+R"FPM(set Focus 82 FocusUp 81
+)FPM",
+R"FPM(set Focus 82 FocusUp 81 FocusDown 83
+)FPM"},
+    {"data/gamescripts/menufinal/menuscores.txt",
 R"FPM(add MenuObject
-set Name MenuOptionsL2Master
+set Name MenuScoresMasterPreDemo
 )FPM",
 R"FPM(add MenuObject
-set Name MenuOptionsL2Recomp
+set Name MenuScoresTrophies
 set AutoSizing mainBoxes
 set Texture menus\MenuTextBoxes
 set Coords "576 86 416 83" CoordsFocused "578 2 416 83"
-set Focus 274 FocusUp 273
+set Focus 83 FocusUp 82
 set Layer 2
 set RenderCB _DrawUText
 set RenderCBExcludesDefaultRender 0
@@ -26,50 +45,37 @@ set RenderCB_FontName FatPrincessBold
 set RenderCB_RGBColor "1.00 0.89 0.46" RenderCB_RGBColorFocused "1 1 1"
 set RenderCB_FontScale 1.0
 set RenderCB_Offset "20 12" RenderCB_OffsetFocused "18 10"
-set RenderCB_Text FpPcSettings
+set RenderCB_Text FpTrophies
 set RenderCB_FloatArg 2000.0
-set CommandPress "log Press_MenuOptionsL2Recomp"
-set CommandCancel "log Cancel_MenuOptionsL2Recomp"
-set CommandGetFocus "sym set MenuMemoryOptionsL2 MenuOptionsL2Recomp"
-set CommandGetFocus "sym set MenuMemoryGlobal MenuOptionsL2Recomp"
+set CommandPress "log Press_MenuScoresTrophies"
+set CommandCancel "log Cancel_MenuScoresTrophies"
+set CommandGetFocus "sym set MenuMemoryScores MenuScoresTrophies"
+set CommandGetFocus "sym set MenuMemoryGlobal MenuScoresTrophies"
 set CommandCancel "gameUI focusName DummyObject"
-set CommandCancel "menuCmd MenuOptionsL2Cancel"
+set CommandCancel "menuCmd MenuScoresCancel"
 set CommandLoseFocus "playSound MenuSelect"
 set CommandPress "gameUI focusName DummyObject"
-set CommandPress "addUIAnim $MenuBackgroundObject mas_BackBarLeft"
-set CommandPress "sym set MenuToHide MenuOptionsL2Master"
-set CommandPress "sym set MenuToShow MenuFpHubMaster"
-set CommandPress "menuCmd MenuBackgroundSize5"
-set CommandPress "addUIAnim $$MenuToHide mas_MenuLeft"
-set CommandPress "addUIAnim $$MenuToShow mas_MenuCenter"
-set CommandPress "pCmd 0.2 gameUI focusName MenuFpHubAccount"
-set CommandPress "playSound MenuChoose"
+set CommandPress "menuCmd FpTrophyOpen"
 add MenuObject
-set Name MenuOptionsL2Master
+set Name MenuScoresMasterPreDemo
 )FPM"},
-    {"data/gamescripts/menufinal/menuoptionsl2.txt",
-R"FPM(set Child "MenuOptionsL2Visual 0 370"
+    {"data/gamescripts/menufinal/menuscores.txt",
+R"FPM(set Coords "0 0 768 432"
 )FPM",
-R"FPM(set Child "MenuOptionsL2Visual 0 370"
-set Child "MenuOptionsL2Recomp 0 460"
+R"FPM(set Coords "0 0 768 522"
 )FPM"},
-    {"data/gamescripts/menufinal/menuoptionsl2.txt",
-R"FPM(set Coords "0 0 768 522")FPM",
-R"FPM(set Coords "0 0 768 612")FPM"},
-    {"data/gamescripts/menufinal/menuoptions.txt",
-R"FPM(set CommandPress "sym set MenuToShow MenuOptionsL2Master"
+    {"data/gamescripts/menufinal/menuscores.txt",
+R"FPM(set Child "MenuScoresCredits 0 280"
 )FPM",
-R"FPM(set CommandPress "sym set MenuToShow MenuOptionsL2Master"
-set CommandPress "menuCmd MenuBackgroundSize5"
+R"FPM(set Child "MenuScoresCredits 0 280"
+set Child "MenuScoresTrophies 0 370"
 )FPM"},
-    {"data/gamescripts/menufinal/menuingame.txt",
-R"FPM(set CommandPress "menuCmd MenuBackgroundSize4"
-set CommandPress "sym set MenuToHide $MenuIngameCurrentMaster"
-set CommandPress "sym set MenuToShow MenuOptionsL2Master"
+    {"data/gamescripts/menufinal/menumain.txt",
+R"FPM(set CommandPress "pcmd 0.2 gameUI focusName $MenuMemoryScores"
+set CommandPress "menuCmd MenuBackgroundSize3"
 )FPM",
-R"FPM(set CommandPress "menuCmd MenuBackgroundSize5"
-set CommandPress "sym set MenuToHide $MenuIngameCurrentMaster"
-set CommandPress "sym set MenuToShow MenuOptionsL2Master"
+R"FPM(set CommandPress "pcmd 0.2 gameUI focusName $MenuMemoryScores"
+set CommandPress "menuCmd MenuBackgroundSize4"
 )FPM"},
     {"data/gamescripts/menucmds.txt",
 R"FPM(Script FEOnlineCheck {
@@ -118,6 +124,12 @@ pos 1280 0
 MO MenuFpAdvancedMaster {
 pos 1280 0
 }
+MO MenuFpTrophyMaster {
+pos 1280 0
+}
+MO MenuStorybookBackground {
+pos 1280 0
+}
 )FPM"},
     {"data/menus/mpgamescoresarena.txt",
 R"FPM(MO MenuSettingsMaster {
@@ -149,6 +161,12 @@ MO MenuFpGameplayMaster {
 pos 1280 0
 }
 MO MenuFpAdvancedMaster {
+pos 1280 0
+}
+MO MenuFpTrophyMaster {
+pos 1280 0
+}
+MO MenuStorybookBackground {
 pos 1280 0
 }
 )FPM"},
@@ -184,6 +202,12 @@ pos 1280 0
 MO MenuFpAdvancedMaster {
 pos 1280 0
 }
+MO MenuFpTrophyMaster {
+pos 1280 0
+}
+MO MenuStorybookBackground {
+pos 1280 0
+}
 )FPM"},
     {"data/menus/mpgamescoresendserver.txt",
 R"FPM(MO MenuSettingsMaster {
@@ -215,6 +239,12 @@ MO MenuFpGameplayMaster {
 pos 1280 0
 }
 MO MenuFpAdvancedMaster {
+pos 1280 0
+}
+MO MenuFpTrophyMaster {
+pos 1280 0
+}
+MO MenuStorybookBackground {
 pos 1280 0
 }
 )FPM"},
@@ -250,6 +280,12 @@ pos 1280 0
 MO MenuFpAdvancedMaster {
 pos 1280 0
 }
+MO MenuFpTrophyMaster {
+pos 1280 0
+}
+MO MenuStorybookBackground {
+pos 1280 0
+}
 )FPM"},
     {"data/menus/mpgamescoresinserver.txt",
 R"FPM(MO MenuSettingsMaster {
@@ -281,6 +317,12 @@ MO MenuFpGameplayMaster {
 pos 1280 0
 }
 MO MenuFpAdvancedMaster {
+pos 1280 0
+}
+MO MenuFpTrophyMaster {
+pos 1280 0
+}
+MO MenuStorybookBackground {
 pos 1280 0
 }
 )FPM"},
@@ -316,6 +358,12 @@ pos 1280 0
 MO MenuFpAdvancedMaster {
 pos 1280 0
 }
+MO MenuFpTrophyMaster {
+pos 1280 0
+}
+MO MenuStorybookBackground {
+pos 1280 0
+}
 )FPM"},
     {"data/menus/mpgamescorespreserver.txt",
 R"FPM(MO MenuSettingsMaster {
@@ -347,6 +395,12 @@ MO MenuFpGameplayMaster {
 pos 1280 0
 }
 MO MenuFpAdvancedMaster {
+pos 1280 0
+}
+MO MenuFpTrophyMaster {
+pos 1280 0
+}
+MO MenuStorybookBackground {
 pos 1280 0
 }
 )FPM"},
@@ -382,10 +436,16 @@ pos 1280 0
 MO MenuFpAdvancedMaster {
 pos 1280 0
 }
+MO MenuFpTrophyMaster {
+pos 1280 0
+}
+MO MenuStorybookBackground {
+pos 1280 0
+}
 )FPM"},
 };
 static const char* const kFpMenuHideFiles[] = {"data/menus/menumaster.txt", "data/menus/mpgamescoresarena.txt", "data/menus/mpgamescoresendclient.txt", "data/menus/mpgamescoresendserver.txt", "data/menus/mpgamescoresinclient.txt", "data/menus/mpgamescoresinserver.txt", "data/menus/mpgamescorespreclient.txt", "data/menus/mpgamescorespreserver.txt", "data/menus/mpgamescoressolo.txt"};
-static const char* const kFpMenuMasters = " MenuFpHubMaster MenuFpAccountMaster MenuFpAccountInMaster MenuFpGateMaster MenuFpGraphicsMaster MenuFpAudioMaster MenuFpGameplayMaster MenuFpAdvancedMaster";
+static const char* const kFpMenuMasters = " MenuFpHubMaster MenuFpAccountMaster MenuFpAccountInMaster MenuFpGateMaster MenuFpGraphicsMaster MenuFpAudioMaster MenuFpGameplayMaster MenuFpAdvancedMaster MenuFpTrophyMaster";
 static const char* const kFpMenuPagesFile = "data/gamescripts/menufinal/fprecomp.txt";
 static const char* const kFpMenuPages =
 R"FPM(add MenuObject
@@ -401,7 +461,7 @@ set RenderCB_FontName FatPrincessBold
 set RenderCB_RGBColor "0.9 0.9 0.9"
 set RenderCB_FontScale 1.0
 set RenderCB_Offset "20 12"
-set RenderCB_Text FpPcSettings
+set RenderCB_Text FpFatOptions
 set RenderCB_FloatArg 2000.0
 add MenuObject
 set Name MenuFpHubAccount
@@ -1656,16 +1716,1195 @@ set Child "MenuFpAdvancedSlowLog 0 190"
 set Child "MenuFpAdvancedSlowLogValue 437 190"
 set Child "MenuFpAdvancedOverlay 0 280"
 set Anchor Center
+add MenuObject
+set Name FpTrophyTitleText
+set Coords "0 0 350 60"
+set Layer 2
+set RenderCB _DrawText
+set RenderCBExcludesDefaultRender 1
+set RenderCB_DX 0
+set RenderCB_DY 0
+set RenderCB_FontName FatPrincessBold
+set RenderCB_RGBColor "0.63 0.42 0.07"
+set RenderCB_FontScale 0.55
+set RenderCB_ConsoleSymbol FpT_title
+set RenderCB_FloatArg 2000.0
+set RenderCB_BoolArg 0
+set RenderCB_TextJustify JustifyXLeft
+set RenderCB_TextJustifyVertical JustifyYCenter
+add MenuObject
+set Name FpTrophyCount
+set Coords "0 0 350 60"
+set Layer 2
+set RenderCB _DrawText
+set RenderCBExcludesDefaultRender 1
+set RenderCB_DX 0
+set RenderCB_DY 0
+set RenderCB_FontName Boopee
+set RenderCB_RGBColor "0.54 0.36 0.04"
+set RenderCB_FontScale 0.6
+set RenderCB_ConsoleSymbol FpT_count
+set RenderCB_FloatArg 2000.0
+set RenderCB_BoolArg 0
+set RenderCB_TextJustify JustifyXRight
+set RenderCB_TextJustifyVertical JustifyYCenter
+add MenuObject
+set Name FpTrophyRow0
+set Coords "0 0 260 44"
+set Layer 2
+set RenderCB _DrawText
+set RenderCBExcludesDefaultRender 1
+set RenderCB_DX 0
+set RenderCB_DY 0
+set RenderCB_FontName Boopee
+set RenderCB_RGBColor "0.35 0.23 0.07"
+set RenderCB_FontScale 0.62
+set RenderCB_ConsoleSymbol FpT_n0
+set RenderCB_FloatArg 2000.0
+set RenderCB_BoolArg 0
+set RenderCB_TextJustify JustifyXLeft
+set RenderCB_TextJustifyVertical JustifyYCenter
+set Focus 9300 FocusDown 9301
+set DrawWhenFocused MenuMainArrow DrawWhenFocusedOffset "-52 2 0"
+set RenderCB_RGBColorFocused "0.85 0.45 0.0"
+set CommandGetFocus "sym set MenuMemoryFpTrophy FpTrophyRow0"
+set CommandGetFocus "echo fp trophy focus 0"
+set CommandGetFocus "menuCmd FpTrophyIconShow"
+set CommandCancel "gameUI focusName DummyObject"
+set CommandCancel "menuCmd FpTrophyCancel"
+set CommandLoseFocus "playSound MenuSelect"
+set CommandFocusRight "echo fp trophy page 1"
+set CommandFocusRight "menuCmd BookAnimPageNext"
+set CommandFocusRight "pcmd 0.05 gameUI focusName $FpTFocus"
+set CommandFocusRight "playSound MenuPageTurn"
+set CommandFocusLeft "echo fp trophy page -1"
+set CommandFocusLeft "menuCmd BookAnimPageLast"
+set CommandFocusLeft "pcmd 0.05 gameUI focusName $FpTFocus"
+set CommandFocusLeft "playSound MenuPageTurn"
+add MenuObject
+set Name FpTrophyTag0
+set Coords "0 0 100 44"
+set Layer 2
+set RenderCB _DrawText
+set RenderCBExcludesDefaultRender 1
+set RenderCB_DX 0
+set RenderCB_DY 0
+set RenderCB_FontName Boopee
+set RenderCB_RGBColor "0.54 0.36 0.04"
+set RenderCB_FontScale 0.5
+set RenderCB_ConsoleSymbol FpT_s0
+set RenderCB_FloatArg 2000.0
+set RenderCB_BoolArg 0
+set RenderCB_TextJustify JustifyXRight
+set RenderCB_TextJustifyVertical JustifyYCenter
+add MenuObject
+set Name FpTrophyRow1
+set Coords "0 0 260 44"
+set Layer 2
+set RenderCB _DrawText
+set RenderCBExcludesDefaultRender 1
+set RenderCB_DX 0
+set RenderCB_DY 0
+set RenderCB_FontName Boopee
+set RenderCB_RGBColor "0.35 0.23 0.07"
+set RenderCB_FontScale 0.62
+set RenderCB_ConsoleSymbol FpT_n1
+set RenderCB_FloatArg 2000.0
+set RenderCB_BoolArg 0
+set RenderCB_TextJustify JustifyXLeft
+set RenderCB_TextJustifyVertical JustifyYCenter
+set Focus 9301 FocusUp 9300 FocusDown 9302
+set DrawWhenFocused MenuMainArrow DrawWhenFocusedOffset "-52 2 0"
+set RenderCB_RGBColorFocused "0.85 0.45 0.0"
+set CommandGetFocus "sym set MenuMemoryFpTrophy FpTrophyRow1"
+set CommandGetFocus "echo fp trophy focus 1"
+set CommandGetFocus "menuCmd FpTrophyIconShow"
+set CommandCancel "gameUI focusName DummyObject"
+set CommandCancel "menuCmd FpTrophyCancel"
+set CommandLoseFocus "playSound MenuSelect"
+set CommandFocusRight "echo fp trophy page 1"
+set CommandFocusRight "menuCmd BookAnimPageNext"
+set CommandFocusRight "pcmd 0.05 gameUI focusName $FpTFocus"
+set CommandFocusRight "playSound MenuPageTurn"
+set CommandFocusLeft "echo fp trophy page -1"
+set CommandFocusLeft "menuCmd BookAnimPageLast"
+set CommandFocusLeft "pcmd 0.05 gameUI focusName $FpTFocus"
+set CommandFocusLeft "playSound MenuPageTurn"
+add MenuObject
+set Name FpTrophyTag1
+set Coords "0 0 100 44"
+set Layer 2
+set RenderCB _DrawText
+set RenderCBExcludesDefaultRender 1
+set RenderCB_DX 0
+set RenderCB_DY 0
+set RenderCB_FontName Boopee
+set RenderCB_RGBColor "0.54 0.36 0.04"
+set RenderCB_FontScale 0.5
+set RenderCB_ConsoleSymbol FpT_s1
+set RenderCB_FloatArg 2000.0
+set RenderCB_BoolArg 0
+set RenderCB_TextJustify JustifyXRight
+set RenderCB_TextJustifyVertical JustifyYCenter
+add MenuObject
+set Name FpTrophyRow2
+set Coords "0 0 260 44"
+set Layer 2
+set RenderCB _DrawText
+set RenderCBExcludesDefaultRender 1
+set RenderCB_DX 0
+set RenderCB_DY 0
+set RenderCB_FontName Boopee
+set RenderCB_RGBColor "0.35 0.23 0.07"
+set RenderCB_FontScale 0.62
+set RenderCB_ConsoleSymbol FpT_n2
+set RenderCB_FloatArg 2000.0
+set RenderCB_BoolArg 0
+set RenderCB_TextJustify JustifyXLeft
+set RenderCB_TextJustifyVertical JustifyYCenter
+set Focus 9302 FocusUp 9301 FocusDown 9303
+set DrawWhenFocused MenuMainArrow DrawWhenFocusedOffset "-52 2 0"
+set RenderCB_RGBColorFocused "0.85 0.45 0.0"
+set CommandGetFocus "sym set MenuMemoryFpTrophy FpTrophyRow2"
+set CommandGetFocus "echo fp trophy focus 2"
+set CommandGetFocus "menuCmd FpTrophyIconShow"
+set CommandCancel "gameUI focusName DummyObject"
+set CommandCancel "menuCmd FpTrophyCancel"
+set CommandLoseFocus "playSound MenuSelect"
+set CommandFocusRight "echo fp trophy page 1"
+set CommandFocusRight "menuCmd BookAnimPageNext"
+set CommandFocusRight "pcmd 0.05 gameUI focusName $FpTFocus"
+set CommandFocusRight "playSound MenuPageTu)FPM"
+R"FPM(rn"
+set CommandFocusLeft "echo fp trophy page -1"
+set CommandFocusLeft "menuCmd BookAnimPageLast"
+set CommandFocusLeft "pcmd 0.05 gameUI focusName $FpTFocus"
+set CommandFocusLeft "playSound MenuPageTurn"
+add MenuObject
+set Name FpTrophyTag2
+set Coords "0 0 100 44"
+set Layer 2
+set RenderCB _DrawText
+set RenderCBExcludesDefaultRender 1
+set RenderCB_DX 0
+set RenderCB_DY 0
+set RenderCB_FontName Boopee
+set RenderCB_RGBColor "0.54 0.36 0.04"
+set RenderCB_FontScale 0.5
+set RenderCB_ConsoleSymbol FpT_s2
+set RenderCB_FloatArg 2000.0
+set RenderCB_BoolArg 0
+set RenderCB_TextJustify JustifyXRight
+set RenderCB_TextJustifyVertical JustifyYCenter
+add MenuObject
+set Name FpTrophyRow3
+set Coords "0 0 260 44"
+set Layer 2
+set RenderCB _DrawText
+set RenderCBExcludesDefaultRender 1
+set RenderCB_DX 0
+set RenderCB_DY 0
+set RenderCB_FontName Boopee
+set RenderCB_RGBColor "0.35 0.23 0.07"
+set RenderCB_FontScale 0.62
+set RenderCB_ConsoleSymbol FpT_n3
+set RenderCB_FloatArg 2000.0
+set RenderCB_BoolArg 0
+set RenderCB_TextJustify JustifyXLeft
+set RenderCB_TextJustifyVertical JustifyYCenter
+set Focus 9303 FocusUp 9302 FocusDown 9304
+set DrawWhenFocused MenuMainArrow DrawWhenFocusedOffset "-52 2 0"
+set RenderCB_RGBColorFocused "0.85 0.45 0.0"
+set CommandGetFocus "sym set MenuMemoryFpTrophy FpTrophyRow3"
+set CommandGetFocus "echo fp trophy focus 3"
+set CommandGetFocus "menuCmd FpTrophyIconShow"
+set CommandCancel "gameUI focusName DummyObject"
+set CommandCancel "menuCmd FpTrophyCancel"
+set CommandLoseFocus "playSound MenuSelect"
+set CommandFocusRight "echo fp trophy page 1"
+set CommandFocusRight "menuCmd BookAnimPageNext"
+set CommandFocusRight "pcmd 0.05 gameUI focusName $FpTFocus"
+set CommandFocusRight "playSound MenuPageTurn"
+set CommandFocusLeft "echo fp trophy page -1"
+set CommandFocusLeft "menuCmd BookAnimPageLast"
+set CommandFocusLeft "pcmd 0.05 gameUI focusName $FpTFocus"
+set CommandFocusLeft "playSound MenuPageTurn"
+add MenuObject
+set Name FpTrophyTag3
+set Coords "0 0 100 44"
+set Layer 2
+set RenderCB _DrawText
+set RenderCBExcludesDefaultRender 1
+set RenderCB_DX 0
+set RenderCB_DY 0
+set RenderCB_FontName Boopee
+set RenderCB_RGBColor "0.54 0.36 0.04"
+set RenderCB_FontScale 0.5
+set RenderCB_ConsoleSymbol FpT_s3
+set RenderCB_FloatArg 2000.0
+set RenderCB_BoolArg 0
+set RenderCB_TextJustify JustifyXRight
+set RenderCB_TextJustifyVertical JustifyYCenter
+add MenuObject
+set Name FpTrophyRow4
+set Coords "0 0 260 44"
+set Layer 2
+set RenderCB _DrawText
+set RenderCBExcludesDefaultRender 1
+set RenderCB_DX 0
+set RenderCB_DY 0
+set RenderCB_FontName Boopee
+set RenderCB_RGBColor "0.35 0.23 0.07"
+set RenderCB_FontScale 0.62
+set RenderCB_ConsoleSymbol FpT_n4
+set RenderCB_FloatArg 2000.0
+set RenderCB_BoolArg 0
+set RenderCB_TextJustify JustifyXLeft
+set RenderCB_TextJustifyVertical JustifyYCenter
+set Focus 9304 FocusUp 9303 FocusDown 9305
+set DrawWhenFocused MenuMainArrow DrawWhenFocusedOffset "-52 2 0"
+set RenderCB_RGBColorFocused "0.85 0.45 0.0"
+set CommandGetFocus "sym set MenuMemoryFpTrophy FpTrophyRow4"
+set CommandGetFocus "echo fp trophy focus 4"
+set CommandGetFocus "menuCmd FpTrophyIconShow"
+set CommandCancel "gameUI focusName DummyObject"
+set CommandCancel "menuCmd FpTrophyCancel"
+set CommandLoseFocus "playSound MenuSelect"
+set CommandFocusRight "echo fp trophy page 1"
+set CommandFocusRight "menuCmd BookAnimPageNext"
+set CommandFocusRight "pcmd 0.05 gameUI focusName $FpTFocus"
+set CommandFocusRight "playSound MenuPageTurn"
+set CommandFocusLeft "echo fp trophy page -1"
+set CommandFocusLeft "menuCmd BookAnimPageLast"
+set CommandFocusLeft "pcmd 0.05 gameUI focusName $FpTFocus"
+set CommandFocusLeft "playSound MenuPageTurn"
+add MenuObject
+set Name FpTrophyTag4
+set Coords "0 0 100 44"
+set Layer 2
+set RenderCB _DrawText
+set RenderCBExcludesDefaultRender 1
+set RenderCB_DX 0
+set RenderCB_DY 0
+set RenderCB_FontName Boopee
+set RenderCB_RGBColor "0.54 0.36 0.04"
+set RenderCB_FontScale 0.5
+set RenderCB_ConsoleSymbol FpT_s4
+set RenderCB_FloatArg 2000.0
+set RenderCB_BoolArg 0
+set RenderCB_TextJustify JustifyXRight
+set RenderCB_TextJustifyVertical JustifyYCenter
+add MenuObject
+set Name FpTrophyRow5
+set Coords "0 0 260 44"
+set Layer 2
+set RenderCB _DrawText
+set RenderCBExcludesDefaultRender 1
+set RenderCB_DX 0
+set RenderCB_DY 0
+set RenderCB_FontName Boopee
+set RenderCB_RGBColor "0.35 0.23 0.07"
+set RenderCB_FontScale 0.62
+set RenderCB_ConsoleSymbol FpT_n5
+set RenderCB_FloatArg 2000.0
+set RenderCB_BoolArg 0
+set RenderCB_TextJustify JustifyXLeft
+set RenderCB_TextJustifyVertical JustifyYCenter
+set Focus 9305 FocusUp 9304 FocusDown 9306
+set DrawWhenFocused MenuMainArrow DrawWhenFocusedOffset "-52 2 0"
+set RenderCB_RGBColorFocused "0.85 0.45 0.0"
+set CommandGetFocus "sym set MenuMemoryFpTrophy FpTrophyRow5"
+set CommandGetFocus "echo fp trophy focus 5"
+set CommandGetFocus "menuCmd FpTrophyIconShow"
+set CommandCancel "gameUI focusName DummyObject"
+set CommandCancel "menuCmd FpTrophyCancel"
+set CommandLoseFocus "playSound MenuSelect"
+set CommandFocusRight "echo fp trophy page 1"
+set CommandFocusRight "menuCmd BookAnimPageNext"
+set CommandFocusRight "pcmd 0.05 gameUI focusName $FpTFocus"
+set CommandFocusRight "playSound MenuPageTurn"
+set CommandFocusLeft "echo fp trophy page -1"
+set CommandFocusLeft "menuCmd BookAnimPageLast"
+set CommandFocusLeft "pcmd 0.05 gameUI focusName $FpTFocus"
+set CommandFocusLeft "playSound MenuPageTurn"
+add MenuObject
+set Name FpTrophyTag5
+set Coords "0 0 100 44"
+set Layer 2
+set RenderCB _DrawText
+set RenderCBExcludesDefaultRender 1
+set RenderCB_DX 0
+set RenderCB_DY 0
+set RenderCB_FontName Boopee
+set RenderCB_RGBColor "0.54 0.36 0.04"
+set RenderCB_FontScale 0.5
+set RenderCB_ConsoleSymbol FpT_s5
+set RenderCB_FloatArg 2000.0
+set RenderCB_BoolArg 0
+set RenderCB_TextJustify JustifyXRight
+set RenderCB_TextJustifyVertical JustifyYCenter
+add MenuObject
+set Name FpTrophyRow6
+set Coords "0 0 260 44"
+set Layer 2
+set RenderCB _DrawText
+set RenderCBExcludesDefaultRender 1
+set RenderCB_DX 0
+set RenderCB_DY 0
+set RenderCB_FontName Boopee
+set Re)FPM"
+R"FPM(nderCB_RGBColor "0.35 0.23 0.07"
+set RenderCB_FontScale 0.62
+set RenderCB_ConsoleSymbol FpT_n6
+set RenderCB_FloatArg 2000.0
+set RenderCB_BoolArg 0
+set RenderCB_TextJustify JustifyXLeft
+set RenderCB_TextJustifyVertical JustifyYCenter
+set Focus 9306 FocusUp 9305 FocusDown 9307
+set DrawWhenFocused MenuMainArrow DrawWhenFocusedOffset "-52 2 0"
+set RenderCB_RGBColorFocused "0.85 0.45 0.0"
+set CommandGetFocus "sym set MenuMemoryFpTrophy FpTrophyRow6"
+set CommandGetFocus "echo fp trophy focus 6"
+set CommandGetFocus "menuCmd FpTrophyIconShow"
+set CommandCancel "gameUI focusName DummyObject"
+set CommandCancel "menuCmd FpTrophyCancel"
+set CommandLoseFocus "playSound MenuSelect"
+set CommandFocusRight "echo fp trophy page 1"
+set CommandFocusRight "menuCmd BookAnimPageNext"
+set CommandFocusRight "pcmd 0.05 gameUI focusName $FpTFocus"
+set CommandFocusRight "playSound MenuPageTurn"
+set CommandFocusLeft "echo fp trophy page -1"
+set CommandFocusLeft "menuCmd BookAnimPageLast"
+set CommandFocusLeft "pcmd 0.05 gameUI focusName $FpTFocus"
+set CommandFocusLeft "playSound MenuPageTurn"
+add MenuObject
+set Name FpTrophyTag6
+set Coords "0 0 100 44"
+set Layer 2
+set RenderCB _DrawText
+set RenderCBExcludesDefaultRender 1
+set RenderCB_DX 0
+set RenderCB_DY 0
+set RenderCB_FontName Boopee
+set RenderCB_RGBColor "0.54 0.36 0.04"
+set RenderCB_FontScale 0.5
+set RenderCB_ConsoleSymbol FpT_s6
+set RenderCB_FloatArg 2000.0
+set RenderCB_BoolArg 0
+set RenderCB_TextJustify JustifyXRight
+set RenderCB_TextJustifyVertical JustifyYCenter
+add MenuObject
+set Name FpTrophyRow7
+set Coords "0 0 260 44"
+set Layer 2
+set RenderCB _DrawText
+set RenderCBExcludesDefaultRender 1
+set RenderCB_DX 0
+set RenderCB_DY 0
+set RenderCB_FontName Boopee
+set RenderCB_RGBColor "0.35 0.23 0.07"
+set RenderCB_FontScale 0.62
+set RenderCB_ConsoleSymbol FpT_n7
+set RenderCB_FloatArg 2000.0
+set RenderCB_BoolArg 0
+set RenderCB_TextJustify JustifyXLeft
+set RenderCB_TextJustifyVertical JustifyYCenter
+set Focus 9307 FocusUp 9306
+set DrawWhenFocused MenuMainArrow DrawWhenFocusedOffset "-52 2 0"
+set RenderCB_RGBColorFocused "0.85 0.45 0.0"
+set CommandGetFocus "sym set MenuMemoryFpTrophy FpTrophyRow7"
+set CommandGetFocus "echo fp trophy focus 7"
+set CommandGetFocus "menuCmd FpTrophyIconShow"
+set CommandCancel "gameUI focusName DummyObject"
+set CommandCancel "menuCmd FpTrophyCancel"
+set CommandLoseFocus "playSound MenuSelect"
+set CommandFocusRight "echo fp trophy page 1"
+set CommandFocusRight "menuCmd BookAnimPageNext"
+set CommandFocusRight "pcmd 0.05 gameUI focusName $FpTFocus"
+set CommandFocusRight "playSound MenuPageTurn"
+set CommandFocusLeft "echo fp trophy page -1"
+set CommandFocusLeft "menuCmd BookAnimPageLast"
+set CommandFocusLeft "pcmd 0.05 gameUI focusName $FpTFocus"
+set CommandFocusLeft "playSound MenuPageTurn"
+add MenuObject
+set Name FpTrophyTag7
+set Coords "0 0 100 44"
+set Layer 2
+set RenderCB _DrawText
+set RenderCBExcludesDefaultRender 1
+set RenderCB_DX 0
+set RenderCB_DY 0
+set RenderCB_FontName Boopee
+set RenderCB_RGBColor "0.54 0.36 0.04"
+set RenderCB_FontScale 0.5
+set RenderCB_ConsoleSymbol FpT_s7
+set RenderCB_FloatArg 2000.0
+set RenderCB_BoolArg 0
+set RenderCB_TextJustify JustifyXRight
+set RenderCB_TextJustifyVertical JustifyYCenter
+add MenuObject
+set Name FpTrophyIcon0
+set Texture menus\FpTrophy00
+set Coords "0 0 128 128"
+set Layer 2
+set Disabled 1
+set DisabledAlpha 0.0
+set DisabledAlphaTimeIn 0.1
+set DisabledAlphaTimeOut 0.05
+add MenuObject
+set Name FpTrophyIconG0
+set Texture menus\FpTrophyg00
+set Coords "0 0 128 128"
+set Layer 2
+set Disabled 1
+set DisabledAlpha 0.0
+set DisabledAlphaTimeIn 0.1
+set DisabledAlphaTimeOut 0.05
+add MenuObject
+set Name FpTrophyIcon1
+set Texture menus\FpTrophy01
+set Coords "0 0 128 128"
+set Layer 2
+set Disabled 1
+set DisabledAlpha 0.0
+set DisabledAlphaTimeIn 0.1
+set DisabledAlphaTimeOut 0.05
+add MenuObject
+set Name FpTrophyIconG1
+set Texture menus\FpTrophyg01
+set Coords "0 0 128 128"
+set Layer 2
+set Disabled 1
+set DisabledAlpha 0.0
+set DisabledAlphaTimeIn 0.1
+set DisabledAlphaTimeOut 0.05
+add MenuObject
+set Name FpTrophyIcon2
+set Texture menus\FpTrophy02
+set Coords "0 0 128 128"
+set Layer 2
+set Disabled 1
+set DisabledAlpha 0.0
+set DisabledAlphaTimeIn 0.1
+set DisabledAlphaTimeOut 0.05
+add MenuObject
+set Name FpTrophyIconG2
+set Texture menus\FpTrophyg02
+set Coords "0 0 128 128"
+set Layer 2
+set Disabled 1
+set DisabledAlpha 0.0
+set DisabledAlphaTimeIn 0.1
+set DisabledAlphaTimeOut 0.05
+add MenuObject
+set Name FpTrophyIcon3
+set Texture menus\FpTrophy03
+set Coords "0 0 128 128"
+set Layer 2
+set Disabled 1
+set DisabledAlpha 0.0
+set DisabledAlphaTimeIn 0.1
+set DisabledAlphaTimeOut 0.05
+add MenuObject
+set Name FpTrophyIconG3
+set Texture menus\FpTrophyg03
+set Coords "0 0 128 128"
+set Layer 2
+set Disabled 1
+set DisabledAlpha 0.0
+set DisabledAlphaTimeIn 0.1
+set DisabledAlphaTimeOut 0.05
+add MenuObject
+set Name FpTrophyIcon4
+set Texture menus\FpTrophy04
+set Coords "0 0 128 128"
+set Layer 2
+set Disabled 1
+set DisabledAlpha 0.0
+set DisabledAlphaTimeIn 0.1
+set DisabledAlphaTimeOut 0.05
+add MenuObject
+set Name FpTrophyIconG4
+set Texture menus\FpTrophyg04
+set Coords "0 0 128 128"
+set Layer 2
+set Disabled 1
+set DisabledAlpha 0.0
+set DisabledAlphaTimeIn 0.1
+set DisabledAlphaTimeOut 0.05
+add MenuObject
+set Name FpTrophyIcon5
+set Texture menus\FpTrophy05
+set Coords "0 0 128 128"
+set Layer 2
+set Disabled 1
+set DisabledAlpha 0.0
+set DisabledAlphaTimeIn 0.1
+set DisabledAlphaTimeOut 0.05
+add MenuObject
+set Name FpTrophyIconG5
+set Texture menus\FpTrophyg05
+set Coords "0 0 128 128"
+set Layer 2
+set Disabled 1
+set DisabledAlpha 0.0
+set DisabledAlphaTimeIn 0.1
+set DisabledAlphaTimeOut 0.05
+add MenuObject
+set Name FpTrophyIcon6
+set Texture menus\FpTrophy06
+set Coords "0 0 128 128"
+set Layer 2
+set Disabled 1
+set DisabledAlpha 0.0
+set DisabledAlphaTimeIn 0.1
+set DisabledAlphaTimeOut 0.05
+add MenuObject
+set Name FpTrophyIconG6
+set Texture menus\FpTrophyg06
+set Coords "0 0 128 128"
+set Layer 2
+set Disabled 1
+set DisabledAlpha 0.0
+set DisabledAlphaTimeIn 0.1
+set Disabl)FPM"
+R"FPM(edAlphaTimeOut 0.05
+add MenuObject
+set Name FpTrophyIcon7
+set Texture menus\FpTrophy07
+set Coords "0 0 128 128"
+set Layer 2
+set Disabled 1
+set DisabledAlpha 0.0
+set DisabledAlphaTimeIn 0.1
+set DisabledAlphaTimeOut 0.05
+add MenuObject
+set Name FpTrophyIconG7
+set Texture menus\FpTrophyg07
+set Coords "0 0 128 128"
+set Layer 2
+set Disabled 1
+set DisabledAlpha 0.0
+set DisabledAlphaTimeIn 0.1
+set DisabledAlphaTimeOut 0.05
+add MenuObject
+set Name FpTrophyIcon8
+set Texture menus\FpTrophy08
+set Coords "0 0 128 128"
+set Layer 2
+set Disabled 1
+set DisabledAlpha 0.0
+set DisabledAlphaTimeIn 0.1
+set DisabledAlphaTimeOut 0.05
+add MenuObject
+set Name FpTrophyIconG8
+set Texture menus\FpTrophyg08
+set Coords "0 0 128 128"
+set Layer 2
+set Disabled 1
+set DisabledAlpha 0.0
+set DisabledAlphaTimeIn 0.1
+set DisabledAlphaTimeOut 0.05
+add MenuObject
+set Name FpTrophyIcon9
+set Texture menus\FpTrophy09
+set Coords "0 0 128 128"
+set Layer 2
+set Disabled 1
+set DisabledAlpha 0.0
+set DisabledAlphaTimeIn 0.1
+set DisabledAlphaTimeOut 0.05
+add MenuObject
+set Name FpTrophyIconG9
+set Texture menus\FpTrophyg09
+set Coords "0 0 128 128"
+set Layer 2
+set Disabled 1
+set DisabledAlpha 0.0
+set DisabledAlphaTimeIn 0.1
+set DisabledAlphaTimeOut 0.05
+add MenuObject
+set Name FpTrophyIcon10
+set Texture menus\FpTrophy10
+set Coords "0 0 128 128"
+set Layer 2
+set Disabled 1
+set DisabledAlpha 0.0
+set DisabledAlphaTimeIn 0.1
+set DisabledAlphaTimeOut 0.05
+add MenuObject
+set Name FpTrophyIconG10
+set Texture menus\FpTrophyg10
+set Coords "0 0 128 128"
+set Layer 2
+set Disabled 1
+set DisabledAlpha 0.0
+set DisabledAlphaTimeIn 0.1
+set DisabledAlphaTimeOut 0.05
+add MenuObject
+set Name FpTrophyIcon11
+set Texture menus\FpTrophy11
+set Coords "0 0 128 128"
+set Layer 2
+set Disabled 1
+set DisabledAlpha 0.0
+set DisabledAlphaTimeIn 0.1
+set DisabledAlphaTimeOut 0.05
+add MenuObject
+set Name FpTrophyIconG11
+set Texture menus\FpTrophyg11
+set Coords "0 0 128 128"
+set Layer 2
+set Disabled 1
+set DisabledAlpha 0.0
+set DisabledAlphaTimeIn 0.1
+set DisabledAlphaTimeOut 0.05
+add MenuObject
+set Name FpTrophyIcon12
+set Texture menus\FpTrophy12
+set Coords "0 0 128 128"
+set Layer 2
+set Disabled 1
+set DisabledAlpha 0.0
+set DisabledAlphaTimeIn 0.1
+set DisabledAlphaTimeOut 0.05
+add MenuObject
+set Name FpTrophyIconG12
+set Texture menus\FpTrophyg12
+set Coords "0 0 128 128"
+set Layer 2
+set Disabled 1
+set DisabledAlpha 0.0
+set DisabledAlphaTimeIn 0.1
+set DisabledAlphaTimeOut 0.05
+add MenuObject
+set Name FpTrophyIcon13
+set Texture menus\FpTrophy13
+set Coords "0 0 128 128"
+set Layer 2
+set Disabled 1
+set DisabledAlpha 0.0
+set DisabledAlphaTimeIn 0.1
+set DisabledAlphaTimeOut 0.05
+add MenuObject
+set Name FpTrophyIconG13
+set Texture menus\FpTrophyg13
+set Coords "0 0 128 128"
+set Layer 2
+set Disabled 1
+set DisabledAlpha 0.0
+set DisabledAlphaTimeIn 0.1
+set DisabledAlphaTimeOut 0.05
+add MenuObject
+set Name FpTrophyIcon14
+set Texture menus\FpTrophy14
+set Coords "0 0 128 128"
+set Layer 2
+set Disabled 1
+set DisabledAlpha 0.0
+set DisabledAlphaTimeIn 0.1
+set DisabledAlphaTimeOut 0.05
+add MenuObject
+set Name FpTrophyIconG14
+set Texture menus\FpTrophyg14
+set Coords "0 0 128 128"
+set Layer 2
+set Disabled 1
+set DisabledAlpha 0.0
+set DisabledAlphaTimeIn 0.1
+set DisabledAlphaTimeOut 0.05
+add MenuObject
+set Name FpTrophyIcon15
+set Texture menus\FpTrophy15
+set Coords "0 0 128 128"
+set Layer 2
+set Disabled 1
+set DisabledAlpha 0.0
+set DisabledAlphaTimeIn 0.1
+set DisabledAlphaTimeOut 0.05
+add MenuObject
+set Name FpTrophyIconG15
+set Texture menus\FpTrophyg15
+set Coords "0 0 128 128"
+set Layer 2
+set Disabled 1
+set DisabledAlpha 0.0
+set DisabledAlphaTimeIn 0.1
+set DisabledAlphaTimeOut 0.05
+add MenuObject
+set Name FpTrophyIcon16
+set Texture menus\FpTrophy16
+set Coords "0 0 128 128"
+set Layer 2
+set Disabled 1
+set DisabledAlpha 0.0
+set DisabledAlphaTimeIn 0.1
+set DisabledAlphaTimeOut 0.05
+add MenuObject
+set Name FpTrophyIconG16
+set Texture menus\FpTrophyg16
+set Coords "0 0 128 128"
+set Layer 2
+set Disabled 1
+set DisabledAlpha 0.0
+set DisabledAlphaTimeIn 0.1
+set DisabledAlphaTimeOut 0.05
+add MenuObject
+set Name FpTrophyIcon17
+set Texture menus\FpTrophy17
+set Coords "0 0 128 128"
+set Layer 2
+set Disabled 1
+set DisabledAlpha 0.0
+set DisabledAlphaTimeIn 0.1
+set DisabledAlphaTimeOut 0.05
+add MenuObject
+set Name FpTrophyIconG17
+set Texture menus\FpTrophyg17
+set Coords "0 0 128 128"
+set Layer 2
+set Disabled 1
+set DisabledAlpha 0.0
+set DisabledAlphaTimeIn 0.1
+set DisabledAlphaTimeOut 0.05
+add MenuObject
+set Name FpTrophyIcon18
+set Texture menus\FpTrophy18
+set Coords "0 0 128 128"
+set Layer 2
+set Disabled 1
+set DisabledAlpha 0.0
+set DisabledAlphaTimeIn 0.1
+set DisabledAlphaTimeOut 0.05
+add MenuObject
+set Name FpTrophyIconG18
+set Texture menus\FpTrophyg18
+set Coords "0 0 128 128"
+set Layer 2
+set Disabled 1
+set DisabledAlpha 0.0
+set DisabledAlphaTimeIn 0.1
+set DisabledAlphaTimeOut 0.05
+add MenuObject
+set Name FpTrophyIcon19
+set Texture menus\FpTrophy19
+set Coords "0 0 128 128"
+set Layer 2
+set Disabled 1
+set DisabledAlpha 0.0
+set DisabledAlphaTimeIn 0.1
+set DisabledAlphaTimeOut 0.05
+add MenuObject
+set Name FpTrophyIconG19
+set Texture menus\FpTrophyg19
+set Coords "0 0 128 128"
+set Layer 2
+set Disabled 1
+set DisabledAlpha 0.0
+set DisabledAlphaTimeIn 0.1
+set DisabledAlphaTimeOut 0.05
+add MenuObject
+set Name FpTrophyIcon20
+set Texture menus\FpTrophy20
+set Coords "0 0 128 128"
+set Layer 2
+set Disabled 1
+set DisabledAlpha 0.0
+set DisabledAlphaTimeIn 0.1
+set DisabledAlphaTimeOut 0.05
+add MenuObject
+set Name FpTrophyIconG20
+set Texture menus\FpTrophyg20
+set Coords "0 0 128 128"
+set Layer 2
+set Disabled 1
+set DisabledAlpha 0.0
+set DisabledAlphaTimeIn 0.1
+set DisabledAlphaTimeOut 0.05
+add MenuObject
+set Name FpTrophyIcon21
+set Texture menus\FpTrophy21
+set Coords "0 0 128 128"
+set Layer 2
+set Disabled 1
+set DisabledAlpha 0.0
+set DisabledAlphaTimeIn 0.1
+set DisabledAlphaTimeOut 0.05
+add MenuObject
+set Name FpTrophyIconG21
+set Texture menus\FpTrophyg21
+set Coords "0 0 128 128"
+set Layer 2
+set Disabled 1
+set DisabledAlpha 0.0
+set DisabledAl)FPM"
+R"FPM(phaTimeIn 0.1
+set DisabledAlphaTimeOut 0.05
+add MenuObject
+set Name FpTrophyIcon22
+set Texture menus\FpTrophy22
+set Coords "0 0 128 128"
+set Layer 2
+set Disabled 1
+set DisabledAlpha 0.0
+set DisabledAlphaTimeIn 0.1
+set DisabledAlphaTimeOut 0.05
+add MenuObject
+set Name FpTrophyIconG22
+set Texture menus\FpTrophyg22
+set Coords "0 0 128 128"
+set Layer 2
+set Disabled 1
+set DisabledAlpha 0.0
+set DisabledAlphaTimeIn 0.1
+set DisabledAlphaTimeOut 0.05
+add MenuObject
+set Name FpTrophyIcon23
+set Texture menus\FpTrophy23
+set Coords "0 0 128 128"
+set Layer 2
+set Disabled 1
+set DisabledAlpha 0.0
+set DisabledAlphaTimeIn 0.1
+set DisabledAlphaTimeOut 0.05
+add MenuObject
+set Name FpTrophyIconG23
+set Texture menus\FpTrophyg23
+set Coords "0 0 128 128"
+set Layer 2
+set Disabled 1
+set DisabledAlpha 0.0
+set DisabledAlphaTimeIn 0.1
+set DisabledAlphaTimeOut 0.05
+add MenuObject
+set Name FpTrophyIcon24
+set Texture menus\FpTrophy24
+set Coords "0 0 128 128"
+set Layer 2
+set Disabled 1
+set DisabledAlpha 0.0
+set DisabledAlphaTimeIn 0.1
+set DisabledAlphaTimeOut 0.05
+add MenuObject
+set Name FpTrophyIconG24
+set Texture menus\FpTrophyg24
+set Coords "0 0 128 128"
+set Layer 2
+set Disabled 1
+set DisabledAlpha 0.0
+set DisabledAlphaTimeIn 0.1
+set DisabledAlphaTimeOut 0.05
+add MenuObject
+set Name FpTrophyIcon25
+set Texture menus\FpTrophy25
+set Coords "0 0 128 128"
+set Layer 2
+set Disabled 1
+set DisabledAlpha 0.0
+set DisabledAlphaTimeIn 0.1
+set DisabledAlphaTimeOut 0.05
+add MenuObject
+set Name FpTrophyIconG25
+set Texture menus\FpTrophyg25
+set Coords "0 0 128 128"
+set Layer 2
+set Disabled 1
+set DisabledAlpha 0.0
+set DisabledAlphaTimeIn 0.1
+set DisabledAlphaTimeOut 0.05
+add MenuObject
+set Name FpTrophyIcon26
+set Texture menus\FpTrophy26
+set Coords "0 0 128 128"
+set Layer 2
+set Disabled 1
+set DisabledAlpha 0.0
+set DisabledAlphaTimeIn 0.1
+set DisabledAlphaTimeOut 0.05
+add MenuObject
+set Name FpTrophyIconG26
+set Texture menus\FpTrophyg26
+set Coords "0 0 128 128"
+set Layer 2
+set Disabled 1
+set DisabledAlpha 0.0
+set DisabledAlphaTimeIn 0.1
+set DisabledAlphaTimeOut 0.05
+add MenuObject
+set Name FpTrophyHint
+set Coords "0 0 350 40"
+set Layer 2
+set RenderCB _DrawText
+set RenderCBExcludesDefaultRender 1
+set RenderCB_DX 0
+set RenderCB_DY 0
+set RenderCB_FontName Boopee
+set RenderCB_RGBColor "0.54 0.36 0.04"
+set RenderCB_FontScale 0.45
+set RenderCB_ConsoleSymbol FpT_hint
+set RenderCB_FloatArg 2000.0
+set RenderCB_BoolArg 0
+set RenderCB_TextJustify JustifyXLeft
+set RenderCB_TextJustifyVertical JustifyYCenter
+add MenuObject
+set Name FpTrophyDn1
+set Coords "0 0 350 46"
+set Layer 2
+set RenderCB _DrawText
+set RenderCBExcludesDefaultRender 1
+set RenderCB_DX 0
+set RenderCB_DY 0
+set RenderCB_FontName FatPrincessBold
+set RenderCB_RGBColor "0.63 0.42 0.07"
+set RenderCB_FontScale 0.5
+set RenderCB_ConsoleSymbol FpT_dn1
+set RenderCB_FloatArg 2000.0
+set RenderCB_BoolArg 0
+set RenderCB_TextJustify JustifyXCenter
+set RenderCB_TextJustifyVertical JustifyYCenter
+add MenuObject
+set Name FpTrophyDn2
+set Coords "0 0 350 46"
+set Layer 2
+set RenderCB _DrawText
+set RenderCBExcludesDefaultRender 1
+set RenderCB_DX 0
+set RenderCB_DY 0
+set RenderCB_FontName FatPrincessBold
+set RenderCB_RGBColor "0.63 0.42 0.07"
+set RenderCB_FontScale 0.5
+set RenderCB_ConsoleSymbol FpT_dn2
+set RenderCB_FloatArg 2000.0
+set RenderCB_BoolArg 0
+set RenderCB_TextJustify JustifyXCenter
+set RenderCB_TextJustifyVertical JustifyYCenter
+add MenuObject
+set Name FpTrophyDg
+set Coords "0 0 350 36"
+set Layer 2
+set RenderCB _DrawText
+set RenderCBExcludesDefaultRender 1
+set RenderCB_DX 0
+set RenderCB_DY 0
+set RenderCB_FontName FatPrincessBold
+set RenderCB_RGBColor "0.54 0.36 0.04"
+set RenderCB_FontScale 0.3
+set RenderCB_ConsoleSymbol FpT_dg
+set RenderCB_FloatArg 2000.0
+set RenderCB_BoolArg 0
+set RenderCB_TextJustify JustifyXCenter
+set RenderCB_TextJustifyVertical JustifyYCenter
+add MenuObject
+set Name FpTrophyDd0
+set Coords "0 0 350 34"
+set Layer 2
+set RenderCB _DrawText
+set RenderCBExcludesDefaultRender 1
+set RenderCB_DX 0
+set RenderCB_DY 0
+set RenderCB_FontName Boopee
+set RenderCB_RGBColor "0.35 0.23 0.07"
+set RenderCB_FontScale 0.62
+set RenderCB_ConsoleSymbol FpT_dd0
+set RenderCB_FloatArg 2000.0
+set RenderCB_BoolArg 0
+set RenderCB_TextJustify JustifyXCenter
+set RenderCB_TextJustifyVertical JustifyYCenter
+add MenuObject
+set Name FpTrophyDd1
+set Coords "0 0 350 34"
+set Layer 2
+set RenderCB _DrawText
+set RenderCBExcludesDefaultRender 1
+set RenderCB_DX 0
+set RenderCB_DY 0
+set RenderCB_FontName Boopee
+set RenderCB_RGBColor "0.35 0.23 0.07"
+set RenderCB_FontScale 0.62
+set RenderCB_ConsoleSymbol FpT_dd1
+set RenderCB_FloatArg 2000.0
+set RenderCB_BoolArg 0
+set RenderCB_TextJustify JustifyXCenter
+set RenderCB_TextJustifyVertical JustifyYCenter
+add MenuObject
+set Name FpTrophyDd2
+set Coords "0 0 350 34"
+set Layer 2
+set RenderCB _DrawText
+set RenderCBExcludesDefaultRender 1
+set RenderCB_DX 0
+set RenderCB_DY 0
+set RenderCB_FontName Boopee
+set RenderCB_RGBColor "0.35 0.23 0.07"
+set RenderCB_FontScale 0.62
+set RenderCB_ConsoleSymbol FpT_dd2
+set RenderCB_FloatArg 2000.0
+set RenderCB_BoolArg 0
+set RenderCB_TextJustify JustifyXCenter
+set RenderCB_TextJustifyVertical JustifyYCenter
+add MenuObject
+set Name FpTrophyDd3
+set Coords "0 0 350 34"
+set Layer 2
+set RenderCB _DrawText
+set RenderCBExcludesDefaultRender 1
+set RenderCB_DX 0
+set RenderCB_DY 0
+set RenderCB_FontName Boopee
+set RenderCB_RGBColor "0.35 0.23 0.07"
+set RenderCB_FontScale 0.62
+set RenderCB_ConsoleSymbol FpT_dd3
+set RenderCB_FloatArg 2000.0
+set RenderCB_BoolArg 0
+set RenderCB_TextJustify JustifyXCenter
+set RenderCB_TextJustifyVertical JustifyYCenter
+add MenuObject
+set Name FpTrophyDp
+set Coords "0 0 350 36"
+set Layer 2
+set RenderCB _DrawText
+set RenderCBExcludesDefaultRender 1
+set RenderCB_DX 0
+set RenderCB_DY 0
+set RenderCB_FontName Boopee
+set RenderCB_RGBColor "0.35 0.23 0.07"
+set RenderCB_FontScale 0.62
+set RenderCB_ConsoleSymbol FpT_dp
+set RenderCB_FloatArg 2000.0
+set RenderCB_BoolArg 0
+set RenderCB_TextJustify JustifyXCenter
+set RenderCB_TextJustifyVertical)FPM"
+R"FPM( JustifyYCenter
+add MenuObject
+set Name FpTrophyDs
+set Coords "0 0 350 36"
+set Layer 2
+set RenderCB _DrawText
+set RenderCBExcludesDefaultRender 1
+set RenderCB_DX 0
+set RenderCB_DY 0
+set RenderCB_FontName Boopee
+set RenderCB_RGBColor "0.54 0.36 0.04"
+set RenderCB_FontScale 0.5
+set RenderCB_ConsoleSymbol FpT_ds
+set RenderCB_FloatArg 2000.0
+set RenderCB_BoolArg 0
+set RenderCB_TextJustify JustifyXCenter
+set RenderCB_TextJustifyVertical JustifyYCenter
+add MenuObject
+set Name FpTrophyPage
+set Coords "0 0 350 36"
+set Layer 2
+set RenderCB _DrawText
+set RenderCBExcludesDefaultRender 1
+set RenderCB_DX 0
+set RenderCB_DY 0
+set RenderCB_FontName Boopee
+set RenderCB_RGBColor "0.54 0.36 0.04"
+set RenderCB_FontScale 0.5
+set RenderCB_ConsoleSymbol FpT_page
+set RenderCB_FloatArg 2000.0
+set RenderCB_BoolArg 0
+set RenderCB_TextJustify JustifyXRight
+set RenderCB_TextJustifyVertical JustifyYCenter
+add MenuObject
+set Name MenuFpTrophyMaster
+set ContainerOnly 1
+set Coords "0 0 950 720"
+set Child "FpTrophyTitleText 88 56"
+set Child "FpTrophyCount 88 56"
+set Child "FpTrophyRow0 88 132"
+set Child "FpTrophyTag0 338 132"
+set Child "FpTrophyRow1 88 180"
+set Child "FpTrophyTag1 338 180"
+set Child "FpTrophyRow2 88 228"
+set Child "FpTrophyTag2 338 228"
+set Child "FpTrophyRow3 88 276"
+set Child "FpTrophyTag3 338 276"
+set Child "FpTrophyRow4 88 324"
+set Child "FpTrophyTag4 338 324"
+set Child "FpTrophyRow5 88 372"
+set Child "FpTrophyTag5 338 372"
+set Child "FpTrophyRow6 88 420"
+set Child "FpTrophyTag6 338 420"
+set Child "FpTrophyRow7 88 468"
+set Child "FpTrophyTag7 338 468"
+set Child "FpTrophyIcon0 615 96"
+set Child "FpTrophyIconG0 615 96"
+set Child "FpTrophyIcon1 615 96"
+set Child "FpTrophyIconG1 615 96"
+set Child "FpTrophyIcon2 615 96"
+set Child "FpTrophyIconG2 615 96"
+set Child "FpTrophyIcon3 615 96"
+set Child "FpTrophyIconG3 615 96"
+set Child "FpTrophyIcon4 615 96"
+set Child "FpTrophyIconG4 615 96"
+set Child "FpTrophyIcon5 615 96"
+set Child "FpTrophyIconG5 615 96"
+set Child "FpTrophyIcon6 615 96"
+set Child "FpTrophyIconG6 615 96"
+set Child "FpTrophyIcon7 615 96"
+set Child "FpTrophyIconG7 615 96"
+set Child "FpTrophyIcon8 615 96"
+set Child "FpTrophyIconG8 615 96"
+set Child "FpTrophyIcon9 615 96"
+set Child "FpTrophyIconG9 615 96"
+set Child "FpTrophyIcon10 615 96"
+set Child "FpTrophyIconG10 615 96"
+set Child "FpTrophyIcon11 615 96"
+set Child "FpTrophyIconG11 615 96"
+set Child "FpTrophyIcon12 615 96"
+set Child "FpTrophyIconG12 615 96"
+set Child "FpTrophyIcon13 615 96"
+set Child "FpTrophyIconG13 615 96"
+set Child "FpTrophyIcon14 615 96"
+set Child "FpTrophyIconG14 615 96"
+set Child "FpTrophyIcon15 615 96"
+set Child "FpTrophyIconG15 615 96"
+set Child "FpTrophyIcon16 615 96"
+set Child "FpTrophyIconG16 615 96"
+set Child "FpTrophyIcon17 615 96"
+set Child "FpTrophyIconG17 615 96"
+set Child "FpTrophyIcon18 615 96"
+set Child "FpTrophyIconG18 615 96"
+set Child "FpTrophyIcon19 615 96"
+set Child "FpTrophyIconG19 615 96"
+set Child "FpTrophyIcon20 615 96"
+set Child "FpTrophyIconG20 615 96"
+set Child "FpTrophyIcon21 615 96"
+set Child "FpTrophyIconG21 615 96"
+set Child "FpTrophyIcon22 615 96"
+set Child "FpTrophyIconG22 615 96"
+set Child "FpTrophyIcon23 615 96"
+set Child "FpTrophyIconG23 615 96"
+set Child "FpTrophyIcon24 615 96"
+set Child "FpTrophyIconG24 615 96"
+set Child "FpTrophyIcon25 615 96"
+set Child "FpTrophyIconG25 615 96"
+set Child "FpTrophyIcon26 615 96"
+set Child "FpTrophyIconG26 615 96"
+set Child "FpTrophyHint 88 640"
+set Child "FpTrophyDn1 504 236"
+set Child "FpTrophyDn2 504 278"
+set Child "FpTrophyDg 504 322"
+set Child "FpTrophyDd0 504 364"
+set Child "FpTrophyDd1 504 397"
+set Child "FpTrophyDd2 504 430"
+set Child "FpTrophyDd3 504 463"
+set Child "FpTrophyDp 504 506"
+set Child "FpTrophyDs 504 562"
+set Child "FpTrophyPage 504 650"
+set Anchor Center
 )FPM";
 static const char* const kFpMenuScripts =
 R"FPM(Script FpCancelHub {
 cmd "log MenuCmd: FpCancelHub"
 cmd "sym set MenuToHide MenuFpHubMaster"
-cmd "sym set MenuToShow MenuOptionsL2Master"
+cmd "sym set MenuToShow MenuOptionsMaster"
 cmd "addUIAnim $$MenuToShow mas_MenuCenter"
 cmd "addUIAnim $$MenuToHide mas_MenuRight"
-cmd "menuCmd MenuBackgroundSize5"
-cmd "pcmd 0.2 gameUI focusName MenuOptionsL2Recomp"
+cmd "menuCmd MenuBackgroundSize4"
+cmd "pcmd 0.2 gameUI focusName MenuOptionsStore"
 cmd "addUIAnim $MenuBackgroundObject mas_BackBarRight"
 }
 Script FpCancelGraphics {
@@ -1802,8 +3041,8 @@ cmd "if sym FpAcctGo == 1 if sym FpAcctReturn == gate menuCmd FpGateContinue"
 }
 Script FpGateContinue {
 cmd "log MenuCmd: FpGateContinue"
-cmd ")FPM"
-R"FPM(sym set FpAcctGo 0"
+cmd "sym s)FPM"
+R"FPM(et FpAcctGo 0"
 cmd "sym set FpAcctOpen 0"
 cmd "sym set MenuToHide $FpAcctCur"
 cmd "sym set MenuToShow MenuMainMaster"
@@ -1827,9 +3066,94 @@ Script FpRegisterGo {
 cmd "log MenuCmd: FpRegisterGo"
 cmd "echo fp url register"
 }
+Script FpTrophyOpen {
+cmd "log MenuCmd: FpTrophyOpen"
+cmd "gameUI focusName DummyObject"
+cmd "sym set MenuToHide MenuScoresMaster"
+cmd "echo fp trophy open"
+cmd "addUIAnim MenuScoresMaster mas_MenuLeft"
+cmd "addUIAnim MenuStorybookBackground mas_MenuCenter"
+cmd "addUIAnim MenuFpTrophyMaster mas_MenuCenter"
+cmd "gameUI disable $MenuBackgroundObject"
+cmd "gameUI disable $MenuBackgroundObjectTop"
+cmd "gameUI disable $MenuBackgroundObjectBottom"
+cmd "menuCmd MenuBackgroundSizeHide"
+cmd "playSound MenuChoose"
+cmd "pcmd 0.3 gameUI focusName FpTrophyRow0"
+}
+Script FpTrophyIconShow {
+cmd "log MenuCmd: FpTrophyIconShow"
+cmd "gameUI disable FpTrophyIcon0"
+cmd "gameUI disable FpTrophyIconG0"
+cmd "gameUI disable FpTrophyIcon1"
+cmd "gameUI disable FpTrophyIconG1"
+cmd "gameUI disable FpTrophyIcon2"
+cmd "gameUI disable FpTrophyIconG2"
+cmd "gameUI disable FpTrophyIcon3"
+cmd "gameUI disable FpTrophyIconG3"
+cmd "gameUI disable FpTrophyIcon4"
+cmd "gameUI disable FpTrophyIconG4"
+cmd "gameUI disable FpTrophyIcon5"
+cmd "gameUI disable FpTrophyIconG5"
+cmd "gameUI disable FpTrophyIcon6"
+cmd "gameUI disable FpTrophyIconG6"
+cmd "gameUI disable FpTrophyIcon7"
+cmd "gameUI disable FpTrophyIconG7"
+cmd "gameUI disable FpTrophyIcon8"
+cmd "gameUI disable FpTrophyIconG8"
+cmd "gameUI disable FpTrophyIcon9"
+cmd "gameUI disable FpTrophyIconG9"
+cmd "gameUI disable FpTrophyIcon10"
+cmd "gameUI disable FpTrophyIconG10"
+cmd "gameUI disable FpTrophyIcon11"
+cmd "gameUI disable FpTrophyIconG11"
+cmd "gameUI disable FpTrophyIcon12"
+cmd "gameUI disable FpTrophyIconG12"
+cmd "gameUI disable FpTrophyIcon13"
+cmd "gameUI disable FpTrophyIconG13"
+cmd "gameUI disable FpTrophyIcon14"
+cmd "gameUI disable FpTrophyIconG14"
+cmd "gameUI disable FpTrophyIcon15"
+cmd "gameUI disable FpTrophyIconG15"
+cmd "gameUI disable FpTrophyIcon16"
+cmd "gameUI disable FpTrophyIconG16"
+cmd "gameUI disable FpTrophyIcon17"
+cmd "gameUI disable FpTrophyIconG17"
+cmd "gameUI disable FpTrophyIcon18"
+cmd "gameUI disable FpTrophyIconG18"
+cmd "gameUI disable FpTrophyIcon19"
+cmd "gameUI disable FpTrophyIconG19"
+cmd "gameUI disable FpTrophyIcon20"
+cmd "gameUI disable FpTrophyIconG20"
+cmd "gameUI disable FpTrophyIcon21"
+cmd "gameUI disable FpTrophyIconG21"
+cmd "gameUI disable FpTrophyIcon22"
+cmd "gameUI disable FpTrophyIconG22"
+cmd "gameUI disable FpTrophyIcon23"
+cmd "gameUI disable FpTrophyIconG23"
+cmd "gameUI disable FpTrophyIcon24"
+cmd "gameUI disable FpTrophyIconG24"
+cmd "gameUI disable FpTrophyIcon25"
+cmd "gameUI disable FpTrophyIconG25"
+cmd "gameUI disable FpTrophyIcon26"
+cmd "gameUI disable FpTrophyIconG26"
+cmd "gameUI enable $FpTIcon"
+}
+Script FpTrophyCancel {
+cmd "log MenuCmd: FpTrophyCancel"
+cmd "gameUI focusName DummyObject"
+cmd "addUIAnim MenuStorybookBackground mas_MenuRight"
+cmd "addUIAnim MenuFpTrophyMaster mas_MenuRight"
+cmd "addUIAnim MenuScoresMaster mas_MenuCenter"
+cmd "gameUI enable $MenuBackgroundObject"
+cmd "gameUI enable $MenuBackgroundObjectTop"
+cmd "gameUI enable $MenuBackgroundObjectBottom"
+cmd "menuCmd MenuBackgroundSizeShow"
+cmd "pcmd 0.2 gameUI focusName MenuScoresTrophies"
+}
 )FPM";
 static const char* const kFpMenuSymbols =
-R"FPM(FpPcSettings=PC Settings
+R"FPM(FpFatOptions=Fat Options
 FpRegisterAskTitle=Register
 FpRegisterAskText=Open your web browser to register? Come back here afterwards and choose Sign In.
 FpVal_ON=ON
@@ -1864,6 +3188,7 @@ FpVal_DETAILED=DETAILED
 FpVal_2=2
 FpVal_5=5
 FpVal__=-
+FpTrophies=Trophies
 FpAccount=Account
 FpGraphics=Graphics
 FpAudio=Audio

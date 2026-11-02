@@ -2,6 +2,7 @@
 // script text is stored in the repository or the executable, only the edits. The game loads addons/patch.qrk over
 // siege.qrk. Same edits as tools/make_cheat_patch.py.
 #include "settings.h"
+#include "trophy_icons.h"
 #include "menu_pages_generated.h"
 #include <cstdint>
 #include <cstdio>
@@ -21,7 +22,7 @@
 #include <zlib.h>
 
 namespace {
-constexpr int kRulesVersion = 19;
+constexpr int kRulesVersion = 20;
 constexpr uint32_t kMagic = 0x004b5251;
 
 uint32_t rd32(const unsigned char* p) { return p[0] | p[1] << 8 | p[2] << 16 | uint32_t(p[3]) << 24; }
@@ -206,23 +207,15 @@ bool apply_native_menu(const std::string& archive, std::vector<std::pair<std::st
         }
         store(name, result);
     }
-    {   // Scripts that return to the Options page need the five-row background; then the new pages' own scripts.
+    {   // the new pages' own scripts, appended to the stock command scripts
         const char* name = "data/gamescripts/menucmds.txt";
         if (!current(name, text)) return false;
-        std::string result;
-        size_t at = 0;
-        while (at < text.size()) {
-            size_t next = text.find("\r\nScript ", at + 1);
-            const size_t end = next == std::string::npos ? text.size() : next + 2;
-            std::string block = text.substr(at, end - at);
-            if (block.find("sym set MenuToShow MenuOptionsL2Master") != std::string::npos) replace_all(block, "menuCmd MenuBackgroundSize4", "menuCmd MenuBackgroundSize5");
-            result += block;
-            at = end;
-        }
+        std::string result = text;
         while (!result.empty() && (result.back() == '\n' || result.back() == '\r')) result.pop_back();
         store(name, result + "\r\n" + to_crlf(kFpMenuScripts));
     }
     store(kFpMenuPagesFile, to_crlf(kFpMenuPages));
+    for (auto& tex : fp::trophy_icon_textures(archive.substr(0, archive.rfind('/')))) store(tex.first, tex.second);   // the trophy icons as textures
     std::string symbols;
     {   // key=value lines in UTF-16BE, appended to every language's symbol table (other languages show the English wording)
         const std::string lines = to_crlf(kFpMenuSymbols);

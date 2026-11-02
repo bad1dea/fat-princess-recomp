@@ -2,6 +2,7 @@
 #include <string>
 #include <cstdint>
 #include <vector>
+#include "osk_panel.h"
 
 namespace fp {
 bool trophy_ui_active();
@@ -11,6 +12,7 @@ bool trophy_ui_open(int detail_id);
 bool trophy_ui_open_recent();
 void trophy_ui_close();
 void trophy_ui_note_toast(int id);
+std::vector<TrophyRow> trophy_ui_rows(std::string* title = nullptr);   // every trophy with its state and counter
 std::string trophy_ui_detail(int id);   // the description of a trophy ("" if unknown)
 // Menu input while a screen is open; returns true when the screen changed.
 bool trophy_ui_nav(bool up, bool down, bool ok, bool back, bool left = false, bool right = false);
