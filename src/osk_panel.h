@@ -43,11 +43,12 @@ inline void keyboard_vertical(int& row,int& col,int direction,bool symbols) {
 }
 KeyboardView settings_keyboard_view();
 std::vector<uint8_t> keyboard_pixels(const KeyboardView&,unsigned& width,unsigned& height);
-struct TrophyCard { std::string name; int grade=4; std::vector<uint8_t> png; std::string hint; };   // grade: 1 platinum .. 4 bronze
+struct TrophyCard { std::string name; int grade=4; std::vector<uint8_t> png; std::string hint, detail; };   // grade: 1 platinum .. 4 bronze
 struct TrophyIcon { int w=0,h=0; std::vector<uint8_t> rgba; };
-struct TrophyRow { int id=0,grade=4; bool hidden=false,unlocked=false; std::string name,detail,when_text; };
+struct TrophyRow { int id=0,grade=4; bool hidden=false,unlocked=false; std::string name,detail,when_text; int progress=0,target=0; std::string unit; };   // target 0: no counter
 struct TrophyDetailView { TrophyRow row; const TrophyIcon* icon=nullptr; std::string status,title,controls; int earned=0,total=0; };
-struct TrophyListView { std::vector<TrophyRow> rows; std::vector<const TrophyIcon*> icons; std::string title,controls; int earned=0,total=0,selected=0; };
+constexpr int kTrophyPageSize=8;   // trophies on the left page of the book
+struct TrophyListView { std::vector<TrophyRow> rows; std::vector<const TrophyIcon*> icons; std::string title,controls; int earned=0,total=0,selected=0; float flip=-1; int flip_dir=0; };   // flip: 0..1 while a page turns (dir +1 forward), -1 at rest
 std::vector<uint8_t> trophy_card_pixels(const TrophyCard&,float scale,unsigned& width,unsigned& height,unsigned& radius);
 std::vector<uint8_t> trophy_detail_pixels(const TrophyDetailView&,float scale,unsigned& width,unsigned& height,unsigned& radius);
 std::vector<uint8_t> trophy_list_pixels(const TrophyListView&,float scale,unsigned& width,unsigned& height,unsigned& radius);

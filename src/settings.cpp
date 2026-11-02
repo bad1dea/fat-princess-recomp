@@ -12,6 +12,8 @@
 #include "ios_touch.h"
 #endif
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cctype>
 #include <cstdio>
@@ -180,6 +182,10 @@ void init_items() {
     add("NETWORK", "name", "ONLINE NAME", Kind::Text, default_player_name(), {}, true);
     add("NETWORK", "p2p_port", "P2P PORT", Kind::Text, "3658");
     // The signed in account. Not on any tab: the menu shows its state on ACCOUNT, the ini keeps it.
+#ifndef FP_DEFAULT_JOIN_URL
+#define FP_DEFAULT_JOIN_URL ""   // builds may set the sign-up page (-DFP_DEFAULT_JOIN_URL=https://...)
+#endif
+    add("", "join_url", "", Kind::Text, FP_DEFAULT_JOIN_URL);   // where Register in the game menu sends the browser
     add("", "account_user", "", Kind::Text, "");
     add("", "account_token", "", Kind::Text, "");
     add("ACCOUNT", "acct_status", "STATUS", Kind::Command, "");
@@ -230,6 +236,9 @@ void init_items() {
     add("GAME", "local_players", "LOCAL PLAYERS", Kind::Choice, "4", {"1", "2", "3", "4"});
     add("GAME", "ui_scale", "MENU TEXT SIZE", Kind::Choice, "STANDARD", {"STANDARD", "LARGE"});
     add("GAME", "trophies", "TROPHIES", Kind::Command, "");
+#if !(defined(__APPLE__) && TARGET_OS_IOS)   // an iOS app does not close itself
+    add("GAME", "quit_game", "QUIT GAME", Kind::Command, "");
+#endif
     add("AUDIO", "trophy_sound", "TROPHY SOUND", Kind::Toggle, "ON");
     add("CONTROLS", "menu_button", "OPEN SETTINGS", Kind::Choice, "SELECT+START", {"SELECT+START", "SELECT", "L3", "R3"});
     add("CONTROLS", "button_prompts", "BUTTON PROMPTS", Kind::Choice, "AUTO", {"AUTO", "PLAYSTATION", "XBOX", "NINTENDO"});
@@ -264,7 +273,11 @@ void init_items() {
     };
     for (const auto& link : links) add(link.parent, link.id, link.label, Kind::Submenu, link.page);
     static const struct { const char* page; std::initializer_list<const char*> ids; } pages[] = {
-        {"GAME", {"trophies", "local_players", "name_font", "ui_scale", "overlay_opacity", "page_startup"}},
+        {"GAME", {"trophies", "local_players", "name_font", "ui_scale", "overlay_opacity", "page_startup"
+#if !(defined(__APPLE__) && TARGET_OS_IOS)
+            , "quit_game"
+#endif
+        }},
         {"GAME/STARTUP", {"skip_intro", "skip_howto", "skip_title"}},
         {"VIDEO", {"fullscreen", "resolution", "vsync", "fps_cap", "page_quality", "page_video_advanced"}},
         {"VIDEO/QUALITY", {"render_scale", "upscaler", "fsr_sharp"}},
@@ -346,6 +359,8 @@ void load() {
     if (find("server")->value=="127.0.0.1:36100") find("server")->value=FP_DEFAULT_SERVER;   // the old loopback default
     if (Item* a = find("account_user")) if (!a->value.empty()) find("tmp_name")->value = a->value;
 }
+
+static std::atomic<bool> quit_requested{false};
 
 bool on(const char* id) { Item* i = find(id); return i && i->value == "ON"; }
 bool on_value(const char* id, const char* v) { Item* i = find(id); return i && i->value == v; }
@@ -432,6 +447,7 @@ std::string error_text(int code) {
     case 17: return "THAT NAME BELONGS TO AN ACCOUNT";
     case 18: return "TOO MANY TRIES, WAIT A MINUTE";
     case 19: return "SIGN IN FIRST";
+    case 20: return "CONFIRM YOUR EMAIL FIRST";
     default: return "SERVER ERROR " + std::to_string(code);
     }
 }
@@ -803,6 +819,7 @@ std::string help_text(const Item* it) {
     if (id=="ai_nav_guard") return "CHECKS WATER AND LAVA BEFORE MOVING. APPLIES TO LOCAL AI";
     if (id=="ai_lock_on") return "CHANCE TO LOCK ON WHEN ATTACKING. NOT HIT ACCURACY";
     if (it->kind == Kind::Submenu) return "OPEN " + std::string(it->label);
+    if (id == "quit_game") return "CLOSE THE GAME. PRESS TWICE TO CONFIRM";
     if (id == "trophies") return "EVERY TROPHY AND YOUR PROGRESS. F2 OR GUIDE OPENS IT IN GAME";
     if (id == "fps_cap") return "SIMULATION LOCK OR INTERPOLATION CAN OVERRIDE THIS LIMIT";
     if (id == "timing" || id == "speed") return "TESTING OPTIONS. CHANGING THESE CAN CHANGE GAME SPEED";
@@ -906,6 +923,14 @@ void activate(Item* it) {
         dirty=true;return;
     }
     if (!std::strcmp(it->id,"test_stop")) { fp::self_test_stop(); notice="TEST STOPPED. REPORT SAVED"; dirty=true; return; }
+    if (!std::strcmp(it->id,"quit_game")) {
+        // A second press within 3 s confirms; the render loop exits as when the window is closed.
+        static std::chrono::steady_clock::time_point armed;
+        const auto now = std::chrono::steady_clock::now();
+        if (notice == "PRESS AGAIN TO QUIT" && now - armed < std::chrono::seconds(3)) { quit_requested = true; notice = "QUITTING"; }
+        else { armed = now; notice = "PRESS AGAIN TO QUIT"; }
+        dirty = true; return;
+    }
     if (!std::strcmp(it->id,"trophies")) {
         if (fp::trophy_ui_open(-1)) { if (is_open) fp::settings_menu_toggle(); g_fp_pad_blocked = 1; }
         else { notice = "TROPHIES LOAD WITH THE GAME"; dirty = true; }
@@ -1098,6 +1123,7 @@ struct OskState {
     bool closed_by_guest = false;
     bool active = false;        // menu thread only
     std::string prompt, text;
+    std::string target;         // settings item the text goes to (native menu); empty: the guest asked
     unsigned limit = 16;
     int cx = 0, cy = 0;
     bool upper = true;
@@ -1120,6 +1146,11 @@ void osk_finish(bool canceled) {
     osk.active = false;
     g_fp_pad_blocked = is_open ? 1 : 0;
     dirty = true;
+    if (!osk.target.empty()) {   // text for one of our own items (the native account page), not for the guest
+        if (!canceled) if (Item* item = find(osk.target.c_str())) item->value = osk.text;
+        osk.target.clear();
+        return;
+    }
     cellOskDialog_host_result(osk.text.c_str(), canceled ? 1 : 0);
 }
 
@@ -1152,13 +1183,13 @@ std::string format_prompts(std::string out,bool pad);
 // earned (or the list), and while a screen is up it takes the menu input and the game gets none.
 bool trophy_frame(std::string& panel, const Uint8* keys, bool focused) {
     static bool guide_prev = false;
-    static bool prev[4] = {};
-    const unsigned bits[4] = {CELL_PAD_CTRL_UP, CELL_PAD_CTRL_DOWN, CELL_PAD_CTRL_CROSS, CELL_PAD_CTRL_CIRCLE};
+    static bool prev[6] = {};
+    const unsigned bits[6] = {CELL_PAD_CTRL_UP, CELL_PAD_CTRL_DOWN, CELL_PAD_CTRL_CROSS, CELL_PAD_CTRL_CIRCLE, CELL_PAD_CTRL_LEFT, CELL_PAD_CTRL_RIGHT};
     const bool guide = (fp_pad_host_buttons() & 0x10000u) != 0;
     const bool open_key = (focused && keyedge.down(SDL_SCANCODE_F2, keys)) || (guide && !guide_prev);
     guide_prev = guide;
-    bool nav[4] = {};
-    for (int i = 0; i < 4; ++i) { const bool now = pad_down(bits[i]); nav[i] = now && !prev[i]; prev[i] = now; }
+    bool nav[6] = {};
+    for (int i = 0; i < 6; ++i) { const bool now = pad_down(bits[i]); nav[i] = now && !prev[i]; prev[i] = now; }
     if (!fp::trophy_ui_active()) {
         if (!open_key || is_open || osk.active || !fp::trophy_ui_open_recent()) return false;
         for (bool& n : nav) n = false;   // the press that opened it is not also a selection
@@ -1170,9 +1201,11 @@ bool trophy_frame(std::string& panel, const Uint8* keys, bool focused) {
             nav[1] |= keyedge.down(SDL_SCANCODE_DOWN, keys);
             nav[2] |= keyedge.down(SDL_SCANCODE_RETURN, keys) | keyedge.down(SDL_SCANCODE_Z, keys);
             nav[3] |= keyedge.down(SDL_SCANCODE_ESCAPE, keys) | keyedge.down(SDL_SCANCODE_X, keys);
+            nav[4] |= keyedge.down(SDL_SCANCODE_LEFT, keys);
+            nav[5] |= keyedge.down(SDL_SCANCODE_RIGHT, keys);
             for (int sc : {SDL_SCANCODE_UP, SDL_SCANCODE_DOWN, SDL_SCANCODE_RETURN, SDL_SCANCODE_ESCAPE}) if (keys[sc]) controller_hints = false;
         }
-        fp::trophy_ui_nav(nav[0], nav[1], nav[2], nav[3]);
+        fp::trophy_ui_nav(nav[0], nav[1], nav[2], nav[3], nav[4], nav[5]);
     }
     if (!fp::trophy_ui_active()) { g_fp_pad_blocked = is_open ? 1 : 0; panel.clear(); return false; }
     g_fp_pad_blocked = 1;
@@ -1445,6 +1478,7 @@ std::string render() {
 
 namespace fp {
 bool settings_menu_open() { return is_open; }
+bool settings_quit_requested() { return quit_requested; }
 bool settings_controller_hints() { return controller_hints; }
 std::string settings_prompt_text(std::string text) { return format_prompts(std::move(text),controller_hints); }
 
@@ -1554,6 +1588,47 @@ bool settings_action(const char* id) {
     return true;
 }
 
+// ---- native menu (src/menu_bridge.cpp): account entry through the game's own menus ----
+bool settings_text_entry(const char* id) {
+    init_items();
+    Item* i = find(id);
+    if (!i || (i->kind != Kind::Text && i->kind != Kind::Secret)) return false;
+    std::lock_guard<std::mutex> lock(osk.mutex);
+    if (osk.active || osk.requested) return false;
+    osk.prompt = i->kind == Kind::Secret ? std::string("PASSWORD") : std::string(i->label && *i->label ? i->label : i->id);
+    osk.text = i->kind == Kind::Secret ? std::string() : i->value;
+    osk.limit = i->kind == Kind::Secret ? 64 : std::string(id) == "tmp_email" ? 120 : std::string(id) == "tmp_name" ? 16 : 64;
+    if (osk.text.size() > osk.limit) osk.text.resize(osk.limit);
+    osk.target = id;
+    osk.requested = true;
+    return true;
+}
+bool settings_text_active() { std::lock_guard<std::mutex> lock(osk.mutex); return osk.active || osk.requested; }
+bool settings_text_set(const char* id, const std::string& value) {   // tests and scripted setup
+    init_items();
+    Item* i = find(id);
+    if (!i || (i->kind != Kind::Text && i->kind != Kind::Secret)) return false;
+    i->value = value;
+    return true;
+}
+bool settings_command(const char* id) {
+    init_items();
+    if (!id || (std::strcmp(id, "cmd_login") && std::strcmp(id, "cmd_register") && std::strcmp(id, "cmd_logout"))) return false;
+    account_command(id);
+    return true;
+}
+std::string settings_account() { init_items(); return account_name(); }
+std::string settings_notice() { return notice; }
+bool settings_busy() { return network_busy(); }
+bool settings_open_url(const char* id, const std::string& query) {
+    init_items();
+    Item* i = find(id);
+    if (!i || i->value.rfind("https://", 0) != 0) return false;
+    const std::string url = i->value + query;
+    if (std::getenv("FP_MENU_TEST_NO_BROWSER")) { std::printf("[fp-menu] would open %s\n", url.c_str()); return true; }   // headless tests
+    return SDL_OpenURL(url.c_str()) == 0;
+}
+
 std::string settings_get(const char* id) {
     init_items();
     Item* i = find(id);
@@ -1659,9 +1734,16 @@ bool settings_menu_frame(std::string& panel) {
         const auto state = player_control_state();
         const auto test=self_test_status();
         const std::string signature = test.result + std::to_string(test.elapsed) + std::to_string(state.available) + std::to_string(state.ai) +
-            std::to_string(state.pending) + std::to_string(state.requested_ai) + state.error;
+            std::to_string(state.pending) + std::to_string(state.requested_ai) + state.error +
+            std::to_string(state.free_camera);   // the free camera switches a frame or two after the request
         static std::string previous;
-        if (previous != signature) { previous = signature; dirty = true; }
+        static bool previous_camera = state.free_camera;
+        if (previous != signature) {
+            previous = signature; dirty = true;
+            if (state.free_camera != previous_camera && notice == "FREE CAMERA CHANGE REQUESTED")
+                notice = state.free_camera ? "FREE CAMERA ON" : "FREE CAMERA OFF";
+            previous_camera = state.free_camera;
+        }
     }
 
     static long long online_second=-1;

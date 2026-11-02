@@ -4,6 +4,7 @@
 #include "trophy_ui.h"
 #include "settings.h"
 #include "osk_panel.h"
+#include "game_stats.h"
 #include "../third_party/ps3recomp/libs/codec/stb_image.h"
 #include <SDL2/SDL.h>
 #include <chrono>
@@ -35,6 +36,8 @@ struct State {
     Clock::time_point toast_at{};
     std::map<int, fp::TrophyIcon> icons;
     bool dirty = true;
+    Clock::time_point flip_at{};
+    int flip_dir = 0;
 };
 State& st() { static State s; return s; }
 
@@ -77,6 +80,8 @@ fp::TrophyRow row_of(const sceNpTrophyHostEntry& e) {
     fp::TrophyRow r;
     r.id = e.id; r.grade = e.grade; r.hidden = e.hidden != 0; r.unlocked = e.unlocked != 0;
     r.name = e.name ? e.name : ""; r.detail = e.detail ? e.detail : ""; r.when_text = r.unlocked ? when_text(e.timestamp) : "";
+    fp::TrophyProgress p;
+    if (fp::game_stats_progress(e.id, p)) { r.progress = p.value; r.target = p.target; r.unit = p.unit; }
     return r;
 }
 }
@@ -84,11 +89,17 @@ fp::TrophyRow row_of(const sceNpTrophyHostEntry& e) {
 namespace fp {
 bool trophy_ui_active() { return st().screen != Screen::None; }
 
+std::string trophy_ui_detail(int id) {
+    for (const auto& e : entries(nullptr)) if (e.id == id) return e.detail ? e.detail : "";
+    return {};
+}
+
 void trophy_ui_note_toast(int id) { st().toast_id = id; st().toast_at = Clock::now(); }
 
 bool trophy_ui_open(int detail_id) {
     auto& s = st();
     if (entries(nullptr).empty()) return false;   // no trophy set registered yet
+    game_stats_request();                         // fresh counters for the progress bars
     if (detail_id >= 0) { s.screen = Screen::Detail; s.detail_id = detail_id; s.list_from_detail = false; }
     else { s.screen = Screen::List; s.list_from_detail = false; s.selected = 0; }
     s.dirty = true;
@@ -101,7 +112,7 @@ bool trophy_ui_open_recent() {
 }
 void trophy_ui_close() { st().screen = Screen::None; st().dirty = true; }
 
-bool trophy_ui_nav(bool up, bool down, bool ok, bool back) {
+bool trophy_ui_nav(bool up, bool down, bool ok, bool back, bool left, bool right) {
     auto& s = st();
     if (s.screen == Screen::Detail) {
         if (back) { trophy_ui_close(); return true; }
@@ -111,15 +122,33 @@ bool trophy_ui_nav(bool up, bool down, bool ok, bool back) {
     if (s.screen == Screen::List) {
         const int n = int(entries(nullptr).size());
         if (back) { if (s.list_from_detail) s.screen = Screen::Detail; else trophy_ui_close(); s.dirty = true; return true; }
+        const int before = s.selected / kTrophyPageSize;
         if (up && n) { s.selected = (s.selected + n - 1) % n; s.dirty = true; }
         if (down && n) { s.selected = (s.selected + 1) % n; s.dirty = true; }
+        if ((left || right) && n) {   // a whole page at a time, same row on the new page
+            const int pages = (n + kTrophyPageSize - 1) / kTrophyPageSize, row = s.selected % kTrophyPageSize;
+            const int to = (before + (right ? 1 : pages - 1)) % pages;
+            s.selected = std::min(n - 1, to * kTrophyPageSize + row);
+            s.dirty = true;
+        }
+        const int after = s.selected / kTrophyPageSize;
+        if (after != before) { s.flip_at = Clock::now(); s.flip_dir = (down || right) ? 1 : -1; }
         if (ok && n) { s.screen = Screen::Detail; s.detail_id = s.selected; s.list_from_detail = false; s.dirty = true; }
         return s.dirty;
     }
     return false;
 }
 
-bool trophy_ui_take_dirty() { const bool d = st().dirty; st().dirty = false; return d; }
+bool trophy_ui_take_dirty() {
+    if (st().flip_dir != 0) {
+        if (Clock::now() - st().flip_at < std::chrono::milliseconds(400)) st().dirty = true;
+        else { st().flip_dir = 0; st().dirty = true; }
+    }
+    static unsigned seen = 0;
+    const unsigned gen = game_stats_generation();
+    if (gen != seen) { seen = gen; st().dirty = true; }
+    const bool d = st().dirty; st().dirty = false; return d;
+}
 
 std::vector<uint8_t> trophy_ui_pixels(float scale, bool controller, unsigned& w, unsigned& h, unsigned& radius) {
     auto& s = st();
@@ -140,8 +169,9 @@ std::vector<uint8_t> trophy_ui_pixels(float scale, bool controller, unsigned& w,
     }
     TrophyListView v;
     v.title = title; v.earned = earned; v.total = int(list.size()); v.selected = s.selected;
+    if (s.flip_dir != 0) { v.flip = std::chrono::duration<float>(Clock::now() - s.flip_at).count() / 0.4f; v.flip_dir = s.flip_dir; if (v.flip >= 1) v.flip = -1; }
     for (const auto& e : list) { v.rows.push_back(row_of(e)); v.icons.push_back(icon(e.id)); }
-    v.controls = settings_prompt_text(controller ? "UP/DOWN SELECT     CROSS DETAILS     CIRCLE BACK" : "UP/DOWN SELECT     ENTER DETAILS     ESC BACK");
+    v.controls = settings_prompt_text(controller ? "UP/DOWN SELECT     LEFT/RIGHT PAGE     CROSS DETAILS     CIRCLE BACK" : "UP/DOWN SELECT     LEFT/RIGHT PAGE     ENTER DETAILS     ESC BACK");
     return trophy_list_pixels(v, scale, w, h, radius);
 }
 

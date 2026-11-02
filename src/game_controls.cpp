@@ -1,4 +1,5 @@
 #include "game_controls.h"
+#include "game_stats.h"
 #include <chrono>
 #include <cstdint>
 #include <cstdio>

@@ -28,3 +28,6 @@ runs:
         openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -in encrypted/lift.tar.zst.enc -pass env:FP_LIFT_KEY > lift.tar.zst
         zstd -dq lift.tar.zst -o lift.tar && tar -xf lift.tar -C private/lift && rm lift.tar lift.tar.zst
         ls private/lift
+    - name: Hook the native menu bridge into the lifted sources
+      shell: bash
+      run: python3 tools/apply_menu_bridge.py private/lift

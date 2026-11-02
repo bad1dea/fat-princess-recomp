@@ -58,6 +58,7 @@ void pace_log(char kind) {
 #include "game_controls.h"
 #include "osk_panel.h"
 #include "trophy_ui.h"
+#include "game_stats.h"
 #include <deque>
 #include <mutex>
 #include "self_test.h"
@@ -141,11 +142,12 @@ static void fp_dump_overlay(const std::vector<std::uint8_t>& rgba, unsigned w, u
 static std::mutex g_trophy_mutex;
 static std::deque<std::pair<int, fp::TrophyCard>> g_trophy_queue;
 static void fp_trophy_unlocked(int id, const char* name, int grade, const unsigned char* png, unsigned png_size) {
-    fp::TrophyCard card{name ? name : "", grade, png ? std::vector<uint8_t>(png, png + png_size) : std::vector<uint8_t>{}, {}};
+    fp::TrophyCard card{name ? name : "", grade, png ? std::vector<uint8_t>(png, png + png_size) : std::vector<uint8_t>{}, {}, fp::trophy_ui_detail(id)};
     std::lock_guard<std::mutex> lock(g_trophy_mutex);
     if (g_trophy_queue.size() < 32) g_trophy_queue.emplace_back(id, std::move(card));
 }
 extern "C" int sceNpTrophyPreviewUnlock(int trophyId);
+extern "C" int np_psnr_connect(const char* comm_id);
 static void fp_trophy_cards_tick() {
     using Clock = std::chrono::steady_clock;
     // FP_TROPHY_PREVIEW=0,12,... queues those cards once the trophy set is registered, without unlocking anything.
@@ -154,6 +156,16 @@ static void fp_trophy_cards_tick() {
         if (sceNpTrophyPreviewUnlock(std::atoi(preview)) != 0) break;
         preview = std::strchr(preview, ',');
         if (preview) ++preview;
+    }
+    // FP_TROPHY_OPEN=list|<id> (tests): open the trophy list, or one trophy's details, once the trophy set is registered.
+    static bool opened = false;
+    static const Clock::time_point started = Clock::now();
+    static const int open_after = std::getenv("FP_TROPHY_OPEN_AFTER") ? std::atoi(std::getenv("FP_TROPHY_OPEN_AFTER")) : 0;
+    if (!opened && Clock::now() - started >= std::chrono::seconds(open_after)) if (const char* open = std::getenv("FP_TROPHY_OPEN")) {
+        if (*open && fp::trophy_ui_open(std::strcmp(open, "list") == 0 ? -1 : std::atoi(open))) {
+            opened = true;
+            if (const char* sel = std::getenv("FP_TROPHY_SELECT")) for (int i = std::atoi(sel); i > 0; --i) fp::trophy_ui_nav(false, true, false, false);
+        }
     }
     static bool showing = false;
     static Clock::time_point shown, until;
@@ -767,7 +779,9 @@ extern "C" void fp_backend_present(void) {
         const double fps=1000.*window_frames/window_ms;
         const double p95=sorted[(filled-1)*95/100], maximum=sorted[filled-1];
         char title[240];
-        std::snprintf(title,sizeof title,"Fat Princess - Native | %.1f FPS | %.1f ms%s",fps,window_ms/window_frames,fp::settings_title_suffix().c_str());
+        // The FPS panel already shows the numbers; with it on the title does not repeat them.
+        if (fp_stats_allowed() && fp::settings_stats_visible()) std::snprintf(title,sizeof title,"Fat Princess - Native%s",fp::settings_title_suffix().c_str());
+        else std::snprintf(title,sizeof title,"Fat Princess - Native | %.1f FPS | %.1f ms%s",fps,window_ms/window_frames,fp::settings_title_suffix().c_str());
         std::string text;
         if (ai_control) text = fp::settings_prompt_text("AI CONTROL ACTIVE\nF1 > TOOLS > PLAYER CONTROL\n");
         const auto test=fp::self_test_status();
@@ -783,6 +797,7 @@ extern "C" void fp_backend_present(void) {
             // half second made the keyboard vanish until the next button press redrew it)
         } else if(!text.empty()) {
             text=fp::settings_prompt_text(std::move(text));
+            while(!text.empty() && text.back()=='\n') text.pop_back();   // a trailing newline made the panel one blank line too tall
             unsigned w,h;auto pixels=fp_hud_pixels(text,w,h);
             fp_dump_overlay(pixels,w,h,"stats");
             fp_set_overlay(pixels.data(),w,h,title);
@@ -967,7 +982,7 @@ extern "C" unsigned long fp_run_frame_clock(void (*present)(void)) {
 #endif
         // UIKit notifications and SDL lifecycle events must be processed BEFORE
         // walking commands or asking Vulkan to acquire a window image.
-        if (fp_backend_pump_messages() != 0) std::exit(0);
+        if (fp_backend_pump_messages() != 0 || fp::settings_quit_requested()) std::exit(0);
         auto inactive=[] {
 #if defined(__APPLE__) && TARGET_OS_IOS
             return g_backgrounded.load() || !fp_ios_is_active();
@@ -1477,7 +1492,9 @@ static void fp_ai_trace() {
     std::fprintf(stderr, "\n");
 }
 
+extern "C" void fp_game_stats_collect(void);
 extern "C" void fp_sysutil_tick(void) {
+    if (fp::game_stats_take_request()) fp_game_stats_collect();
     fp::player_control_poll();
     fp_apply_name_font();
     fp_voice_force_read();
@@ -1488,14 +1505,29 @@ extern "C" void fp_sysutil_tick(void) {
     if (done) return;
     static const double delay = std::getenv("FP_NPINIT_DELAY_S") ? std::atof(std::getenv("FP_NPINIT_DELAY_S")) : 6.0;
     if (std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() < delay) return;
-    if (fp::settings_get("online") != "ON") { done = true; return; }
+    // The game goes online only from Play With Others; FP_NP_AT_BOOT=1 brings NP (and the psnr connection) up at boot.
+#if defined(__APPLE__) && TARGET_OS_IOS
+    static const bool at_boot = !std::getenv("FP_NP_AT_BOOT") || std::atoi(std::getenv("FP_NP_AT_BOOT"));   // iOS builds so far start NP at boot; FP_NP_AT_BOOT=0 turns that off
+#else
+    static const bool at_boot = std::getenv("FP_NP_AT_BOOT") && std::atoi(std::getenv("FP_NP_AT_BOOT"));
+#endif
+    if (!at_boot || fp::settings_get("online") != "ON") { done = true; return; }
     const uint32_t toc = vm_read32(kEntryOpd + 4);
     const uint32_t cell = toc ? vm_read32(toc + kNetMgrTocSlot) : 0;
     const uint32_t netmgr = cell ? vm_read32(cell) : 0;
     if (!netmgr) return;
-    done = true;
     // netmgr+0x10 is set once the menu has already started NP.
-    if (vm_read32(netmgr + 0x10)) return;
+    if (vm_read32(netmgr + 0x10)) { done = true; return; }
+    // A failed start makes the game shut NP down, trophies included: stay offline while the server is unreachable.
+    // np_psnr_connect makes one attempt and then fails at once until a server change in the menu resets it, so
+    // this tries again right after such a change.
+    static bool told = false;
+    if (np_psnr_connect("NPWR00737_00") != 0) {
+        if (!told) std::fprintf(stderr, "[fp-np] psnr server unreachable: NP stays offline, trophies stay on\n");
+        told = true;
+        return;
+    }
+    done = true;
     std::fprintf(stderr, "[fp-np] starting the NP client at boot for the profile name (netmgr 0x%08X)\n", netmgr);
     ppu_guest_call_ct(kNpStart, toc, netmgr, 1, 0, 0, 0, 0, 0, 0);
 }

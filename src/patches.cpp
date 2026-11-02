@@ -2,6 +2,7 @@
 // script text is stored in the repository or the executable, only the edits. The game loads addons/patch.qrk over
 // siege.qrk. Same edits as tools/make_cheat_patch.py.
 #include "settings.h"
+#include "menu_pages_generated.h"
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -20,7 +21,7 @@
 #include <zlib.h>
 
 namespace {
-constexpr int kRulesVersion = 18;
+constexpr int kRulesVersion = 19;
 constexpr uint32_t kMagic = 0x004b5251;
 
 uint32_t rd32(const unsigned char* p) { return p[0] | p[1] << 8 | p[2] << 16 | uint32_t(p[3]) << 24; }
@@ -135,9 +136,9 @@ void replace_all(std::string& s, const std::string& from, const std::string& to)
     for (size_t at = 0; (at = s.find(from, at)) != std::string::npos; at += to.size()) s.replace(at, from.size(), to);
 }
 
-// The offline player label is DefaultPlayerName in each language's data/local/<lang>/symbols.txt (UTF-16BE). With
-// Online on the game takes the name from NP instead (fp_sysutil_tick in host.cpp starts the NP client at boot), so
-// this rewrite is only the fallback for Online off.
+// The offline player label is DefaultPlayerName in each language's data/local/<lang>/symbols.txt (UTF-16BE). The game
+// takes the name from NP only once its NP client is up, which now happens when Play With Others is chosen (unless
+// FP_NP_AT_BOOT=1), so the label is rewritten whether Online is on or off.
 std::string utf16be(const std::string& s) {
     std::string out;
     for (char c : s) { out.push_back('\0'); out.push_back(c); }
@@ -153,6 +154,88 @@ std::string game_dir() {
     return "";
 }
 
+
+// Native PC-settings pages (Twiddly Knobs > Options > PC Settings). Text and anchors come from
+// tools/make_menu_patch.py (src/menu_pages_generated.h); the rows talk to src/menu_bridge.cpp through `echo fp ...`.
+std::string to_crlf(const std::string& s) {
+    std::string out;
+    for (char c : s) { if (c == '\n') out += "\r\n"; else out += c; }
+    return out;
+}
+
+// The text of a member: the copy already queued in items if there is one, else the archive's.
+bool member_text(const std::string& archive, std::vector<std::pair<std::string, std::string>>& items, const std::string& name, std::string& out) {
+    for (auto& it : items) if (it.first == name) { out = it.second; return true; }
+    return read_member(archive, name, out);
+}
+
+void put_member(std::vector<std::pair<std::string, std::string>>& items, const std::string& name, const std::string& text) {
+    for (auto& it : items) if (it.first == name) { it.second = text; return; }
+    items.emplace_back(name, text);
+}
+
+// Returns false (and queues nothing) if any anchor is missing, so a changed game archive cannot half-apply the pages.
+bool apply_native_menu(const std::string& archive, std::vector<std::pair<std::string, std::string>>& items) {
+    std::vector<std::pair<std::string, std::string>> out;   // member -> new text, merged into items at the end
+    auto current = [&](const std::string& name, std::string& text) {
+        for (auto& it : out) if (it.first == name) { text = it.second; return true; }
+        return member_text(archive, items, name, text);
+    };
+    auto store = [&](const std::string& name, const std::string& text) { put_member(out, name, text); };
+    std::string text;
+    for (const FpMenuEdit& e : kFpMenuEdits) {
+        if (!current(e.file, text) || !replace_once(text, to_crlf(e.from), to_crlf(e.to))) {
+            std::fprintf(stderr, "[fp-menu] native menu skipped: anchor not found in %s\n", e.file);
+            return false;
+        }
+        store(e.file, text);
+    }
+    for (const char* name : kFpMenuHideFiles) {
+        if (!current(name, text)) return false;
+        std::string result;
+        size_t at = 0;
+        while (at < text.size()) {
+            size_t eol = text.find("\r\n", at);
+            const size_t end = eol == std::string::npos ? text.size() : eol;
+            std::string line = text.substr(at, end - at);
+            if (line.rfind("gameUI hideGroup ", 0) == 0 && line.find("MenuSettingsMaster") != std::string::npos) line += kFpMenuMasters;
+            result += line;
+            if (eol == std::string::npos) break;
+            result += "\r\n";
+            at = eol + 2;
+        }
+        store(name, result);
+    }
+    {   // Scripts that return to the Options page need the five-row background; then the new pages' own scripts.
+        const char* name = "data/gamescripts/menucmds.txt";
+        if (!current(name, text)) return false;
+        std::string result;
+        size_t at = 0;
+        while (at < text.size()) {
+            size_t next = text.find("\r\nScript ", at + 1);
+            const size_t end = next == std::string::npos ? text.size() : next + 2;
+            std::string block = text.substr(at, end - at);
+            if (block.find("sym set MenuToShow MenuOptionsL2Master") != std::string::npos) replace_all(block, "menuCmd MenuBackgroundSize4", "menuCmd MenuBackgroundSize5");
+            result += block;
+            at = end;
+        }
+        while (!result.empty() && (result.back() == '\n' || result.back() == '\r')) result.pop_back();
+        store(name, result + "\r\n" + to_crlf(kFpMenuScripts));
+    }
+    store(kFpMenuPagesFile, to_crlf(kFpMenuPages));
+    std::string symbols;
+    {   // key=value lines in UTF-16BE, appended to every language's symbol table (other languages show the English wording)
+        const std::string lines = to_crlf(kFpMenuSymbols);
+        symbols = utf16be(lines);
+    }
+    for (const char* lang : kLanguages) {
+        const std::string member = std::string("data/local/") + lang + "/symbols.txt";
+        if (current(member, text)) store(member, text + symbols);
+    }
+    for (auto& it : out) put_member(items, it.first, it.second);
+    return true;
+}
+
 __attribute__((constructor(102))) void apply_script_patches() {
     const std::string dir = game_dir();
     if (dir.empty()) return;
@@ -162,7 +245,11 @@ __attribute__((constructor(102))) void apply_script_patches() {
     const std::string raw_name = fp::settings_get("name"), online = fp::settings_get("online");
     const bool skip_intro = fp::settings_get("skip_intro") != "OFF", skip_title = fp::settings_get("skip_title") != "OFF",
                 since_howto = fp::settings_get("skip_howto") != "OFF";
-    const std::string key = "rules=" + std::to_string(kRulesVersion) + " timing=" + timing + " bindings=" + (bindings ? "1" : "0") + " name=" + raw_name + " online=" + online + " skipintro=" + (skip_intro ? "1" : "0") + " skiptitle=" + (skip_title ? "1" : "0") + " skiphowto=" + (since_howto ? "1" : "0") + "\n";
+    const char* cfg_env = std::getenv("FP_CFG_OVERRIDES");
+    const std::string cfg_overrides = cfg_env ? cfg_env : "";
+    const char* menu_env = std::getenv("FP_NATIVE_MENU");   // 0 turns the native pages off (the F1 overlay stays)
+    const bool native_menu = !(menu_env && menu_env[0] == '0');
+    const std::string key = "rules=" + std::to_string(kRulesVersion) + " timing=" + timing + " bindings=" + (bindings ? "1" : "0") + " name=" + raw_name + " online=" + online + " skipintro=" + (skip_intro ? "1" : "0") + " skiptitle=" + (skip_title ? "1" : "0") + " skiphowto=" + (since_howto ? "1" : "0") + " cfg=" + cfg_overrides + " menu=" + (native_menu ? std::to_string(std::strlen(kFpMenuPages) + std::strlen(kFpMenuScripts) + std::strlen(kFpMenuSymbols)) : std::string("0")) + "\n";
     struct stat st;
     if (stat(archive.c_str(), &st) != 0) return;
     if (stat(target.c_str(), &st) == 0 && read_file(keyfile) == key) return;
@@ -174,6 +261,19 @@ __attribute__((constructor(102))) void apply_script_patches() {
         const std::string lock = timing == "30 FPS LOCK" ? "30" : timing == "60 FPS LOCK" ? "60" : "0";
         set_value(text, "QrkGfx_FrameRateLock", lock);
         set_value(text, "QrkGfx_FrameRateLockPAL", lock);
+        // Experiments: FP_CFG_OVERRIDES="QrkGfx_FOV=40;QrkGfx_DrawVolumeShadows=1" sets any existing config.txt value.
+        if (!cfg_overrides.empty()) {
+            size_t at = 0;
+            while (at < cfg_overrides.size()) {
+                size_t end = cfg_overrides.find(';', at);
+                if (end == std::string::npos) end = cfg_overrides.size();
+                const std::string item = cfg_overrides.substr(at, end - at);
+                const size_t eq = item.find('=');
+                if (eq != std::string::npos && !set_value(text, item.substr(0, eq), item.substr(eq + 1)))
+                    std::fprintf(stderr, "[fp-patch] config override %s: no such value\n", item.c_str());
+                at = end + 1;
+            }
+        }
         text.erase(0, 1);
         items.emplace_back("data/gamescripts/config.txt", text);
     }
@@ -233,9 +333,10 @@ __attribute__((constructor(102))) void apply_script_patches() {
         const std::string from = utf16be("DefaultPlayerName=Player"), to = utf16be("DefaultPlayerName=" + label);
         for (const char* lang : kLanguages) {
             const std::string member = std::string("data/local/") + lang + "/symbols.txt";
-            if (online != "ON" && !label.empty() && read_member(archive, member, text) && replace_once(text, from, to)) items.emplace_back(member, text);
+            if (!label.empty() && read_member(archive, member, text) && replace_once(text, from, to)) items.emplace_back(member, text);
         }
     }
+    if (native_menu && apply_native_menu(archive, items)) std::fprintf(stderr, "[fp-menu] native PC settings pages added to the options menu\n");
     if (items.empty()) return;
 
     mkdir((dir + "/addons").c_str(), 0755);
