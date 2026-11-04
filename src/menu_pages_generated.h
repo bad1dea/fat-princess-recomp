@@ -92,6 +92,22 @@ cmd "echo fp gate"
 cmd "pcmd 0.15 menuCmd FpOnlineCheck2"
 }
 )FPM"},
+    {"data/gamescripts/menufinal/menumain.txt",
+R"FPM(set CommandGetFocus "sym set InNetMenu false"
+set CommandCancel "gameUI focusName DummyObject"
+set CommandCancel "menuCmd MenuMainCancel"
+set CommandPress "gameUI focusName DummyObject"
+set CommandPress "menuCmd FEOnlineCheck"
+)FPM",
+R"FPM(set CommandGetFocus "sym set InNetMenu false"
+set CommandGetFocus "sym set FpNeedName 0"
+set CommandGetFocus "echo fp namecheck"
+set CommandGetFocus "pcmd 0.25 menuCmd FpNameMaybe"
+set CommandCancel "gameUI focusName DummyObject"
+set CommandCancel "menuCmd MenuMainCancel"
+set CommandPress "gameUI focusName DummyObject"
+set CommandPress "menuCmd FEOnlineCheck"
+)FPM"},
     {"data/menus/menumaster.txt",
 R"FPM(MO MenuSettingsMaster {
 pos 1280 0
@@ -122,6 +138,9 @@ MO MenuFpGameplayMaster {
 pos 1280 0
 }
 MO MenuFpAdvancedMaster {
+pos 1280 0
+}
+MO MenuFpPnameMaster {
 pos 1280 0
 }
 )FPM"},
@@ -157,6 +176,9 @@ pos 1280 0
 MO MenuFpAdvancedMaster {
 pos 1280 0
 }
+MO MenuFpPnameMaster {
+pos 1280 0
+}
 )FPM"},
     {"data/menus/mpgamescoresendclient.txt",
 R"FPM(MO MenuSettingsMaster {
@@ -188,6 +210,9 @@ MO MenuFpGameplayMaster {
 pos 1280 0
 }
 MO MenuFpAdvancedMaster {
+pos 1280 0
+}
+MO MenuFpPnameMaster {
 pos 1280 0
 }
 )FPM"},
@@ -223,6 +248,9 @@ pos 1280 0
 MO MenuFpAdvancedMaster {
 pos 1280 0
 }
+MO MenuFpPnameMaster {
+pos 1280 0
+}
 )FPM"},
     {"data/menus/mpgamescoresinclient.txt",
 R"FPM(MO MenuSettingsMaster {
@@ -254,6 +282,9 @@ MO MenuFpGameplayMaster {
 pos 1280 0
 }
 MO MenuFpAdvancedMaster {
+pos 1280 0
+}
+MO MenuFpPnameMaster {
 pos 1280 0
 }
 )FPM"},
@@ -289,6 +320,9 @@ pos 1280 0
 MO MenuFpAdvancedMaster {
 pos 1280 0
 }
+MO MenuFpPnameMaster {
+pos 1280 0
+}
 )FPM"},
     {"data/menus/mpgamescorespreclient.txt",
 R"FPM(MO MenuSettingsMaster {
@@ -320,6 +354,9 @@ MO MenuFpGameplayMaster {
 pos 1280 0
 }
 MO MenuFpAdvancedMaster {
+pos 1280 0
+}
+MO MenuFpPnameMaster {
 pos 1280 0
 }
 )FPM"},
@@ -355,6 +392,9 @@ pos 1280 0
 MO MenuFpAdvancedMaster {
 pos 1280 0
 }
+MO MenuFpPnameMaster {
+pos 1280 0
+}
 )FPM"},
     {"data/menus/mpgamescoressolo.txt",
 R"FPM(MO MenuSettingsMaster {
@@ -388,10 +428,13 @@ pos 1280 0
 MO MenuFpAdvancedMaster {
 pos 1280 0
 }
+MO MenuFpPnameMaster {
+pos 1280 0
+}
 )FPM"},
 };
 static const char* const kFpMenuHideFiles[] = {"data/menus/menumaster.txt", "data/menus/mpgamescoresarena.txt", "data/menus/mpgamescoresendclient.txt", "data/menus/mpgamescoresendserver.txt", "data/menus/mpgamescoresinclient.txt", "data/menus/mpgamescoresinserver.txt", "data/menus/mpgamescorespreclient.txt", "data/menus/mpgamescorespreserver.txt", "data/menus/mpgamescoressolo.txt"};
-static const char* const kFpMenuMasters = " MenuFpHubMaster MenuFpAccountMaster MenuFpAccountInMaster MenuFpGateMaster MenuFpGraphicsMaster MenuFpAudioMaster MenuFpGameplayMaster MenuFpAdvancedMaster";
+static const char* const kFpMenuMasters = " MenuFpHubMaster MenuFpAccountMaster MenuFpAccountInMaster MenuFpGateMaster MenuFpGraphicsMaster MenuFpAudioMaster MenuFpGameplayMaster MenuFpAdvancedMaster MenuFpPnameMaster";
 static const char* const kFpMenuPagesFile = "data/gamescripts/menufinal/fprecomp.txt";
 static const char* const kFpMenuBookFile = "data/menus/menufptrophies.txt";
 static const char* const kFpMenuBookText =
@@ -1677,6 +1720,113 @@ set Child "MenuFpAdvancedSlowLogValue 437 190"
 set Child "MenuFpAdvancedOverlay 0 280"
 set Anchor Center
 add MenuObject
+set Name MenuFpPnameLabel
+set AutoSizing mainBoxes
+set Coords "576 86 416 83"
+set Texture menus\MenuTextBoxesDark
+set Layer 1
+set RenderCB _DrawUText
+set RenderCBExcludesDefaultRender 0
+set RenderCB_DX 0 RenderCB_DY 0
+set RenderCB_FontName FatPrincessBold
+set RenderCB_RGBColor "0.9 0.9 0.9"
+set RenderCB_FontScale 1.0
+set RenderCB_Offset "20 12"
+set RenderCB_Text FpPname
+set RenderCB_FloatArg 2000.0
+add MenuObject
+set Name MenuFpPnameName
+set AutoSizing mainBoxes
+set Texture menus\MenuTextBoxes
+set Coords "576 86 416 83" CoordsFocused "578 2 416 83"
+set Focus 9180 FocusDown 9181
+set Layer 2
+set RenderCB _DrawUText
+set RenderCBExcludesDefaultRender 0
+set DrawWhenFocused MenuMainArrow DrawWhenFocusedOffset "-60 0 0"
+set RenderCB_DX 0 RenderCB_DY 0
+set RenderCB_FontName FatPrincessBold
+set RenderCB_RGBColor "1.00 0.89 0.46" RenderCB_RGBColorFocused "1 1 1"
+set RenderCB_FontScale 1.0
+set RenderCB_Offset "20 12" RenderCB_OffsetFocused "18 10"
+set RenderCB_Text FpPnameName
+set RenderCB_FloatArg 2000.0
+set CommandPress "log Press_MenuFpPnameName"
+set CommandCancel "log Cancel_MenuFpPnameName"
+set CommandGetFocus "sym set MenuMemoryFpPname MenuFpPnameName"
+set CommandGetFocus "sym set MenuMemoryGlobal MenuFpPnameName"
+set CommandCancel "gameUI focusName DummyObject"
+set CommandCancel "menuCmd FpCancelPname"
+set CommandLoseFocus "playSound MenuSelect"
+set CommandPress "echo fp text name"
+set CommandPress "playSound MenuChoose"
+add MenuObject
+set Name MenuFpPnameNameValue
+set Texture menus\MenuTextBoxes
+set Coords "630 340 360 85" CoordsFocused "630 852 360 85"
+set Layer 2
+set RenderCB _DrawText
+set RenderCBExcludesDefaultRender 0
+set RenderCB_DX 0 RenderCB_DY 0
+set RenderCB_FontName FatPrincessBold
+set RenderCB_RGBColor "1.00 0.89 0.46" RenderCB_RGBColorFocused "1 1 1"
+set RenderCB_FontScale 1.0
+set RenderCB_Offset "20 12" RenderCB_OffsetFocused "18 10"
+set RenderCB_ConsoleSymbol FpV_pname
+set RenderCB_FloatArg 2000.0
+set DisabledAlpha 1.0
+add MenuObject
+set Name MenuFpPnameDone
+set AutoSizing mainBoxes
+set Texture menus\MenuTextBoxes
+set Coords "576 86 416 83" CoordsFocused "578 2 416 83"
+set Focus 9181 FocusUp 9180
+set Layer 2
+set RenderCB _DrawUText
+set RenderCBExcludesDefaultRender 0
+set DrawWhenFocused MenuMainArrow DrawWhenFocusedOffset "-60 0 0"
+set RenderCB_DX 0 RenderCB_DY 0
+set RenderCB_FontName FatPrincessBold
+set RenderCB_RGBColor "1.00 0.89 0.46" RenderCB_RGBColorFocused "1 1 1"
+set RenderCB_FontScale 1.0
+set RenderCB_Offset "20 12" RenderCB_OffsetFocused "18 10"
+set RenderCB_Text FpPnameDone
+set RenderCB_FloatArg 2000.0
+set CommandPress "log Press_MenuFpPnameDone"
+set CommandCancel "log Cancel_MenuFpPnameDone"
+set CommandGetFocus "sym set MenuMemoryFpPname MenuFpPnameDone"
+set CommandGetFocus "sym set MenuMemoryGlobal MenuFpPnameDone"
+set CommandCancel "gameUI focusName DummyObject"
+set CommandCancel "menuCmd FpCancelPname"
+set CommandLoseFocus "playSound MenuSelect"
+set CommandPress "gameUI focusName DummyObject"
+set CommandPress "menuCmd FpCancelPname"
+add MenuObject
+set Name MenuFpPnameNote
+set Texture menus\MenuTextBoxes
+set Coords "1 425 710 85" CoordsFocused "1 937 710 85"
+set Layer 2
+set RenderCB _DrawText
+set RenderCBExcludesDefaultRender 0
+set RenderCB_DX 0 RenderCB_DY 0
+set RenderCB_FontName FatPrincessBold
+set RenderCB_RGBColor "1.00 0.89 0.46" RenderCB_RGBColorFocused "1 1 1"
+set RenderCB_FontScale 1.0
+set RenderCB_Offset "20 12" RenderCB_OffsetFocused "18 10"
+set RenderCB_ConsoleSymbol FpV_acct_note
+set RenderCB_FloatArg 2000.0
+set DisabledAlpha 1.0
+add MenuObject
+set Name MenuFpPnameMaster
+set ContainerOnly 1
+set Coords "0 0 768 432"
+set Child "MenuFpPnameLabel -30 10"
+set Child "MenuFpPnameName 0 100"
+set Child "MenuFpPnameNameValue 437 100"
+set Child "MenuFpPnameDone 0 190"
+set Child "MenuFpPnameNote 0 280"
+set Anchor Center
+add MenuObject
 set Name FpTrophyBanner
 set Texture menus\Bookmark
 set Coords "0 0 690 133"
@@ -1728,7 +1878,8 @@ set CommandGetFocus "sym set MenuMemoryFpTrophy FpTrophyRow0"
 set CommandGetFocus "echo fp trophy focus 0"
 set CommandGetFocus "menuCmd FpTrophyIconShow"
 set CommandCancel "gameUI focusName DummyObject"
-set CommandCancel "menuCmd FpTrophyCancel"
+)FPM"
+R"FPM(set CommandCancel "menuCmd FpTrophyCancel"
 set CommandLoseFocus "playSound MenuSelect"
 set CommandFocusRight "echo fp trophy page 1"
 set CommandFocusRight "menuCmd BookAnimPageNext"
@@ -1833,8 +1984,7 @@ set CommandFocusRight "menuCmd BookAnimPageNext"
 set CommandFocusRight "pcmd 0.3 gameUI focusName FpTrophyRow0"
 set CommandFocusRight "playSound MenuPageTurn"
 set CommandFocusLeft "echo fp trophy page -1"
-set CommandFocusLeft "menuCmd BookAnimPageLast)FPM"
-R"FPM("
+set CommandFocusLeft "menuCmd BookAnimPageLast"
 set CommandFocusLeft "pcmd 0.3 gameUI focusName FpTrophyRow0"
 set CommandFocusLeft "playSound MenuPageTurn"
 add MenuObject
@@ -1899,7 +2049,8 @@ set RenderCB_RGBColor "0.54 0.36 0.04"
 set RenderCB_FontScale 0.5
 set RenderCB_ConsoleSymbol FpT_s3
 set RenderCB_FloatArg 2000.0
-set RenderCB_BoolArg 0
+set RenderC)FPM"
+R"FPM(B_BoolArg 0
 set RenderCB_TextJustify JustifyXRight
 set RenderCB_TextJustifyVertical JustifyYCenter
 add MenuObject
@@ -2011,8 +2162,7 @@ set RenderCB_DY 0
 set RenderCB_FontName Boopee
 set RenderCB_RGBColor "0.35 0.23 0.07"
 set RenderCB_FontScale 0.62
-set RenderCB_ConsoleS)FPM"
-R"FPM(ymbol FpT_n6
+set RenderCB_ConsoleSymbol FpT_n6
 set RenderCB_FloatArg 2000.0
 set RenderCB_BoolArg 0
 set RenderCB_TextJustify JustifyXLeft
@@ -2072,7 +2222,8 @@ set RenderCB_RGBColorFocused "0.85 0.45 0.0"
 set CommandGetFocus "sym set MenuMemoryFpTrophy FpTrophyRow7"
 set CommandGetFocus "echo fp trophy focus 7"
 set CommandGetFocus "menuCmd FpTrophyIconShow"
-set CommandCancel "gameUI focusName DummyObject"
+set)FPM"
+R"FPM( CommandCancel "gameUI focusName DummyObject"
 set CommandCancel "menuCmd FpTrophyCancel"
 set CommandLoseFocus "playSound MenuSelect"
 set CommandFocusRight "echo fp trophy page 1"
@@ -2234,8 +2385,7 @@ set DisabledAlphaTimeOut 0.05
 add MenuObject
 set Name FpTrophyIcon6
 set Texture menus\FpTrophy06
-set)FPM"
-R"FPM( Coords "0 0 128 128"
+set Coords "0 0 128 128"
 set ScaleX 0.75
 set ScaleY 0.75
 set Layer 2
@@ -2338,7 +2488,8 @@ set Coords "0 0 128 128"
 set ScaleX 0.75
 set ScaleY 0.75
 set Layer 2
-set Disabled 1
+set Disabled )FPM"
+R"FPM(1
 set DisabledAlpha 0.0
 set DisabledAlphaTimeIn 0.1
 set DisabledAlphaTimeOut 0.05
@@ -2519,8 +2670,7 @@ set DisabledAlpha 0.0
 set DisabledAlphaTimeIn 0.1
 set DisabledAlphaTimeOut 0.05
 add MenuObject
-set N)FPM"
-R"FPM(ame FpTrophyIcon19
+set Name FpTrophyIcon19
 set Texture menus\FpTrophy19
 set Coords "0 0 128 128"
 set ScaleX 0.75
@@ -2621,7 +2771,8 @@ set DisabledAlphaTimeOut 0.05
 add MenuObject
 set Name FpTrophyIconG23
 set Texture menus\FpTrophyg23
-set Coords "0 0 128 128"
+set Coords "0 0 128 128")FPM"
+R"FPM(
 set ScaleX 0.75
 set ScaleY 0.75
 set Layer 2
@@ -2780,8 +2931,7 @@ set Name FpTrophyDd1
 set Coords "0 0 350 34"
 set Layer 2
 set RenderCB _DrawText
-set Rende)FPM"
-R"FPM(rCBExcludesDefaultRender 1
+set RenderCBExcludesDefaultRender 1
 set RenderCB_DX 0
 set RenderCB_DY 0
 set RenderCB_FontName Boopee
@@ -2860,7 +3010,8 @@ add MenuObject
 set Name FpTrophyPage
 set Coords "0 0 350 36"
 set Layer 2
-set RenderCB _DrawText
+set RenderCB _Dr)FPM"
+R"FPM(awText
 set RenderCBExcludesDefaultRender 1
 set RenderCB_DX 0
 set RenderCB_DY 0
@@ -3131,6 +3282,47 @@ Script FpRegisterGo {
 cmd "log MenuCmd: FpRegisterGo"
 cmd "echo fp url register"
 }
+Script FpNameMaybe {
+cmd "log MenuCmd: FpNameMaybe"
+cmd "if sym FpNeedName == 1 menuCmd FpNameOpen"
+}
+Script FpNameOpen {
+cmd "log MenuCmd: FpNameOpen"
+cmd "gameUI focusName DummyObject"
+cmd "sym set FpNeedName 0"
+cmd "sym set FpPnameReturn main"
+cmd "sym set FpPnameOpen 1"
+cmd "sym set MenuToHide MenuMainMaster"
+cmd "sym set MenuToShow MenuFpPnameMaster"
+cmd "addUIAnim $$MenuToHide mas_MenuLeft"
+cmd "addUIAnim $$MenuToShow mas_MenuCenter"
+cmd "addUIAnim $MenuBackgroundObject mas_BackBarLeft"
+cmd "menuCmd MenuBackgroundSize3"
+cmd "echo fp sync pname"
+cmd "pcmd 0.2 gameUI focusName MenuFpPnameName"
+cmd "pcmd 0.5 menuCmd FpPnamePoll"
+cmd "playSound MenuChoose"
+}
+Script FpPnamePoll {
+cmd "log MenuCmd: FpPnamePoll"
+cmd "echo fp sync pname"
+cmd "if sym FpPnameOpen == 1 pcmd 0.5 menuCmd FpPnamePoll"
+}
+Script FpCancelPname {
+cmd "log MenuCmd: FpCancelPname"
+cmd "echo fp pname done"
+cmd "sym set FpPnameOpen 0"
+cmd "sym set MenuToHide MenuFpPnameMaster"
+cmd "if sym FpPnameReturn == main runNow sym set MenuToShow MenuMainMaster"
+cmd "if sym FpPnameReturn != main runNow sym set MenuToShow MenuFpHubMaster"
+cmd "addUIAnim $$MenuToShow mas_MenuCenter"
+cmd "addUIAnim $$MenuToHide mas_MenuRight"
+cmd "if sym FpPnameReturn == main menuCmd MenuBackgroundSize4"
+cmd "if sym FpPnameReturn != main menuCmd MenuBackgroundSize5"
+cmd "if sym FpPnameReturn == main pcmd 0.2 gameUI focusName MenuMainOnline"
+cmd "if sym FpPnameReturn != main pcmd 0.2 gameUI focusName MenuFpHubAccount"
+cmd "addUIAnim $MenuBackgroundObject mas_BackBarRight"
+}
 Script FpTrophyOpen {
 cmd "log MenuCmd: FpTrophyOpen"
 cmd "gameUI focusName DummyObject"
@@ -3295,4 +3487,7 @@ FpAiHazard=AI Hazard Avoidance
 FpFpsPanel=FPS Panel
 FpSlowLog=Slow Op Log
 FpOverlay=Developer Overlay
+FpPname=Player Name
+FpPnameName=Name
+FpPnameDone=Done
 )FPM";

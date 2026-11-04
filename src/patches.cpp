@@ -3,7 +3,11 @@
 // siege.qrk. Same edits as tools/make_cheat_patch.py.
 #include "settings.h"
 #include "trophy_icons.h"
-#include "menu_pages_generated.h"
+#ifdef FP_DEBUG_MENU
+#include "menu_pages_generated.h"   // dev and diagnostic builds: the hub keeps the Advanced page
+#else
+#include "menu_pages_release.h"     // release builds: no Advanced page, Player Name in its place (FP_MENU_FLAVOR=release)
+#endif
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>

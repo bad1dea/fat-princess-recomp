@@ -193,6 +193,7 @@ void init_items() {
 #define FP_DEFAULT_JOIN_URL ""   // builds may set the sign-up page (-DFP_DEFAULT_JOIN_URL=https://...)
 #endif
     add("", "join_url", "", Kind::Text, FP_DEFAULT_JOIN_URL);   // where Register in the game menu sends the browser
+    add("", "name_chosen", "", Kind::Text, "");   // set once the player has seen the Player Name page
     add("", "account_user", "", Kind::Text, "");
     add("", "account_token", "", Kind::Text, "");
     add("ACCOUNT", "acct_status", "STATUS", Kind::Command, "");
@@ -1247,7 +1248,14 @@ void osk_finish(bool canceled) {
     g_fp_pad_blocked = is_open ? 1 : 0;
     dirty = true;
     if (!osk.target.empty()) {   // text for one of our own items (the native account page), not for the guest
-        if (!canceled) if (Item* item = find(osk.target.c_str())) item->value = osk.text;
+        if (!canceled) if (Item* item = find(osk.target.c_str())) {
+            if (osk.target == "name") {   // the player name: 3 to 16 letters, digits, - or _, starting with a letter
+                std::string n;
+                for (char c : osk.text) if (std::isalnum((unsigned char)c) || c == '-' || c == '_') n += c;
+                if (n.size() < 3 || n.size() > 16 || !std::isalpha((unsigned char)n[0])) notice = "3-16 LETTERS OR DIGITS, START WITH A LETTER";
+                else { item->value = n; find("name_chosen")->value = "1"; notice = "SAVED. THE GAME USES IT FROM THE NEXT START"; save(); }
+            } else item->value = osk.text;
+        }
         osk.target.clear();
         return;
     }
@@ -1699,7 +1707,7 @@ bool settings_text_entry(const char* id) {
     if (osk.active || osk.requested) return false;
     osk.prompt = i->kind == Kind::Secret ? std::string("PASSWORD") : std::string(i->label && *i->label ? i->label : i->id);
     osk.text = i->kind == Kind::Secret ? std::string() : i->value;
-    osk.limit = i->kind == Kind::Secret ? 64 : std::string(id) == "tmp_email" ? 120 : std::string(id) == "tmp_name" ? 16 : 64;
+    osk.limit = i->kind == Kind::Secret ? 64 : std::string(id) == "tmp_email" ? 120 : (std::string(id) == "tmp_name" || std::string(id) == "name") ? 16 : 64;
     if (osk.text.size() > osk.limit) osk.text.resize(osk.limit);
     osk.target = id;
     osk.requested = true;
@@ -1720,6 +1728,8 @@ bool settings_command(const char* id) {
     return true;
 }
 std::string settings_account() { init_items(); return account_name(); }
+bool settings_name_needed() { init_items(); return account_name().empty() && find("name_chosen")->value.empty(); }
+void settings_name_done() { init_items(); if (find("name_chosen")->value.empty()) { find("name_chosen")->value = "1"; save(); } }
 std::string settings_notice() { return notice; }
 bool settings_busy() { return network_busy(); }
 bool settings_open_url(const char* id, const std::string& query) {
