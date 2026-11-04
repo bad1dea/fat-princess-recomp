@@ -109,7 +109,46 @@ bool make_link(const fs::path& target, const fs::path& link) {   // directory li
 }
 }  // namespace
 
+namespace { std::vector<std::string> g_restart_args; }
+
+// Starts the game again with the same arguments and environment (a new player name is only read at start-up) and ends this one.
+extern "C" void fp_restart_game(void) {
+    std::fflush(nullptr);
+#ifdef _WIN32
+    STARTUPINFOW si = {sizeof si};
+    PROCESS_INFORMATION pi = {};
+    std::wstring command;   // the saved arguments, quoted: the first start adds the executable path itself
+    for (const auto& a : g_restart_args) {
+        const int n = MultiByteToWideChar(CP_UTF8, 0, a.c_str(), -1, nullptr, 0);
+        std::wstring w(n > 0 ? n - 1 : 0, L'\0');
+        if (n > 1) MultiByteToWideChar(CP_UTF8, 0, a.c_str(), -1, w.data(), n);
+        command += (command.empty() ? L"\"" : L" \"") + w + L"\"";
+    }
+    if (!command.empty() && CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) {
+        CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
+        ExitProcess(0);
+    }
+#else
+    std::vector<char*> args;
+    for (auto& a : g_restart_args) args.push_back(a.data());
+    args.push_back(nullptr);
+    if (!args.empty() && args[0]) {
+#ifdef __APPLE__
+        char buffer[4096];
+        uint32_t size = sizeof buffer;
+        const std::string exe = _NSGetExecutablePath(buffer, &size) == 0 ? buffer : std::string(args[0]);
+#else
+        std::error_code ec;
+        const std::string exe = fs::read_symlink("/proc/self/exe", ec).string();
+#endif
+        if (!exe.empty()) execv(exe.c_str(), args.data());
+    }
+#endif
+    // Could not start again: leave the game as it is; the name applies at the next start.
+}
+
 extern "C" void fp_desktop_prepare(int* argc, char*** argv) {
+    for (int i = 0; i < *argc; ++i) g_restart_args.push_back((*argv)[i]);
     if (std::getenv("PS3_VFS_ROOT")) return;   // started by a script or a test tool
     const fs::path dir = program_dir();
     std::error_code ec;
@@ -164,5 +203,6 @@ extern "C" void fp_desktop_prepare(int* argc, char*** argv) {
         static char* args[3] = {(*argv)[0], elf.data(), nullptr};
         *argc = 2;
         *argv = args;
+        g_restart_args = {args[0], elf};
     }
 }

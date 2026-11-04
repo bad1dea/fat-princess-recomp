@@ -137,7 +137,7 @@ void queue_account() {
     queue_text("FpV_acct_note", note);
     const int now = who.empty() ? 0 : 1;
     g_replies.push_back(std::string("sym set FpAcctIn ") + (now ? "1" : "0"));
-    if (g_poll_signed == 0 && now == 1) g_replies.push_back("sym set FpAcctGo 1");
+    if (g_poll_signed == 0 && now == 1 && !settings_restart_planned()) g_replies.push_back("sym set FpAcctGo 1");   // a restart is coming: do not carry on to the online menu
     g_poll_signed = now;
     g_was_busy = busy;
 }

@@ -500,6 +500,24 @@ std::string error_text(int code) {
 
 std::string account_name() { Item* i = find("account_user"); return i ? i->value : std::string(); }
 
+// The game reads its player name once, at start-up. When the name changes (a sign-in, or a name chosen on the Player Name
+// page) the game restarts itself after a few seconds, with the reason on the page's note line.
+std::string startup_name;        // the online name this run started with
+long long restart_at_ms = 0;     // when to restart; 0: not planned
+long long steady_ms() { return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
+bool test_run() { if (std::getenv("FP_RESTART_TEST")) return false; return std::getenv("FP_ACCOUNT_AUTO") || std::getenv("FP_CMD_FILE") || std::getenv("FP_SET_FILE"); }   // test tools keep their own process
+void restart_if_name_changed(const std::string& new_name) {
+    if (startup_name.empty() || new_name == startup_name || test_run() || restart_at_ms) return;
+    restart_at_ms = steady_ms() + 3500;
+#if defined(__APPLE__) && TARGET_OS_IOS
+    notice = "CLOSING. OPEN THE GAME AGAIN";   // an iPhone app cannot start itself again
+#else
+    notice = "RESTARTING TO USE YOUR NAME...";
+#endif
+    dirty = true;
+}
+bool restart_planned() { return restart_at_ms != 0; }
+
 std::string status_text() {
     const std::string n = account_name();
     return n.empty() ? "NOT SIGNED IN" : "SIGNED IN AS " + n;
@@ -508,7 +526,8 @@ std::string status_text() {
 // The token replaces the password in the ini; the name becomes the online name from the next launch on.
 void signed_in(const std::string& name, const std::string& token) {
     find("account_user")->value = name;
-    find("name")->value = name;   // the player name follows the account (the game reads it at its next start)
+    find("name")->value = name;
+    restart_if_name_changed(name);   // the player name follows the account (the game reads it at its next start)
     find("account_token")->value = token;
     find("tmp_pw")->value.clear();
     find("tmp_newpw")->value.clear();
@@ -585,7 +604,7 @@ void account_command(const std::string& id) {
         const std::string account=canonical, credential=token;
         return [=] {
             signed_in(account,credential);
-            notice=id=="cmd_changepw"?"PASSWORD CHANGED":"SIGNED IN AS "+account+". RESTART TO PLAY AS THIS NAME";
+            if(!restart_planned()) notice=id=="cmd_changepw"?"PASSWORD CHANGED":"SIGNED IN AS "+account;
         };
     });
 }
@@ -692,6 +711,7 @@ void export_environment() {
         // A signed-in account's name is the online name; the server refuses a hello whose name is not the account's.
         const bool account=!account_name().empty() && !find("account_token")->value.empty();
         set("PS3_NP_ONLINE_ID", account ? account_name() : find("name")->value);
+        startup_name = account ? account_name() : find("name")->value;
         set("PS3_NP_COMM_ID", "NPWR00737_00");   // the game asks for its friends before Matching2 starts
         set("PS3_NET_P2P_PORT", find("p2p_port")->value);
     }
@@ -1253,7 +1273,7 @@ void osk_finish(bool canceled) {
                 std::string n;
                 for (char c : osk.text) if (std::isalnum((unsigned char)c) || c == '-' || c == '_') n += c;
                 if (n.size() < 3 || n.size() > 16 || !std::isalpha((unsigned char)n[0])) notice = "3-16 LETTERS OR DIGITS, START WITH A LETTER";
-                else { item->value = n; find("name_chosen")->value = "1"; notice = "SAVED. THE GAME USES IT FROM THE NEXT START"; save(); }
+                else { item->value = n; find("name_chosen")->value = "1"; notice = "SAVED"; save(); restart_if_name_changed(n); }
             } else item->value = osk.text;
         }
         osk.target.clear();
@@ -1728,6 +1748,7 @@ bool settings_command(const char* id) {
     return true;
 }
 std::string settings_account() { init_items(); return account_name(); }
+bool settings_restart_planned() { return restart_planned(); }
 bool settings_name_needed() { init_items(); return account_name().empty() && find("name_chosen")->value.empty(); }
 void settings_name_done() { init_items(); if (find("name_chosen")->value.empty()) { find("name_chosen")->value = "1"; save(); } }
 std::string settings_notice() { return notice; }
@@ -1757,7 +1778,9 @@ void settings_stats_set(bool value) {
     if (Item* i = find("stats")) { i->value = value ? "COMPACT" : "OFF"; save(); dirty = true; }
 }
 
+extern "C" void fp_restart_game(void);
 bool settings_menu_frame(std::string& panel) {
+    if (restart_at_ms && steady_ms() >= restart_at_ms) { save(); fp_restart_game(); restart_at_ms = 0; }
     network_poll();
     static bool open_from_env = std::getenv("FP_SETTINGS_OPEN") != nullptr;
     if (open_from_env) { open_from_env = false; if (!is_open) settings_menu_toggle(); }

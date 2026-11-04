@@ -257,3 +257,6 @@ extern "C" void fp_ios_prepare(int* argc, char*** argv) {
     }
 }
 #endif
+
+// A new player name is read at start-up and an iPhone app cannot start itself again: the settings page says so, then the app closes.
+extern "C" void fp_restart_game(void) { std::fflush(nullptr); std::exit(0); }
