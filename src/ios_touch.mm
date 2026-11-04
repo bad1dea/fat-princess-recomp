@@ -55,9 +55,11 @@ static bool g_forced_visible;
         {FP_TOUCH_CROSS, @"✕"}, {FP_TOUCH_CIRCLE, @"○"}, {FP_TOUCH_SQUARE, @"□"}, {FP_TOUCH_TRIANGLE, @"△"},
         {FP_TOUCH_L1, @"L1"}, {FP_TOUCH_R1, @"R1"}, {FP_TOUCH_L2, @"L2"}, {FP_TOUCH_R2, @"R2"},
         {FP_TOUCH_SELECT, @"SELECT"}, {FP_TOUCH_START, @"START"}, {FP_TOUCH_L3, @"L3"}, {FP_TOUCH_R3, @"R3"},
-        {FP_TOUCH_MENU, @"☰"},
+#ifdef FP_DEBUG_MENU
+        {FP_TOUCH_MENU, @"☰"},   // the developer settings overlay: dev and diagnostic builds only
+#endif
     };
-    _count = 13;
+    _count = (int)(sizeof defs / sizeof defs[0]);
     for (int i = 0; i < _count; i++) {
         _buttons[i].bit = defs[i].bit;
         _buttons[i].label = defs[i].label;
@@ -125,7 +127,9 @@ static bool g_forced_visible;
     [self place:9 at:CGPointMake(CGRectGetMidX(b) + 1.6 * u, minY + 1.0 * u) radius:r * 0.7];   // start
     [self place:10 at:CGPointMake(minX + 6.0 * u, maxY - 1.0 * u) radius:r * 0.6];  // L3
     [self place:11 at:CGPointMake(maxX - 6.6 * u, maxY - 1.0 * u) radius:r * 0.6]; // R3
+#ifdef FP_DEBUG_MENU
     [self place:12 at:CGPointMake(CGRectGetMidX(b), minY + 1.0 * u) radius:r * 0.6];      // settings menu
+#endif
     _sticks[0].home = CGPointMake(minX + 3.4 * u, maxY - 3.0 * u);
     _sticks[1].home = CGPointMake(maxX - 8.4 * u, maxY - 3.0 * u);
     for (int i = 0; i < 2; ++i)

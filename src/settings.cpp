@@ -1812,6 +1812,9 @@ bool settings_menu_frame(std::string& panel) {
     const bool touch_menu=fp_touch_take_menu();
     if(touch_menu) {controller_hints=true;dirty=true;}
     toggle = touch_menu || toggle;
+#ifndef FP_DEBUG_MENU
+    toggle = false;   // no developer overlay on the phone outside dev and diagnostic builds
+#endif
 #endif
     combo_prev = combo;
     if (toggle) settings_menu_toggle();
