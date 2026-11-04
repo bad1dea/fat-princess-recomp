@@ -1,0 +1,22 @@
+--- a/libs/video/rsx_vulkan_backend.c	2026-11-02 22:29:56.838379284 -0500
++++ b/libs/video/rsx_vulkan_backend.c	2026-11-02 22:29:56.827564970 -0500
+@@ -4899,6 +4899,8 @@
+         if (P->cube_mask && !vk_eng_dummy_cube_view()) return;
+         /* The set's slot buffers are written below, so its previous use must be finished. */
+         if (!s_batch_recording && vk_async_enabled() && vk_set_wait(s_cur_set, "set_acquire")) return;
++        /* RSX_BISECT 1024: drain every set before the first draw of each batch. */
++        if ((bisect & 1024) && s_batch_count == 0 && vk_flush_at("bisect-start")) return;
+         slot_index = s_batch_count;
+         slot = &s_draw_slot[s_cur_set * VK_DRAW_BATCH_SIZE + slot_index];
+         if (vk_draw_slot_prepare(slot, v_pooled?0:vbytes, i_pooled?0:ibytes)) return;
+@@ -5003,6 +5005,10 @@
+     s_batch_draw = 0;
+     if (slot) s_batch_count = slot_index + 1;
+     if((bisect&4) && vk_flush_at("bisect")) return;
++    /* RSX_BISECT 2048: wait after small draws (64 vertices or fewer, the 2D sprites); 4096: after larger ones. */
++    if(((bisect&2048) && vertex_count<=64) || ((bisect&4096) && vertex_count>64)) {
++        if (vk_flush_at("bisect-size")) return;
++    }
+     if(bisect&512) {   /* RSX_BISECT 512: wait for the GPU only after draws that sample a render target */
+         int rt=0;
+         for (u32 u = 0; u < RSX_MAX_TEXTURES; u++)

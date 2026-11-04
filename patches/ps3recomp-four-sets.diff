@@ -1,0 +1,12 @@
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -537,7 +537,7 @@
+  * first submits what is pending and waits for every set, so those keep their synchronous
+  * behaviour. Each new draw batch starts with a global memory barrier standing in for the
+  * fence wait that used to separate batches. */
+-#define VK_ASYNC_SETS 3
++#define VK_ASYNC_SETS 4   /* was 3: in big fights the draw thread waited 8-10 ms on the oldest set's fence 5-8 times a frame */
+ static VkCommandBuffer s_set_cmd[VK_ASYNC_SETS];
+ static VkFence s_set_fence[VK_ASYNC_SETS];
+ static int s_set_inflight[VK_ASYNC_SETS];

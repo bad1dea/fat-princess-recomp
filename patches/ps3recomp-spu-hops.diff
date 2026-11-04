@@ -1,0 +1,135 @@
+diff --git a/libs/video/cellGcmSys.c b/libs/video/cellGcmSys.c
+index ff9f1c2..b225ed0 100644
+--- a/libs/video/cellGcmSys.c
++++ b/libs/video/cellGcmSys.c
+@@ -505,7 +505,8 @@ s32 cellGcmInit(u32 cmdSize, u32 ioSize, u32 ioAddress)
+       void gcm_note_spu_put(u32 ea, u32 size);       /* defined with the walker */
+       void gcm_forget_spu_blocks(void);
+       gcm_forget_spu_blocks();
+-      g_spu_put_hook = gcm_note_spu_put; }
++      /* Only titles that build the stream on an SPU need this; every audio and physics PUT would otherwise scan the IO mapping table. */
++      if (getenv("PS3_GCM_SPU_BLOCKS")) g_spu_put_hook = gcm_note_spu_put; }
+ 
+     s_gcm_initialized = 1;
+     return CELL_OK;
+diff --git a/runtime/spu/spu_context.h b/runtime/spu/spu_context.h
+index 8b0ac0b..4a7adc4 100644
+--- a/runtime/spu/spu_context.h
++++ b/runtime/spu/spu_context.h
+@@ -793,6 +793,7 @@ extern SPU_THREAD_LOCAL void (*g_spu_trampoline_fn)(spu_context*);
+  * trampoline hop, which is the one that actually precedes a bad branch. */
+ extern SPU_THREAD_LOCAL uint32_t g_spu_pch[8];
+ extern SPU_THREAD_LOCAL unsigned g_spu_pch_n;
++extern int g_spu_hop_hist;   /* SPU_HOPHIST=1: keep the per-thread history of recent hops (post-mortem aid; off costs nothing) */
+ 
+ /* Central per-transfer hooks (stubbed in spu_drain.c until their milestones). */
+ void yz_lockstep_tick(spu_context* ctx);             /* round-robin token gate */
+@@ -892,6 +893,7 @@ static inline void spu_pchist_tick(const spu_context* ctx)
+                 ((ctx)->event_status & (ctx)->event_mask))      \
+                 _tf = spu_take_interrupt((ctx), _tf);          \
+             spu_pchist_tick(ctx);                              \
++            if (__builtin_expect(g_spu_hop_hist, 0))           \
+             g_spu_pch[g_spu_pch_n++ & 7u] =                    \
+                 (uint32_t)((ctx)->pc & SPU_LS_MASK);           \
+             _tf(ctx);                                          \
+diff --git a/runtime/spu/spu_drain.c b/runtime/spu/spu_drain.c
+index 931d3b3..61021f4 100644
+--- a/runtime/spu/spu_drain.c
++++ b/runtime/spu/spu_drain.c
+@@ -20,6 +20,7 @@ typedef struct spu_irq_frame {
+ SPU_THREAD_LOCAL void (*g_spu_trampoline_fn)(spu_context*) = 0;
+ SPU_THREAD_LOCAL uint32_t g_spu_pch[8];
+ SPU_THREAD_LOCAL unsigned g_spu_pch_n;
++int g_spu_hop_hist = -1;   /* resolved at the first hop */
+ 
+ /* yz_lockstep_tick now has its real body in spu_lockstep.c (milestone 2). */
+ 
+@@ -46,20 +47,21 @@ void* volatile    g_pm_flow_ctx = 0;
+  * set the done bit on the pending records -- the faithful sync equivalent of
+  * the completion interrupt. Env SPU_JOBDRAIN (default off while validating). */
+ extern void spu_halt(spu_context*);
+-/* Last 32 drain steps on this host thread (pc), for post-mortems of a run that
+- * ended where it should not have (spurs_policy.c, [pm-end]). */
+-static _Thread_local uint32_t t_recent[32];
+-static _Thread_local uint32_t t_recent_n;
+-unsigned spu_recent_pcs(uint32_t* out, unsigned max)
+-{
+-    unsigned n = t_recent_n < 32 ? t_recent_n : 32, k = n < max ? n : max;
+-    for (unsigned i = 0; i < k; i++) out[i] = t_recent[(t_recent_n - k + i) & 31];
+-    return k;
+-}
+-
++/* Last 32 drain steps on this host thread (pc), for post-mortems of a run that
++ * ended where it should not have (spurs_policy.c, [pm-end]). */
++static _Thread_local uint32_t t_recent[32];
++static _Thread_local uint32_t t_recent_n;
++unsigned spu_recent_pcs(uint32_t* out, unsigned max)
++{
++    unsigned n = t_recent_n < 32 ? t_recent_n : 32, k = n < max ? n : max;
++    for (unsigned i = 0; i < k; i++) out[i] = t_recent[(t_recent_n - k + i) & 31];
++    return k;
++}
++
+ void spu_task_launch_check(spu_context* ctx, void* fn)
+ {
+-    t_recent[t_recent_n++ & 31] = (uint32_t)ctx->pc & SPU_LS_MASK;
++    if (__builtin_expect(g_spu_hop_hist < 0, 0)) g_spu_hop_hist = getenv("SPU_HOPHIST") ? 1 : 0;
++    if (__builtin_expect(g_spu_hop_hist, 0)) t_recent[t_recent_n++ & 31] = (uint32_t)ctx->pc & SPU_LS_MASK;
+     extern void spu_check_stack_reset(spu_context*, void (*)(spu_context*));
+     spu_check_stack_reset(ctx, (void (*)(spu_context*))fn);
+     /* A SPURS job returning to LS 0 is finished -- its crt tail-jumps to the
+@@ -223,9 +225,9 @@ unsigned spu_sn_defer_ticks(void)
+  * until iret). */
+ static void spu_irq_regs_save(spu_context* ctx)
+ {
+-    ctx->irq_saved = 1;
+-    ctx->irq_resume_pc = ctx->srr0;
+-    memcpy(ctx->irq_gpr, ctx->gpr, sizeof ctx->irq_gpr);
++    ctx->irq_saved = 1;
++    ctx->irq_resume_pc = ctx->srr0;
++    memcpy(ctx->irq_gpr, ctx->gpr, sizeof ctx->irq_gpr);
+ }
+ 
+ /* Called from spu_indirect_branch on every dispatch. Restores + clears when
+@@ -236,17 +238,17 @@ static void spu_irq_regs_save(spu_context* ctx)
+  * context's registers wholesale. A fresh run must never do that. */
+ void spu_irq_regs_forget(spu_context* ctx)
+ {
+-    ctx->irq_saved = 0;
++    ctx->irq_saved = 0;
+ }
+ 
+ int spu_irq_regs_maybe_restore(spu_context* ctx)
+ {
+-    {
+-        if (ctx->irq_saved) {
+-            if ((ctx->pc & SPU_LS_MASK) == (ctx->irq_resume_pc & SPU_LS_MASK) &&
++    {
++        if (ctx->irq_saved) {
++            if ((ctx->pc & SPU_LS_MASK) == (ctx->irq_resume_pc & SPU_LS_MASK) &&
+                 ctx->int_enable) {
+-                memcpy(ctx->gpr, ctx->irq_gpr, sizeof ctx->irq_gpr);
+-                ctx->irq_saved = 0;
++                memcpy(ctx->gpr, ctx->irq_gpr, sizeof ctx->irq_gpr);
++                ctx->irq_saved = 0;
+                 /* The iret completed below the frame that took the interrupt:
+                  * abandon the handler's host frames and resume there. */
+                 spu_irq_frame* f = (spu_irq_frame*)ctx->irq_frame;
+@@ -404,7 +406,7 @@ void spu_drain_call(spu_context* ctx, uint32_t return_pc)
+      * loop exits, whichever first. */
+     spu_irq_frame f;
+     f.prev = 0; f.depth = 0; f.image_id = 0;
+-#define SPU_DRAIN_POP_IRQ() do { if (ctx->irq_frame == &f) ctx->irq_frame = f.prev; ctx->drain_ret_pc = 0; } while (0)
++#define SPU_DRAIN_POP_IRQ() do { if (ctx->irq_frame == &f) ctx->irq_frame = f.prev; ctx->drain_ret_pc = 0; } while (0)
+     for (;;) {
+         while (g_spu_trampoline_fn) {
+             if (g_spu_trampoline_fn == spu_indirect_branch &&
+@@ -415,7 +417,7 @@ void spu_drain_call(spu_context* ctx, uint32_t return_pc)
+             }
+             void (*fn)(spu_context*) = g_spu_trampoline_fn;
+             g_spu_trampoline_fn = 0;
+-            ctx->drain_ret_pc = return_pc & SPU_LS_MASK;   /* re-set: a nested drain changed it */
++            ctx->drain_ret_pc = return_pc & SPU_LS_MASK;   /* re-set: a nested drain changed it */
+             yz_lockstep_tick(ctx);
+             spu_task_launch_check(ctx, (void*)fn);
+             if (ctx->int_enable && (ctx->event_status & ctx->event_mask)) {

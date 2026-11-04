@@ -1,0 +1,64 @@
+--- a/libs/video/rsx_vulkan_backend.c	2026-11-02 23:27:19.720071565 -0500
++++ b/libs/video/rsx_vulkan_backend.c	2026-11-02 23:27:19.710574446 -0500
+@@ -4185,6 +4185,31 @@
+     return mask;
+ }
+ 
++/* RSX_BISECT 16384: give every 2D fragment program one binding per texture unit (the cube-map layout) instead of the
++ * rsx_tex[16] array, to test MoltenVK's array handling with argument buffers off. Returns a heap copy or NULL. */
++static char* vk_bisect_split_ps(const char* ps)
++{
++    static const char decl[] = "Texture2D    rsx_tex[16] : register(t0);\n";
++    const char* d = strstr(ps, decl);
++    if (!d) return NULL;
++    char* out = malloc(strlen(ps) + 2048);
++    if (!out) return NULL;
++    char* o = out;
++    memcpy(o, ps, (size_t)(d - ps)); o += d - ps;
++    for (u32 u = 0; u < 16; u++) o += sprintf(o, "Texture2D   rsx_tex%u : register(t%u);\n", u, u);
++    const char* r = d + sizeof decl - 1;
++    while (*r) {
++        if (!strncmp(r, "rsx_tex[", 8)) {
++            const char* q = r + 8; unsigned n = 0, digits = 0;
++            while (*q >= '0' && *q <= '9') { n = n * 10 + (unsigned)(*q - '0'); q++; digits++; }
++            if (digits && *q == ']') { o += sprintf(o, "rsx_tex%u", n); r = q + 1; continue; }
++        }
++        *o++ = *r++;
++    }
++    *o = 0;
++    return out;
++}
++
+ static u32 vk_eng_pipeline_create(void* user, const char* vs_hlsl, const char* ps_hlsl,
+                                   const rsx_be_render_state* rs, const rsx_vertex_layout_plan* layout,
+                                   u32 vertex_stride, rsx_be_format rt_fmt, u32 rt_count)
+@@ -4206,7 +4231,11 @@
+     vk_eng_pipe* P = &s_epipe[slot];
+     memset(P, 0, sizeof *P);
+     if (vk_eng_translate(vs_hlsl, RSX_SHADER_STAGE_VERTEX, &P->vs)) return 0;
+-    if (vk_eng_translate(ps_hlsl, RSX_SHADER_STAGE_FRAGMENT, &P->fs)) {
++    char* split_ps = (vk_bisect() & 16384) && !vk_eng_cube_units(ps_hlsl) ? vk_bisect_split_ps(ps_hlsl) : NULL;
++    const int tr = vk_eng_translate(split_ps ? split_ps : ps_hlsl, RSX_SHADER_STAGE_FRAGMENT, &P->fs);
++    const int forced_split = split_ps != NULL;
++    free(split_ps);
++    if (tr) {
+         pvkDestroyShaderModule(s_vk.device, P->vs, NULL); memset(P, 0, sizeof *P); return 0;
+     }
+     P->rs = *rs;
+@@ -4215,6 +4244,7 @@
+     P->rt_count = rt_count;
+     P->rt_fmt = cf;
+     P->cube_mask = vk_eng_cube_units(ps_hlsl);
++    if (forced_split) P->cube_mask = 0x80000000u;   /* no real cube unit: only selects the split layout */
+     P->vs_hlsl = strdup(vs_hlsl);
+     P->used = 1;
+     return slot + 1u;
+@@ -4754,7 +4784,7 @@
+ /* RSX_BISECT (diagnostic, default 0): 1 copy pooled geometry into the slot
+  * buffers, 2 one sampler for every unit, 4 wait for the GPU after each draw,
+  * 8 dummy texture on every unit, 16 magenta instead of 2D lookups (decompiler),
+- * 8192 identity view swizzle, 256 barrier the sampled render targets and all memory before each pass; 32 no border wrap, 64 no LOD range, 128 nearest mip filter (sampler creation). */
++ * 16384 one texture binding per unit (the cube layout) for 2D programs, 8192 identity view swizzle, 256 barrier the sampled render targets and all memory before each pass; 32 no border wrap, 64 no LOD range, 128 nearest mip filter (sampler creation). */
+ static int vk_bisect(void)
+ {
+     static int v=-1;

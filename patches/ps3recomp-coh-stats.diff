@@ -1,0 +1,87 @@
+diff --git a/runtime/spu/spu_coherency.c b/runtime/spu/spu_coherency.c
+--- a/runtime/spu/spu_coherency.c
++++ b/runtime/spu/spu_coherency.c
+@@ -30,6 +30,17 @@
+  * intrinsic (no runtime library symbol needed); elsewhere use the C11
+  * equivalent, which lowers to the same LL/SC or lock-xchg on every target.
+  * ===========================================================================*/
++/* Counters for [coh-stats]: PPU stores that took the lock, lock requests that found it held, and how long they waited. */
++unsigned long long g_coh_slow_stores, g_coh_lock_acq, g_coh_lock_contended, g_coh_lock_wait_ns, g_coh_lock_wait_max_ns;
++void spu_coh_stats_print(void)
++{
++    static unsigned long long l_slow, l_acq, l_con, l_wait;
++    const unsigned long long slow = g_coh_slow_stores, acq = g_coh_lock_acq, con = g_coh_lock_contended, wait = g_coh_lock_wait_ns;
++    fprintf(stderr, "[coh-stats] ppu_slow_stores=%llu lock_acquires=%llu contended=%llu wait_ms=%.2f wait_max_ms=%.2f\n",
++            slow - l_slow, acq - l_acq, con - l_con, (double)(wait - l_wait) / 1.0e6, (double)g_coh_lock_wait_max_ns / 1.0e6);
++    l_slow = slow; l_acq = acq; l_con = con; l_wait = wait; g_coh_lock_wait_max_ns = 0;
++}
++
+ #if defined(_MSC_VER)
+ #include <intrin.h>
+ #include <windows.h>   /* SwitchToThread */
+@@ -62,15 +73,34 @@
+  * line on a Steam Deck while the holder could not get a core; with the audio task at real-time priority it never
+  * did, and rtkit's RLIMIT_RTTIME killed the process (SIGXCPU). */
+ static atomic_int g_lockline = 0;
++/* Counters for [coh-stats] (spu_coh_stats_print): how often PPU stores took the lock, how often a lock request found it held,
++ * and how long those requests waited. Only the contended path pays for a clock read. */
++#include <time.h>
++static inline unsigned long long spu__now_ns(void)
++{
++    struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
++    return (unsigned long long)ts.tv_sec * 1000000000ull + (unsigned long long)ts.tv_nsec;
++}
+ void spu_lockline_lock(void)
+ {
+     unsigned spins = 0;
+-    while (atomic_exchange_explicit(&g_lockline, 1, memory_order_acquire)) {
++    __atomic_fetch_add(&g_coh_lock_acq, 1, __ATOMIC_RELAXED);
++    if (!atomic_exchange_explicit(&g_lockline, 1, memory_order_acquire)) return;
++    const unsigned long long t0 = spu__now_ns();
++    do {
+         do {
++#if defined(__aarch64__)
++            __asm__ __volatile__("yield");
++#else
+             SPU_LL_PAUSE();
++#endif
+             if (++spins >= 4096) { spins = 0; sched_yield(); }
+         } while (atomic_load_explicit(&g_lockline, memory_order_relaxed));
+-    }
++    } while (atomic_exchange_explicit(&g_lockline, 1, memory_order_acquire));
++    const unsigned long long w = spu__now_ns() - t0;
++    __atomic_fetch_add(&g_coh_lock_contended, 1, __ATOMIC_RELAXED);
++    __atomic_fetch_add(&g_coh_lock_wait_ns, w, __ATOMIC_RELAXED);
++    if (w > g_coh_lock_wait_max_ns) g_coh_lock_wait_max_ns = w;
+ }
+ void spu_lockline_unlock(void) { atomic_store_explicit(&g_lockline, 0, memory_order_release); }
+ #endif
+diff --git a/runtime/ppu/ppu_loader.cpp b/runtime/ppu/ppu_loader.cpp
+--- a/runtime/ppu/ppu_loader.cpp
++++ b/runtime/ppu/ppu_loader.cpp
+@@ -1455,10 +1455,12 @@
+ /* Every guest store commits through this: on a line no SPU has reserved (all of
+  * them, until SPU code runs) it is the plain memcpy it replaced. */
+ extern "C" unsigned char s_coh_bitmap[]; extern "C" int s_coh_armed;
++extern "C" unsigned long long g_coh_slow_stores;
+ #define VM_WRITE_COH(a, src, n)                                               \
+     do {                                                                      \
+         if (__builtin_expect(s_coh_armed, 1) &&                               \
+             ((s_coh_bitmap[(uint32_t)(a) >> 10] >> (((uint32_t)(a) >> 7) & 7)) & 1u)) { \
++            __atomic_fetch_add(&g_coh_slow_stores, 1, __ATOMIC_RELAXED);      \
+             spu_lockline_lock();                                              \
+             memcpy(vm_base + (uint32_t)(a), (src), (n));                      \
+             spu_coh_notify_write((uint32_t)(a));                              \
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -632,6 +632,9 @@
+                 win, busy, 100.0 * busy / win, s_gpu_submits, s_gpu_lat_n ? s_gpu_lat_sum / s_gpu_lat_n : 0.0, s_gpu_lat_max,
+                 s_ts_n, s_ts_sum, 100.0 * s_ts_sum / win, s_ts_n ? s_ts_sum / s_ts_n : 0.0, s_ts_max, s_ts_over25, s_ts_over100);
+         s_ts_sum = s_ts_max = 0; s_ts_n = s_ts_over25 = s_ts_over100 = 0;
++#if !defined(_MSC_VER)
++        { extern void spu_coh_stats_print(void) __attribute__((weak)); if (spu_coh_stats_print) spu_coh_stats_print(); }
++#endif
+         s_gpu_busy_ms = 0; s_gpu_lat_sum = s_gpu_lat_max = 0; s_gpu_lat_n = 0; s_gpu_submits = 0; s_gpu_win_start = now;
+     }
+ }

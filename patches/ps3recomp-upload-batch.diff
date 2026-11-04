@@ -1,0 +1,164 @@
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index 188b3d8..0564c66 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -734,9 +734,8 @@ static int vk_batch_enabled(void) {
+     if (enabled < 0) enabled = getenv("RSX_DRAW_BATCH") && strcmp(getenv("RSX_DRAW_BATCH"), "0");
+     return enabled;
+ }
+-static void vk_destroy_image(vk_image* im)
++static void vk_destroy_image_now(vk_image* im)
+ {
+-    vk_flush_at("vk_destroy_image");
+     if (im->view) {
+         ++s_descriptor_epoch;  /* a recreated view may reuse this numeric handle */
+         pvkDestroyImageView(s_vk.device, im->view, NULL);
+@@ -745,6 +744,11 @@ static void vk_destroy_image(vk_image* im)
+     if (im->mem)  pvkFreeMemory(s_vk.device, im->mem, NULL);
+     memset(im, 0, sizeof *im);
+ }
++static void vk_destroy_image(vk_image* im)
++{
++    vk_flush_at("vk_destroy_image");
++    vk_destroy_image_now(im);
++}
+ 
+ static VkDeviceSize s_buffer_live_bytes,s_buffer_peak_bytes;
+ static unsigned s_buffer_live_count;
+@@ -889,6 +893,20 @@ static int vk_submit_and_wait(void)
+     return 0;
+ }
+ 
++/* Texture creation and uploads used to drain every in-flight set and submit on their own, so each new texture cost a
++ * GPU round trip (10-50 ms hitches while scenes streamed in). They now record into the open batch like a clear does and
++ * the staging memory is retired with the set. RSX_UPLOAD_BATCH=0 restores the old behaviour. */
++static unsigned long long s_batch_stage_bytes;
++static int vk_upload_batch_begin(void)
++{
++    static int enabled = -1;
++    if (enabled < 0) { const char* e = getenv("RSX_UPLOAD_BATCH"); enabled = !e || strcmp(e, "0"); }
++    if (!enabled || s_batch_draw || !vk_async_enabled() || !vk_batch_enabled()) return 0;
++    vk_batch_end_pass();
++    s_batch_draw = 1;
++    return 1;
++}
++
+ /* Bounded five-second attribution. All operation durations are inclusive;
+  * frame records use a shared SDL monotonic clock and explicit phase bits.
+  * Try-lock drops diagnostics instead of blocking a rendering thread. */
+@@ -1140,6 +1158,7 @@ static int vk_batch_flush_ex(int drain)
+         s_cur_set = (set + 1) % VK_ASYNC_SETS;
+         s_vk.cmd = s_set_cmd[s_cur_set];
+         s_batch_count = 0;
++        s_batch_stage_bytes = 0;
+     }
+     return drain ? vk_async_drain(s_submit_reason) : 0;
+ }
+@@ -2107,8 +2126,36 @@ static void vk_retire_buffer(vk_buffer* b)
+     s_retired[s_retired_count++] = (vk_retired_buffer){*b,pending};
+     memset(b, 0, sizeof *b);
+ }
++typedef struct { vk_image image; unsigned pending_sets; } vk_retired_image;
++static vk_retired_image* s_retired_img;
++static unsigned s_retired_img_count, s_retired_img_cap;
++/* Free an image once every set that may still read it has finished, without draining the GPU. */
++static void vk_retire_image(vk_image* im)
++{
++    if (!im->img && !im->view && !im->mem) { memset(im, 0, sizeof *im); return; }
++    if (!vk_async_enabled()) { vk_destroy_image(im); return; }
++    unsigned pending=0;
++    for(unsigned i=0;i<VK_ASYNC_SETS;i++)if(s_set_inflight[i])pending|=1u<<i;
++    if(s_batch_recording)pending|=1u<<s_cur_set;
++    if(!pending){vk_destroy_image_now(im);return;}
++    if (s_retired_img_count == s_retired_img_cap) {
++        const unsigned cap = s_retired_img_cap ? s_retired_img_cap * 2 : 32;
++        vk_retired_image* grown = (vk_retired_image*)realloc(s_retired_img, cap * sizeof *grown);
++        if (!grown) { vk_destroy_image(im); return; }
++        s_retired_img = grown; s_retired_img_cap = cap;
++    }
++    s_retired_img[s_retired_img_count++] = (vk_retired_image){*im,pending};
++    memset(im, 0, sizeof *im);
++}
+ static void vk_retired_complete_set(unsigned set)
+ {
++    unsigned keep=0;
++    for(unsigned i=0;i<s_retired_img_count;i++){
++        s_retired_img[i].pending_sets&=~(1u<<set);
++        if(!s_retired_img[i].pending_sets)vk_destroy_image_now(&s_retired_img[i].image);
++        else s_retired_img[keep++]=s_retired_img[i];
++    }
++    s_retired_img_count=keep;
+     unsigned kept=0;
+     for(unsigned i=0;i<s_retired_count;i++){
+         s_retired[i].pending_sets&=~(1u<<set);
+@@ -2121,6 +2168,8 @@ static void vk_free_retired_buffers(void)
+ {
+     for (unsigned i = 0; i < s_retired_count; i++) vk_destroy_buffer_now(&s_retired[i].buffer);
+     s_retired_count = 0;
++    for (unsigned i = 0; i < s_retired_img_count; i++) vk_destroy_image_now(&s_retired_img[i].image);
++    s_retired_img_count = 0;
+ }
+ static int vk_ensure_buffer(vk_buffer* b, VkDeviceSize bytes, VkBufferUsageFlags usage)
+ {
+@@ -3172,6 +3221,7 @@ static int vk_eng_upload_region(VkImage img, u32 layer, u32 mip, u32 x, u32 y,
+         memcpy((u8*)st.ptr + (size_t)y * tight, (const u8*)src + (size_t)y * row_bytes, tight);
+     vk_stall_end(ST_COPY,copy_start,(uint64_t)tight*rows);
+     const uint64_t submit_start=vk_stall_start();
++    const int batched = vk_upload_batch_begin();
+     int rc = (s_begin_reason="vk_eng_upload_region", vk_begin());
+     if (!rc) {
+         vk_barrier_image(img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
+@@ -3181,9 +3231,15 @@ static int vk_eng_upload_region(VkImage img, u32 layer, u32 mip, u32 x, u32 y,
+             .imageExtent = { w, h, 1 },
+         };
+         pvkCmdCopyBufferToImage(s_vk.cmd, st.buf, img, VK_IMAGE_LAYOUT_GENERAL, 1, &region);
++        if (batched) vk_barrier_image(img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);   /* writes visible to later draws */
+         rc = (s_submit_reason="vk_eng_upload_region", vk_submit_and_wait());
+     }
+-    vk_destroy_buffer(&st);
++    if (batched) {
++        s_batch_draw = 0;
++        if (!rc) { vk_retire_buffer(&st); s_batch_stage_bytes += (unsigned long long)tight * rows; }
++        else vk_destroy_buffer(&st);
++        if (s_batch_stage_bytes > (48ull << 20)) vk_flush_async_at("upload_stage");
++    } else vk_destroy_buffer(&st);
+     vk_stall_end(ST_UPLOAD,submit_start,(uint64_t)tight*rows);
+     return rc;
+ }
+@@ -3313,7 +3369,8 @@ static void vk_eng_release(void* user, u32 handle)
+     }
+     if (s_eobj[handle].kind == VK_ENG_COLOR || s_eobj[handle].kind == VK_ENG_DEPTH)
+         vk_eng_drop_framebuffers();
+-    vk_destroy_image(&s_eobj[handle].im);      /* idle: submissions are waited on */
++    if (s_eobj[handle].kind == VK_ENG_TEXTURE) vk_retire_image(&s_eobj[handle].im);   /* freed when its sets finish */
++    else vk_destroy_image(&s_eobj[handle].im);
+     memset(&s_eobj[handle], 0, sizeof s_eobj[handle]);
+ }
+ 
+@@ -3649,6 +3706,7 @@ static u32 vk_eng_texture_create_impl(void* user, rsx_be_format fmt, u32 w, u32
+                                  u32 mips, u32 faces, u32 remap, u32 rsx_fmt)
+ {
+     (void)user;
++    int batched = 0;
+     u32 bpp;
+     const VkFormat vf = vk_eng_format(fmt, &bpp);
+     const int bc = (fmt == RSX_BE_FMT_BC1 || fmt == RSX_BE_FMT_BC2 || fmt == RSX_BE_FMT_BC3);
+@@ -3684,6 +3742,7 @@ static u32 vk_eng_texture_create_impl(void* user, rsx_be_format fmt, u32 w, u32
+     o->kind = VK_ENG_TEXTURE; o->fmt = decode ? VK_FORMAT_R8G8B8A8_UNORM : vf; o->w = w; o->h = h; o->cube = (u8)cube;
+     o->bpp = bc ? 0 : bpp; o->block = bc ? bpp : 0; o->decode = (u8)decode;
+     /* UNDEFINED -> GENERAL for every level and face before the uploads arrive. */
++    batched = vk_upload_batch_begin();
+     if ((s_begin_reason="vk_eng_texture_create", vk_begin())) goto fail;
+     vk_barrier_image(o->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED);
+     /* RSX_BISECT 32768: zero every new texture (levels and faces) so unwritten texels cannot show old memory. */
+@@ -3694,8 +3753,10 @@ static u32 vk_eng_texture_create_impl(void* user, rsx_be_format fmt, u32 w, u32
+         vk_barrier_image(o->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
+     }
+     if ((s_submit_reason="vk_eng_texture_create", vk_submit_and_wait())) goto fail;
++    if (batched) s_batch_draw = 0;
+     return hd;
+ fail:
++    if (batched) s_batch_draw = 0;
+     vk_destroy_image(&o->im);
+     memset(o, 0, sizeof *o);
+     return 0;

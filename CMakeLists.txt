@@ -1,0 +1,266 @@
+cmake_minimum_required(VERSION 3.20)
+project(FatPrincessNative LANGUAGES C CXX)
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+find_package(ZLIB REQUIRED)
+find_package(SDL2 REQUIRED)
+if(NOT TARGET SDL2::SDL2 AND TARGET SDL2::SDL2-static)
+  # iOS links SDL statically; the rest of the build names the shared target.
+  add_library(SDL2::SDL2 INTERFACE IMPORTED GLOBAL)
+  set_target_properties(SDL2::SDL2 PROPERTIES INTERFACE_LINK_LIBRARIES SDL2::SDL2-static)
+endif()
+if(MSVC)
+  # The SDL2 package for Visual C++ puts its headers directly in include/, the sources include <SDL2/SDL.h>.
+  get_target_property(FP_SDL2_INCLUDE SDL2::SDL2 INTERFACE_INCLUDE_DIRECTORIES)
+  if(FP_SDL2_INCLUDE AND EXISTS "${FP_SDL2_INCLUDE}/SDL.h" AND NOT EXISTS "${FP_SDL2_INCLUDE}/SDL2/SDL.h")
+    file(GLOB FP_SDL2_HEADERS "${FP_SDL2_INCLUDE}/*.h")
+    file(COPY ${FP_SDL2_HEADERS} DESTINATION "${CMAKE_BINARY_DIR}/sdl2-shim/SDL2")
+    include_directories(BEFORE SYSTEM "${CMAKE_BINARY_DIR}/sdl2-shim")
+  endif()
+  # SDL_endian.h defines _m_prefetch itself, which recent clang headers define as a builtin as well.
+  # The macro is SDL's own guard for that definition.
+  add_compile_definitions(__PRFCHWINTRIN_H)
+endif()
+if(NOT IOS)   # desktop asset and map tools
+find_package(OpenGL REQUIRED)
+add_executable(fp_assets src/assets.cpp)
+target_include_directories(fp_assets SYSTEM PRIVATE third_party/ps3recomp/libs/codec)
+target_link_libraries(fp_assets PRIVATE ZLIB::ZLIB SDL2::SDL2)
+add_executable(fp_map_viewer src/map_viewer.cpp)
+target_link_libraries(fp_map_viewer PRIVATE SDL2::SDL2 OpenGL::GL)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(fp_map_viewer PRIVATE -Wall -Wextra -Wconversion)
+endif()
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(fp_assets PRIVATE -Wall -Wextra -Wconversion)
+endif()
+endif()
+
+option(FP_BUILD_GAME "Build the local, statically recompiled game" OFF)
+if(FP_BUILD_GAME)
+  option(PS3RECOMP_RSX_VULKAN "Use the framework's Vulkan renderer (MoltenVK on Apple)" ON)
+  if(PS3RECOMP_RSX_VULKAN AND (UNIX OR WIN32))
+    find_package(glslang CONFIG REQUIRED)
+  endif()
+  set(PS3RECOMP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/ps3recomp" CACHE PATH "Pinned ps3recomp checkout")
+  set(RECOMP_DIR "${CMAKE_CURRENT_SOURCE_DIR}/private/lift/game" CACHE PATH "Private game lift")
+  if(IOS)
+    find_package(SampleRate CONFIG REQUIRED)
+  endif()
+  # Counters, timers and the diagnostic log lines of the framework are built only into dev builds (the same switch as the DEBUG tab).
+  # Set before the framework is added so every library of it sees it.
+  if(NOT DEFINED FP_DEBUG_MENU OR FP_DEBUG_MENU)
+    add_compile_definitions(FP_DIAGNOSTICS=1)
+  endif()
+  # Integrate the pinned upstream scaffold with the project-local boot and HLE adapters.
+  add_subdirectory("${PS3RECOMP_DIR}/templates/project" game)
+  target_sources(MyGameRecomp PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/diagnostics.cpp")
+  target_sources(MyGameRecomp PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/platform.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/src/vm_cache.cpp")
+  target_sources(MyGameRecomp PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/spurs_queue.cpp")
+  # AVX2/FMA3 selects the vector SPU float helpers and SSE4.1 shufb. -ffp-contract=off keeps
+  # separate multiplies and adds exactly as before FMA was available to the compiler.
+  option(FP_X86_V3 "Compile the game for x86-64-v3 (AVX2, FMA3, BMI2)" ON)
+  set(FP_DEFAULT_SERVER "" CACHE STRING "Default online server (host:port) baked into the settings")
+  set(FP_DEFAULT_JOIN_URL "" CACHE STRING "Sign-up page the Register row opens (https://...)")
+  if(FP_X86_V3 AND CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+    target_compile_options(MyGameRecomp PRIVATE -mavx2 -mfma -mbmi2 -mmovbe -msse4.1 -ffp-contract=off)
+  elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang|GNU")
+    # arm64 has FMA in the base ISA and clang fuses a multiply and an add by default; keep them separate as on x86.
+    target_compile_options(MyGameRecomp PRIVATE -ffp-contract=off)
+  endif()
+  if(MSVC)
+    target_compile_options(MyGameRecomp PRIVATE /FI "${CMAKE_CURRENT_SOURCE_DIR}/src/msvc_clock.h")
+  endif()
+  add_executable(fp_platform_test tests/platform.cpp src/platform.cpp src/spurs_queue.cpp src/vm_cache.cpp)
+  target_include_directories(fp_platform_test PRIVATE "${RECOMP_DIR}")
+  set(FP_SPU_LIFT_DIR "${CMAKE_CURRENT_SOURCE_DIR}/private/lift/spu" CACHE PATH
+      "Private directory containing the lifted game SPU images and workload registry")
+  file(GLOB_RECURSE FP_SPU_SOURCES CONFIGURE_DEPENDS "${FP_SPU_LIFT_DIR}/*.c")
+  if(NOT FP_SPU_SOURCES)
+    message(FATAL_ERROR "No lifted SPU sources found under ${FP_SPU_LIFT_DIR}")
+  endif()
+  target_sources(MyGameRecomp PRIVATE ${FP_SPU_SOURCES})
+  # The target is created in the framework subdirectory. Source properties
+  # must be set in that target's directory scope to affect its compile commands.
+  set_source_files_properties(${FP_SPU_SOURCES} TARGET_DIRECTORY MyGameRecomp PROPERTIES
+    INCLUDE_DIRECTORIES "${PS3RECOMP_DIR}/runtime/spu"
+    COMPILE_DEFINITIONS "SPU_USE_DISPATCH_MT;SPU_LS_LEAN;SPU_FORCE_RZ"
+    COMPILE_OPTIONS "$<IF:$<BOOL:${MSVC}>,/fp:strict,-frounding-math>")
+  set(FP_OVERLAY_DIR "" CACHE PATH "Private lifts of modules at observed local-store addresses")
+  if(FP_OVERLAY_DIR)
+    file(GLOB_RECURSE FP_OVERLAY_SOURCES CONFIGURE_DEPENDS "${FP_OVERLAY_DIR}/*.c")
+    target_sources(MyGameRecomp PRIVATE ${FP_OVERLAY_SOURCES})
+    set_source_files_properties(${FP_OVERLAY_SOURCES} TARGET_DIRECTORY MyGameRecomp PROPERTIES
+      INCLUDE_DIRECTORIES "${PS3RECOMP_DIR}/runtime/spu"
+      COMPILE_DEFINITIONS "SPU_USE_DISPATCH_MT;SPU_LS_LEAN;SPU_FORCE_RZ"
+      COMPILE_OPTIONS "-O3;$<IF:$<BOOL:${MSVC}>,/fp:strict,-frounding-math>")
+  endif()
+  # The POSIX template uses calloc for the guest arena. Its unaligned base
+  # makes vm_commit's mprotect fail, and violates the HLE pointer truncation
+  # invariant. Adapt ONLY our generated copy; leave the checkout untouched.
+  if(UNIX OR WIN32)
+    file(READ "${PS3RECOMP_DIR}/templates/project/main.cpp" FP_BOOT_MAIN)
+    if(UNIX)
+    set(FP_OLD_ALLOC "vm_base = (uint8_t*)calloc(1, 0xE0000000u);\n    ppu_vm_size = 0xE0000000u;")
+    string(FIND "${FP_BOOT_MAIN}" "${FP_OLD_ALLOC}" FP_ALLOC_POS)
+    if(FP_ALLOC_POS LESS 0)
+      message(FATAL_ERROR "Pinned upstream POSIX allocation changed; review the adapter")
+    endif()
+    string(REPLACE "${FP_OLD_ALLOC}"
+      "if (vm_init() != CELL_OK) return false;\n    if (mprotect(vm_base, (size_t)VM_TOTAL_SIZE, PROT_READ | PROT_WRITE) != 0) { vm_shutdown(); return false; }\n    ppu_vm_size = 0;\n    fprintf(stderr, \"[fp-vm] aligned guest arena: base=%p span=4GiB\\n\", (void*)vm_base);"
+      FP_BOOT_MAIN "${FP_BOOT_MAIN}")
+    string(REPLACE "#include <string.h>" "#include <string.h>\n#include \"vm.h\"" FP_BOOT_MAIN "${FP_BOOT_MAIN}")
+    endif()
+    string(REPLACE "lv2_init_syscalls();" "lv2_init_syscalls();\n    extern void fp_platform_init_cpp();\n    fp_platform_init_cpp();" FP_BOOT_MAIN "${FP_BOOT_MAIN}")
+    string(APPEND FP_BOOT_MAIN "\nextern \"C\" void fp_platform_init(void);\nvoid fp_platform_init_cpp() { fp_platform_init(); }\n")
+    if(PS3RECOMP_RSX_VULKAN)
+      target_sources(MyGameRecomp PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/host.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/src/settings.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/src/game_controls.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/src/self_test.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/src/overlay_stats.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/src/patches.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/src/menu_bridge.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/src/game_stats.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/src/trophy_book.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/src/trophy_icons.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/src/game_art.cpp")
+      # Route guards default off; the AI settings menu or FP_AI_NAV_GRAPH enables them.
+      target_sources(MyGameRecomp PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/ai_route_policy.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/src/ai_ground_route.cpp")
+      if(WIN32)
+        target_sources(MyGameRecomp PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/renderer_d3d12.cpp")
+      endif()
+      file(READ "${CMAKE_CURRENT_SOURCE_DIR}/assets/ui/LiberationSans-Regular.ttf" FP_UI_FONT_HEX HEX)
+      string(REGEX REPLACE "(..)" "0x\\1," FP_UI_FONT_BYTES "${FP_UI_FONT_HEX}")
+      file(GENERATE OUTPUT "${CMAKE_BINARY_DIR}/fp_ui_font_data.h"
+        CONTENT "static const unsigned char fp_ui_font_data[] = {${FP_UI_FONT_BYTES}};\n")
+      target_sources(MyGameRecomp PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/osk_panel.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/src/trophy_ui.cpp")
+      set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/src/osk_panel.cpp" TARGET_DIRECTORY MyGameRecomp PROPERTIES INCLUDE_DIRECTORIES "${CMAKE_BINARY_DIR}")
+      # Which build this is, as the psnr server sees it (its builds.json). The first letter is the class:
+      #   d-  a dev build: the DEBUG tab is compiled in. Its secret comes from private/psnr_build_secret.txt (made on first
+      #       configure, never in git) and the server accepts it only for our own accounts.
+      #   r-  a release build: no DEBUG tab, and the pipeline passes -DFP_RELEASE_SECRET (a CI secret, one for every platform).
+      #   l-  anything else (a release configure without the secret): the server does not know it and refuses it.
+      # A build with the DEBUG tab never carries the release secret, whatever is passed in.
+      option(FP_DEBUG_MENU "Settings menu DEBUG tab (dev builds only)" ON)
+      set(FP_DEV_SECRET "" CACHE STRING "Secret of dev builds when not taken from private/psnr_build_secret.txt (our CI dev builds)")
+      set(FP_RELEASE_SECRET "" CACHE STRING "Secret of the release series (CI); makes a build without the DEBUG tab a release build")
+      set(FP_SECRET_FILE "${CMAKE_CURRENT_SOURCE_DIR}/private/psnr_build_secret.txt")
+      if(NOT EXISTS "${FP_SECRET_FILE}")
+        string(RANDOM LENGTH 48 ALPHABET 0123456789abcdef FP_NEW_SECRET)
+        file(WRITE "${FP_SECRET_FILE}" "${FP_NEW_SECRET}\n")
+      endif()
+      file(STRINGS "${FP_SECRET_FILE}" FP_LOCAL_SECRET LIMIT_COUNT 1)
+      execute_process(COMMAND git -C "${CMAKE_CURRENT_SOURCE_DIR}" rev-parse --short=6 HEAD
+                      OUTPUT_VARIABLE FP_GIT_SHORT OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
+      string(TIMESTAMP FP_BUILD_DATE "%y%m%d")
+      if(FP_DEBUG_MENU)
+        set(FP_BUILD_CLASS "d")
+        if(FP_DEV_SECRET)
+          set(FP_BUILD_SECRET "${FP_DEV_SECRET}")
+        else()
+          set(FP_BUILD_SECRET "${FP_LOCAL_SECRET}")
+        endif()
+      elseif(FP_RELEASE_SECRET)
+        set(FP_BUILD_CLASS "r")
+        set(FP_BUILD_SECRET "${FP_RELEASE_SECRET}")
+      else()
+        set(FP_BUILD_CLASS "l")
+        set(FP_BUILD_SECRET "${FP_LOCAL_SECRET}")
+      endif()
+      set(FP_BUILD_ID "${FP_BUILD_CLASS}-${FP_BUILD_DATE}-${FP_GIT_SHORT}")
+      string(SUBSTRING "${FP_BUILD_ID}" 0 16 FP_BUILD_ID)
+      message(STATUS "psnr build id ${FP_BUILD_ID} (class ${FP_BUILD_CLASS})")
+      set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/src/settings.cpp" TARGET_DIRECTORY MyGameRecomp PROPERTIES
+        COMPILE_DEFINITIONS "FP_BUILD_ID=\"${FP_BUILD_ID}\";FP_BUILD_SECRET=\"${FP_BUILD_SECRET}\"")
+      # The settings menu's DEBUG tab (trophy card preview, test pages). Configure release packages with -DFP_DEBUG_MENU=OFF.
+      if(FP_DEBUG_MENU)
+        set_property(SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/settings.cpp" TARGET_DIRECTORY MyGameRecomp APPEND PROPERTY COMPILE_DEFINITIONS FP_DEBUG_MENU=1)
+        set_property(SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/ios_launch.cpp" TARGET_DIRECTORY MyGameRecomp APPEND PROPERTY COMPILE_DEFINITIONS FP_DEBUG_MENU=1)
+      endif()
+      if(FP_DEFAULT_SERVER)
+        set_property(SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/settings.cpp" TARGET_DIRECTORY MyGameRecomp APPEND PROPERTY
+          COMPILE_DEFINITIONS "FP_DEFAULT_SERVER=\"${FP_DEFAULT_SERVER}\"")
+      endif()
+      if(FP_DEFAULT_JOIN_URL)
+        set_property(SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/settings.cpp" TARGET_DIRECTORY MyGameRecomp APPEND PROPERTY
+          COMPILE_DEFINITIONS "FP_DEFAULT_JOIN_URL=\"${FP_DEFAULT_JOIN_URL}\"")
+      endif()
+      target_link_libraries(MyGameRecomp PRIVATE ZLIB::ZLIB SDL2::SDL2)
+      string(REPLACE "rsx_null_backend_" "rsx_vulkan_backend_" FP_BOOT_MAIN "${FP_BOOT_MAIN}")
+      foreach(FP_CALL init present pump_messages)
+        string(REPLACE "rsx_vulkan_backend_${FP_CALL}" "fp_backend_${FP_CALL}" FP_BOOT_MAIN "${FP_BOOT_MAIN}")
+      endforeach()
+      # The template picks the D3D12 backend under _WIN32. The window and renderer here are Vulkan, so route that branch
+      # through the same host entry points; otherwise every guest flip goes to a D3D12 present that was never initialised.
+      foreach(FP_CALL init present pump_messages)
+        string(REPLACE "rsx_d3d12_backend_${FP_CALL}" "fp_backend_${FP_CALL}" FP_BOOT_MAIN "${FP_BOOT_MAIN}")
+      endforeach()
+      # Apple builds take the same Vulkan host (MoltenVK) instead of the framework's Metal backend.
+      foreach(FP_CALL init present pump_messages)
+        string(REPLACE "rsx_metal_backend_${FP_CALL}" "fp_backend_${FP_CALL}" FP_BOOT_MAIN "${FP_BOOT_MAIN}")
+      endforeach()
+      string(REPLACE "\"Metal\"" "\"Vulkan\"" FP_BOOT_MAIN "${FP_BOOT_MAIN}")
+      string(REPLACE "\"D3D12\"" "\"Vulkan\"" FP_BOOT_MAIN "${FP_BOOT_MAIN}")
+      string(REPLACE "null (headless software)" "Vulkan" FP_BOOT_MAIN "${FP_BOOT_MAIN}")
+      string(REPLACE "g_ps3_guest_caller = harness_guest_caller;"
+        "g_ps3_guest_caller = harness_guest_caller;\n    extern void fp_host_prepare_cpp();\n    fp_host_prepare_cpp();"
+        FP_BOOT_MAIN "${FP_BOOT_MAIN}")
+      string(APPEND FP_BOOT_MAIN "\nextern \"C\" void fp_host_prepare(void);\nvoid fp_host_prepare_cpp() { fp_host_prepare(); }\n")
+      string(REPLACE "rsx_ok = 0;              /* window closed */\n                continue;"
+        "fprintf(stderr, \"[fp-host] window closed\\n\");\n                exit(0);"
+        FP_BOOT_MAIN "${FP_BOOT_MAIN}")
+    endif()
+    string(REPLACE "static DWORD WINAPI frame_clock(LPVOID)"
+      "static DWORD WINAPI legacy_frame_clock(LPVOID);\nextern \"C\" unsigned long fp_run_frame_clock(void (*)(void));\nstatic DWORD WINAPI frame_clock(LPVOID p) { if (getenv(\"FP_LEGACY_PRESENT\")) return legacy_frame_clock(p); return (DWORD)fp_run_frame_clock(present_guest_frame); }\nstatic DWORD WINAPI legacy_frame_clock(LPVOID)"
+      FP_BOOT_MAIN "${FP_BOOT_MAIN}")
+    string(REPLACE "InterlockedIncrement(&g_frames_presented);"
+      "unsigned fp_count = (unsigned)InterlockedIncrement(&g_frames_presented);\n    extern void fp_report_game_frame_cpp(unsigned);\n    fp_report_game_frame_cpp(fp_count);"
+      FP_BOOT_MAIN "${FP_BOOT_MAIN}")
+    string(APPEND FP_BOOT_MAIN "\nextern \"C\" void fp_report_game_frame(unsigned);\nvoid fp_report_game_frame_cpp(unsigned n) { fp_report_game_frame(n); }\n")
+    if(IOS)
+      # No launcher or command line on iOS: Documents is the game folder, and SDL owns the UIKit entry point.
+      string(REPLACE "int main(int argc, char** argv)\n{" "int main(int argc, char** argv)\n{\n    fp_ios_prepare(&argc, &argv);" FP_BOOT_MAIN "${FP_BOOT_MAIN}")
+      string(PREPEND FP_BOOT_MAIN "#include <SDL2/SDL_main.h>\nextern \"C\" void fp_ios_prepare(int*, char***);\nextern \"C\" void fp_ios_stall_register_thread(unsigned,const char*);\n")
+      # UIKit wants the window, presentation and event pump on the main thread: run the frame clock there and the
+      # game's own entry on a worker with a deep stack (lifted code recurses as the original did).
+      string(REPLACE "    CreateThread(NULL, 4u * 1024 * 1024, frame_clock, NULL, 0, NULL);\n" "" FP_BOOT_MAIN "${FP_BOOT_MAIN}")
+      string(REPLACE "    int rc = ppu_run(entry, STACK_TOP);"
+        "    static uint32_t fp_ios_entry; fp_ios_entry = entry;\n    {\n        pthread_attr_t fa; pthread_attr_init(&fa); pthread_attr_setstacksize(&fa, 64u << 20);\n        pthread_t ft;\n        pthread_create(&ft, &fa, [](void*) -> void* {\n            fp_ios_stall_register_thread(1, \"ppu-main\");\n            int r = ppu_run(fp_ios_entry, STACK_TOP);\n            printf(\"\\n[boot] ppu_run returned %d (entry function unwound)\\n\", r);\n            exit(g_sys_process_exit_called ? (int)g_sys_process_exit_code : r);\n            return nullptr;\n        }, nullptr);\n    }\n    frame_clock(NULL);\n    int rc = 0;"
+        FP_BOOT_MAIN "${FP_BOOT_MAIN}")
+      string(PREPEND FP_BOOT_MAIN "#include <pthread.h>\n")
+      target_sources(MyGameRecomp PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/ios_launch.cpp"
+                                         "${CMAKE_CURRENT_SOURCE_DIR}/src/ios_audio_profile.cpp"
+                                         "${CMAKE_CURRENT_SOURCE_DIR}/src/ios_stall_profile.cpp"
+                                         "${CMAKE_CURRENT_SOURCE_DIR}/src/ios_touch.mm"
+                                         "${CMAKE_CURRENT_SOURCE_DIR}/src/ios_setup.mm"
+                                         "${CMAKE_CURRENT_SOURCE_DIR}/src/ios_lifecycle.mm"
+                                         "${CMAKE_CURRENT_SOURCE_DIR}/src/ios_diagnostics.mm")
+      set_source_files_properties("${CMAKE_CURRENT_SOURCE_DIR}/src/host.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/src/ios_touch.mm" "${CMAKE_CURRENT_SOURCE_DIR}/src/ios_setup.mm" "${CMAKE_CURRENT_SOURCE_DIR}/src/ios_lifecycle.mm" "${CMAKE_CURRENT_SOURCE_DIR}/src/ios_diagnostics.mm"
+        TARGET_DIRECTORY MyGameRecomp
+        PROPERTIES LANGUAGE CXX COMPILE_OPTIONS "-xobjective-c++;-fobjc-arc")   # Objective-C++ through the C++ compiler
+      # Test builds: base URL the first-run key is appended to when downloading the game files (unset: no download).
+      set(FP_FILES_URL "" CACHE STRING "Base URL for the first-run game download on iOS")
+      if(FP_FILES_URL)
+        set_property(SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/ios_setup.mm" TARGET_DIRECTORY MyGameRecomp APPEND PROPERTY
+          COMPILE_DEFINITIONS "FP_FILES_URL=\"${FP_FILES_URL}\"")
+      endif()
+      set(FP_REPORT_URL "" CACHE STRING "Diagnostic report endpoint for iOS test builds")
+      if(FP_REPORT_URL)
+        set_property(SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/src/ios_diagnostics.mm" TARGET_DIRECTORY MyGameRecomp APPEND PROPERTY
+          COMPILE_DEFINITIONS "FP_REPORT_URL=\"${FP_REPORT_URL}\"")
+      endif()
+      target_link_libraries(MyGameRecomp PRIVATE SampleRate::samplerate "-framework UIKit" "-framework GameController" "-framework QuartzCore" "-framework AVFAudio")
+      if(TARGET SDL2::SDL2main)
+        target_link_libraries(MyGameRecomp PRIVATE SDL2::SDL2main)
+      endif()
+    else()
+      # Desktop: running the program itself starts the game (no run script). It finds its folder, checks the game files, lays out
+      # the folders and sets the environment; a launcher that already set PS3_VFS_ROOT is left alone.
+      string(REPLACE "int main(int argc, char** argv)\n{" "int main(int argc, char** argv)\n{\n    fp_desktop_prepare(&argc, &argv);" FP_BOOT_MAIN "${FP_BOOT_MAIN}")
+      if(NOT FP_BOOT_MAIN MATCHES "fp_desktop_prepare\\(&argc")
+        message(FATAL_ERROR "the game's main() was not found to hook the desktop launcher into")
+      endif()
+      string(PREPEND FP_BOOT_MAIN "extern \"C\" void fp_desktop_prepare(int*, char***);\n")
+      target_sources(MyGameRecomp PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/desktop_launch.cpp" "${CMAKE_CURRENT_SOURCE_DIR}/src/game_import.cpp")
+      target_include_directories(MyGameRecomp PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src" "${CMAKE_CURRENT_SOURCE_DIR}/private/lift")   # fp_keys.inc comes with the private bundle
+    endif()
+    file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/fp_boot_main.cpp" "${FP_BOOT_MAIN}")
+    get_target_property(FP_GAME_SOURCES MyGameRecomp SOURCES)
+    list(REMOVE_ITEM FP_GAME_SOURCES main.cpp)
+    set_property(TARGET MyGameRecomp PROPERTY SOURCES "${FP_GAME_SOURCES}")
+    target_sources(MyGameRecomp PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/fp_boot_main.cpp")
+  endif()
+  set_target_properties(MyGameRecomp PROPERTIES OUTPUT_NAME fp_native
+    RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}")
+endif()

@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.20)
+project(AudioBurstModel C)
+find_package(SampleRate CONFIG REQUIRED)
+find_package(SDL2 CONFIG REQUIRED)
+add_executable(audio_burst_model ../audio_burst_model.c)
+target_link_libraries(audio_burst_model PRIVATE SDL2::SDL2-static SampleRate::samplerate)

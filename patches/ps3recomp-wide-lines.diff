@@ -1,0 +1,182 @@
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index 80f53e5..aabf9bc 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -3709,6 +3709,7 @@ static int vk_eng_depth_readback(void* user, u32 depth, u32 x, u32 y, u32 w, u32
+ #define VK_ENG_TOPOLOGIES 5
+ #define VK_ENG_FB_CACHE   64
+ 
++#define VK_WIDE_SLOTS 8   /* wide-line variants kept per pipeline; never replaced while commands may still use them */
+ typedef struct vk_eng_pipe {
+     int                 used;
+     VkShaderModule      vs, fs;
+@@ -3717,6 +3718,8 @@ typedef struct vk_eng_pipe {
+     VkFormat            rt_fmt;          /* picks the render pass it is built against */
+     u32                 cube_mask;       /* TextureCube units: the split set layout */
+     VkPipeline          variant[VK_ENG_TOPOLOGIES];
++    char*               vs_hlsl;         /* kept for the wide-line variants */
++    struct { u32 key; VkShaderModule vs; VkPipeline pipe[VK_ENG_TOPOLOGIES]; } wide[VK_WIDE_SLOTS];
+ } vk_eng_pipe;
+ 
+ static vk_eng_pipe s_epipe[VK_ENG_MAX_PIPE];
+@@ -4028,6 +4031,7 @@ static u32 vk_eng_pipeline_create(void* user, const char* vs_hlsl, const char* p
+     P->rt_count = rt_count;
+     P->rt_fmt = cf;
+     P->cube_mask = vk_eng_cube_units(ps_hlsl);
++    P->vs_hlsl = strdup(vs_hlsl);
+     P->used = 1;
+     return slot + 1u;
+ }
+@@ -4040,19 +4044,25 @@ static void vk_eng_pipeline_release(void* user, u32 pipeline)
+     vk_eng_pipe* P = &s_epipe[pipeline - 1];
+     for (u32 t = 0; t < VK_ENG_TOPOLOGIES; t++)
+         if (P->variant[t]) pvkDestroyPipeline(s_vk.device, P->variant[t], NULL);
++    for (u32 w = 0; w < VK_WIDE_SLOTS; w++) {
++        for (u32 t = 0; t < VK_ENG_TOPOLOGIES; t++)
++            if (P->wide[w].pipe[t]) pvkDestroyPipeline(s_vk.device, P->wide[w].pipe[t], NULL);
++        if (P->wide[w].vs) pvkDestroyShaderModule(s_vk.device, P->wide[w].vs, NULL);
++    }
++    free(P->vs_hlsl);
+     if (P->vs) pvkDestroyShaderModule(s_vk.device, P->vs, NULL);
+     if (P->fs) pvkDestroyShaderModule(s_vk.device, P->fs, NULL);
+     memset(P, 0, sizeof *P);
+     if (s_e2.pipeline == pipeline) s_e2.pipeline = 0;
+ }
+ 
+-static VkPipeline vk_eng_variant(vk_eng_pipe* P, u32 topo_idx)
++static VkPipeline vk_eng_variant_ex(vk_eng_pipe* P, u32 topo_idx, VkShaderModule vsmod, VkPipeline* cached)
+ {
+     static const VkPrimitiveTopology topo[VK_ENG_TOPOLOGIES] = {
+         VK_PRIMITIVE_TOPOLOGY_POINT_LIST, VK_PRIMITIVE_TOPOLOGY_LINE_LIST,
+         VK_PRIMITIVE_TOPOLOGY_LINE_STRIP, VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+         VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP };
+-    if (P->variant[topo_idx]) return P->variant[topo_idx];
++    if (*cached) return *cached;
+     VkRenderPass rp = vk_eng_render_pass(P->rt_fmt, P->rt_count);
+     if (!rp || P->nslots > VK_GUEST_ATTRS) return VK_NULL_HANDLE;
+     const VkPipelineLayout layout = P->cube_mask ? vk_eng_split_layout() : s_g.pipe_layout;
+@@ -4061,7 +4071,8 @@ static VkPipeline vk_eng_variant(vk_eng_pipe* P, u32 topo_idx)
+ 
+     VkPipelineShaderStageCreateInfo st[2] = {
+         { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+-          .stage = VK_SHADER_STAGE_VERTEX_BIT, .module = P->vs, .pName = "main" },
++          
++          .stage = VK_SHADER_STAGE_VERTEX_BIT, .module = vsmod, .pName = "main" },
+         { .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+           .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .module = P->fs, .pName = "main" } };
+     VkVertexInputBindingDescription vb = { 0, P->stride, VK_VERTEX_INPUT_RATE_VERTEX };
+@@ -4149,14 +4160,80 @@ static VkPipeline vk_eng_variant(vk_eng_pipe* P, u32 topo_idx)
+         .layout = layout, .renderPass = rp, .subpass = 0 };
+     const uint64_t hitch_t0 = SDL_GetPerformanceCounter();
+     const VkResult pipe_result = pvkCreateGraphicsPipelines(s_vk.device, s_pipe_cache, 1, &gci, NULL,
+-                                                            &P->variant[topo_idx]);
++                                                            cached);
+     vk_hitch("vkCreateGraphicsPipelines", hitch_t0);
+     if (pipe_result == VK_SUCCESS && s_pipe_cache && ++s_pipe_cache_new >= 16) vk_pipe_cache_save();
+     if (pipe_result != VK_SUCCESS) {
+         VK_LOG("engine: vkCreateGraphicsPipelines failed\n");
+-        P->variant[topo_idx] = VK_NULL_HANDLE;
++        *cached = VK_NULL_HANDLE;
+     }
+-    return P->variant[topo_idx];
++    return *cached;
++}
++
++static VkPipeline vk_eng_variant(vk_eng_pipe* P, u32 topo_idx)
++{
++    return vk_eng_variant_ex(P, topo_idx, P->vs, &P->variant[topo_idx]);
++}
++
++/* Wide lines on devices without the wideLines feature (Metal): the game draws priest beams as line strips with a requested
++ * pixel width. The vertex program is wrapped so one draw is repeated as instances, each shifted by a whole-pixel offset inside
++ * a disc of the requested diameter, and the output colour is scaled so the overlapping copies add up to the original
++ * brightness. Returns the number of instances, or 0 when the wide path is not available for this draw. */
++#define VK_WIDE_MAX_INST 320u
++static u32 vk_eng_wide_line(vk_eng_pipe* P, u32 topo_idx, float width_px, float vpw, float vph, VkPipeline* out_pipe)
++{
++    if (!P->vs_hlsl || width_px < 1.5f || vpw < 1.0f || vph < 1.0f) return 0;
++    if (width_px > 16.0f) width_px = 16.0f;
++    width_px = floorf(width_px + 0.5f);   /* whole pixels: few variants, none ever replaced */
++    if (width_px < 2.0f) return 0;
++    const float R = width_px * 0.575f;   /* a little wider than asked: the copies thin out toward the edge */
++    int ox[VK_WIDE_MAX_INST], oy[VK_WIDE_MAX_INST];
++    u32 n = 0;
++    const int ir = (int)(R + 0.5f);
++    for (int j = -ir; j <= ir; j++)
++        for (int i = -ir; i <= ir; i++)
++            if ((float)(i * i + j * j) <= R * R + 0.25f && n < VK_WIDE_MAX_INST) { ox[n] = i; oy[n] = j; n++; }
++    if (n < 2) return 0;
++    const u32 key = ((u32)(width_px * 4.0f) << 20) ^ ((u32)vpw << 10) ^ (u32)vph ^ 0x80000000u;
++    u32 slot = VK_WIDE_SLOTS;
++    for (u32 w = 0; w < VK_WIDE_SLOTS; w++) if (P->wide[w].key == key) slot = w;
++    if (slot < VK_WIDE_SLOTS && !P->wide[slot].vs) return 0;   /* translation failed before: stay a thin line */
++    if (slot == VK_WIDE_SLOTS) {
++        const char* head = strstr(P->vs_hlsl, "VSOutput main(VSInput input)");
++        if (!head) return 0;
++        for (u32 w = 0; w < VK_WIDE_SLOTS; w++) if (!P->wide[w].vs && !P->wide[w].key) { slot = w; break; }
++        if (slot == VK_WIDE_SLOTS) return 0;   /* all taken: this draw stays a thin line */
++        const size_t head_len = (size_t)(head - P->vs_hlsl);
++        const size_t cap = strlen(P->vs_hlsl) + 64u * VK_WIDE_MAX_INST + 1024u;
++        char* text = (char*)malloc(cap);
++        if (!text) return 0;
++        size_t used = 0;
++        memcpy(text, P->vs_hlsl, head_len); used = head_len;
++        used += (size_t)snprintf(text + used, cap - used, "VSOutput vs_core(VSInput input)");
++        const char* rest = head + strlen("VSOutput main(VSInput input)");
++        const size_t rest_len = strlen(rest);
++        memcpy(text + used, rest, rest_len); used += rest_len;
++        used += (size_t)snprintf(text + used, cap - used, "\nstatic const float2 wl_off[%u] = {", n);
++        for (u32 k = 0; k < n; k++)
++            used += (size_t)snprintf(text + used, cap - used, "%sfloat2(%d.0,%d.0)", k ? "," : "", ox[k], oy[k]);
++        /* A pixel inside the band is covered by about the band's width in copies: scale by the inverse. */
++        /* The middle of the band is covered by 2*ir+1 copies; scaling by their count keeps the middle at the colour the game asked for
++         * (no channel clips, so the hue stays) while the edges fade. */
++        const float scale = 1.0f / (float)(2 * ir + 1);
++        used += (size_t)snprintf(text + used, cap - used,
++            "};\nVSOutput main(VSInput input, uint wl_iid : SV_InstanceID) {\n"
++            "    VSOutput o = vs_core(input);\n"
++            "    o.pos.xy += wl_off[wl_iid] * float2(%.9f, %.9f) * o.pos.w;\n"
++            "    o.col0 *= %.9f; o.col1 *= %.9f;\n"
++            "    return o;\n}\n", 2.0f / vpw, 2.0f / vph, scale, scale);
++        const int bad = vk_eng_translate(text, RSX_SHADER_STAGE_VERTEX, &P->wide[slot].vs);
++        free(text);
++        if (bad) { P->wide[slot].vs = VK_NULL_HANDLE; P->wide[slot].key = key; return 0; }
++        P->wide[slot].key = key;
++        { static int logged = 0; if (logged++ < 4) VK_LOG("wide lines: %.1f px as %u instances (viewport %.0fx%.0f)\n", width_px, n, vpw, vph); }
++    }
++    *out_pipe = vk_eng_variant_ex(P, topo_idx, P->wide[slot].vs, &P->wide[slot].pipe[topo_idx]);
++    return *out_pipe ? n : 0;
+ }
+ 
+ static void vk_eng_bind_pipeline(void* user, u32 pipeline) { (void)user; s_e2.pipeline = pipeline; }
+@@ -4665,7 +4742,17 @@ static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices,
+         sc.offset.x = (int32_t)x0; sc.offset.y = (int32_t)y0;
+         sc.extent.width = x1 > x0 ? x1 - x0 : 0; sc.extent.height = y1 > y0 ? y1 - y0 : 0;
+     }
+-    float line_width=s_vk.wide_lines_ok?s_e2.line_width*fy:1.0f;
++    u32 wide_instances = 1;
++    {
++        static int force_wide = -1;
++        if (force_wide < 0) force_wide = getenv("RSX_FORCE_WIDE_LINES") != NULL;
++        if ((topology == RSX_TOPOLOGY_LINES || topology == RSX_TOPOLOGY_LINE_STRIP) && (force_wide || !s_vk.wide_lines_ok)) {
++            VkPipeline wp = VK_NULL_HANDLE;
++            const u32 inst = vk_eng_wide_line(P, (u32)topology - 1u, s_e2.line_width * fy, vp.width, vp.height, &wp);
++            if (inst) { pipe = wp; wide_instances = inst; }
++        }
++    }
++    float line_width=(s_vk.wide_lines_ok&&wide_instances==1)?s_e2.line_width*fy:1.0f;
+     if(line_width<1.0f) line_width=1.0f;
+     if(line_width>s_vk.line_width_max) line_width=s_vk.line_width_max;
+     vk_eng_record_draw_state(pipe,&vp,&sc,s_e2.stencil_ref&0xFFu,line_width,s_e2.depth_bounds[0],s_e2.depth_bounds[1]);
+@@ -4680,9 +4767,9 @@ static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices,
+                                   VK_INDEX_TYPE_UINT32);
+         else
+         pvkCmdBindIndexBuffer(s_vk.cmd, index_buffer->buf, 0, VK_INDEX_TYPE_UINT32);
+-        pvkCmdDrawIndexed(s_vk.cmd, index_count, 1, 0, 0, 0);
++        pvkCmdDrawIndexed(s_vk.cmd, index_count, wide_instances, 0, 0, 0);
+     } else {
+-        pvkCmdDraw(s_vk.cmd, vertex_count, 1, 0, 0);
++        pvkCmdDraw(s_vk.cmd, vertex_count, wide_instances, 0, 0);
+     }
+     if(!keep_pass) pvkCmdEndRenderPass(s_vk.cmd);
+     (s_submit_reason="vk_eng_draw", vk_submit_and_wait());

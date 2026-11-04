@@ -1,0 +1,23 @@
+# Local game material and every binary-derived artifact stay private.
+/private/
+/reports/
+/build/
+/third_party/
+/raps/
+/gamedata/
+__pycache__/
+*.pyc
+*.rap
+*.RAP
+*.pkg
+*.iso
+*.bin
+*.BIN
+*.elf
+*.self
+*.sprx
+*.edat
+*.rifkey
+*.zip
+*.7z
+dist/

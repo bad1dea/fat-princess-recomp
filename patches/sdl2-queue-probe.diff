@@ -1,0 +1,24 @@
+--- a/src/audio/SDL_audio.c
++++ b/src/audio/SDL_audio.c
+@@ -552,6 +552,10 @@
+ 
+ /* buffer queueing support... */
+ 
++/* Project-local optional diagnostics: the hook only updates lock-free counters. */
++#if defined(__IPHONEOS__)
++extern void fp_audio_sdl_underfill(unsigned,unsigned) __attribute__((weak_import));
++#endif
+ static void SDLCALL SDL_BufferQueueDrainCallback(void *userdata, Uint8 *stream, int len)
+ {
+     /* this function always holds the mixer lock before being called. */
+@@ -565,6 +569,10 @@
+     dequeued = SDL_ReadFromDataQueue(device->buffer_queue, stream, len);
+     stream += dequeued;
+     len -= (int)dequeued;
++
++#if defined(__IPHONEOS__)
++    if (fp_audio_sdl_underfill) fp_audio_sdl_underfill(device->id, (unsigned)len);
++#endif
+ 
+     if (len > 0) { /* fill any remaining space in the stream with silence. */
+         SDL_assert(SDL_CountDataQueue(device->buffer_queue) == 0);

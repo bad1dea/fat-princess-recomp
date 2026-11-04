@@ -1,0 +1,67 @@
+diff --git a/runtime/ppu/ppu_loader.cpp b/runtime/ppu/ppu_loader.cpp
+index db1c1d2..e37978b 100644
+--- a/runtime/ppu/ppu_loader.cpp
++++ b/runtime/ppu/ppu_loader.cpp
+@@ -1949,7 +1949,7 @@ static inline __attribute__((always_inline)) int vm_store_plain(uint32_t ea, uin
+            __builtin_expect(!g_barrier_sync_watch && !g_null_sweep_hi, 1) &&
+            !(s_coh_armed && ((s_coh_bitmap[ea >> 10] >> ((ea >> 7) & 7)) & 1u));
+ }
+-void vm_write8 (uint64_t a, uint8_t  v) {
++static __attribute__((noinline)) void vm_write8_slow(uint64_t a, uint8_t v) {
+     if (vm_store_plain((uint32_t)a, 1)) { *(uint8_t*)(vm_base + (uint32_t)a) = v; return; }
+     barrier_watch_hit((uint32_t)a, v, 1, __builtin_return_address(0)); if (vm_oob((uint32_t)a,1) || vm_null_store((uint32_t)a, v, 1, __builtin_return_address(0))) return;
+ #ifdef _WIN32
+@@ -1961,11 +1961,23 @@ void vm_write8 (uint64_t a, uint8_t  v) {
+         else if(((uint32_t)a&3)==0 && v!=0) pt_restore(wa); /* MSB byte set non-zero = restored */ } }
+ #endif
+     VM_WRITE_COH(a, &v, 1); }
+-void vm_write16(uint64_t a, uint16_t v) {
++/* Hot path: small enough to be a leaf; everything unusual is a tail call into the slow body above. */
++void vm_write8 (uint64_t a, uint8_t  v) {
++    if (__builtin_expect(vm_store_plain((uint32_t)a, 1), 1)) { *(uint8_t*)(vm_base + (uint32_t)a) = v; return; }
++    vm_write8_slow(a, v);
++}
++
++static __attribute__((noinline)) void vm_write16_slow(uint64_t a, uint16_t v) {
+     if (vm_store_plain((uint32_t)a, 2)) { const uint16_t b = __builtin_bswap16(v); if (!((uint32_t)a & 1u)) __atomic_store_n((uint16_t*)(vm_base + (uint32_t)a), b, __ATOMIC_RELAXED); else memcpy(vm_base + (uint32_t)a, &b, 2); return; }
+     barrier_watch_hit((uint32_t)a, v, 2, __builtin_return_address(0)); if (vm_oob((uint32_t)a,2) || vm_null_store((uint32_t)a, v, 2, __builtin_return_address(0))) return;
+     v = __builtin_bswap16(v); VM_WRITE_COH(a, &v, 2); }
+-void vm_write32(uint64_t a, uint32_t v) {
++/* Hot path: small enough to be a leaf; everything unusual is a tail call into the slow body above. */
++void vm_write16(uint64_t a, uint16_t v) {
++    if (__builtin_expect(vm_store_plain((uint32_t)a, 2), 1)) { const uint16_t b = __builtin_bswap16(v); if (!((uint32_t)a & 1u)) __atomic_store_n((uint16_t*)(vm_base + (uint32_t)a), b, __ATOMIC_RELAXED); else memcpy(vm_base + (uint32_t)a, &b, 2); return; }
++    vm_write16_slow(a, v);
++}
++
++static __attribute__((noinline)) void vm_write32_slow(uint64_t a, uint32_t v) {
+     if (vm_store_plain((uint32_t)a, 4)) {
+         const uint32_t b = __builtin_bswap32(v);
+         if (!((uint32_t)a & 3u)) __atomic_store_n((uint32_t*)(vm_base + (uint32_t)a), b, __ATOMIC_RELAXED);
+@@ -1984,7 +1996,13 @@ void vm_write32(uint64_t a, uint32_t v) {
+        * have side effects. The plain store above still happens -- the registers
+        * are guest memory and the PPU reads most of them straight back. */
+       if (spu_raw_is_reg((uint32_t)a)) spu_raw_reg_store((uint32_t)a, _v, 4); } }
+-void vm_write64(uint64_t a, uint64_t v) {
++/* Hot path: small enough to be a leaf; everything unusual is a tail call into the slow body above. */
++void vm_write32(uint64_t a, uint32_t v) {
++    if (__builtin_expect(vm_store_plain((uint32_t)a, 4), 1)) { const uint32_t b = __builtin_bswap32(v); if (!((uint32_t)a & 3u)) __atomic_store_n((uint32_t*)(vm_base + (uint32_t)a), b, __ATOMIC_RELAXED); else memcpy(vm_base + (uint32_t)a, &b, 4); return; }
++    vm_write32_slow(a, v);
++}
++
++static __attribute__((noinline)) void vm_write64_slow(uint64_t a, uint64_t v) {
+     if (vm_store_plain((uint32_t)a, 8)) {
+         const uint64_t b = __builtin_bswap64(v);
+         if (!((uint32_t)a & 7u)) __atomic_store_n((uint64_t*)(vm_base + (uint32_t)a), b, __ATOMIC_RELAXED);
+@@ -2000,6 +2018,12 @@ void vm_write64(uint64_t a, uint64_t v) {
+     barrier_watch_hit((uint32_t)a + 4, (uint32_t)v,         4, __builtin_return_address(0));
+     if (vm_oob((uint32_t)a,8) || vm_null_store((uint32_t)a, (uint32_t)(v >> 32), 8, __builtin_return_address(0))) return;
+     v = __builtin_bswap64(v); VM_WRITE_COH(a, &v, 8); }
++/* Hot path: small enough to be a leaf; everything unusual is a tail call into the slow body above. */
++void vm_write64(uint64_t a, uint64_t v) {
++    if (__builtin_expect(vm_store_plain((uint32_t)a, 8), 1)) { const uint64_t b = __builtin_bswap64(v); if (!((uint32_t)a & 7u)) __atomic_store_n((uint64_t*)(vm_base + (uint32_t)a), b, __ATOMIC_RELAXED); else memcpy(vm_base + (uint32_t)a, &b, 8); return; }
++    vm_write64_slow(a, v);
++}
++
+ }
+ 
+ /* ---- malloc allocation tracker (PS3_ALLOCTAG) -------------------------------

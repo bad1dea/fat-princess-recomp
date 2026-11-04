@@ -1,0 +1,73 @@
+name: Linux build
+
+on:
+  workflow_dispatch:
+    inputs:
+      baseline:
+        description: "Build without the inline guest stores, for an A/B"
+        type: boolean
+        default: false
+      dev:
+        description: "Dev build: with the DEBUG tab and the test hooks, identifies to the server as a dev build (d-), for our own machines only"
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    paths: ["src/**", "CMakeLists.txt", "patches/**", "encrypted/**", ".github/**"]
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v5
+      - name: Host tools
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -yq ninja-build libsdl2-dev libvulkan-dev zlib1g-dev glslang-dev glslang-tools spirv-tools zstd clang
+      - uses: ./.github/actions/prepare
+        with:
+          lift-key: ${{ secrets.FP_LIFT_KEY }}
+          lift-deploy-key: ${{ secrets.FP_LIFT_DEPLOY_KEY }}
+      - name: Baseline (no inline stores)
+        if: ${{ inputs.baseline }}
+        run: |
+          rm -f private/lift/game/ppu_inline_stores.h
+          sed -i '/ppu_inline_stores.h/d' private/lift/game/ppu_recomp_*.cpp
+      - name: Verify bounded stall capture
+        run: |
+          c++ -std=c++17 -O2 tests/stall_trace.cpp -o /tmp/stall-trace
+          /tmp/stall-trace
+          python3 tests/stall_trace_backend.py
+          cc -O2 tests/audio_queue_budget.c -o /tmp/audio-budget
+          /tmp/audio-budget
+          python3 tests/vulkan_buffer_failure.py
+          python3 tests/vulkan_buffer_ownership.py
+      - name: Configure
+        run: |
+          cmake -S . -B build/native -G Ninja -DCMAKE_BUILD_TYPE=Release -DFP_BUILD_GAME=ON \
+            -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++ \
+            -DFP_DEFAULT_SERVER="${{ secrets.FP_SERVER }}" -DFP_DEFAULT_JOIN_URL="${{ secrets.FP_JOIN_URL }}" -DFP_DEBUG_MENU=${{ inputs.dev && 'ON' || 'OFF' }} -DFP_RELEASE_SECRET="${{ inputs.dev && '' || secrets.FP_BUILD_SECRET }}" -DFP_DEV_SECRET="${{ inputs.dev && secrets.FP_DEV_SECRET || '' }}" \
+            -DSPU_DIR="$PWD/private/lift/spu" -DFP_OVERLAY_DIR="$PWD/private/lift/overlays"
+      - name: Build
+        run: |
+          set -o pipefail
+          cmake --build build/native --target MyGameRecomp -j "$(nproc)" -- -k 0 2>&1 | tee build.log | grep -E "error:|FAILED|Linking" || true
+          find build/native -name fp_native -type f -perm -u+x | grep -q .
+      - name: Error summary
+        if: failure()
+        run: |
+          grep -hE "error:" build.log | sed -E 's#^.*/(third_party|src|private)/#\1/#' | sort | uniq -c | sort -rn | head -80 || true
+          echo "--- linker ---"
+          grep -E "Undefined symbols|referenced from|undefined reference|ld: |duplicate symbol|  \"_" build.log | sort -u | head -150 || true
+      - name: Package
+        if: success()
+        run: |
+          exe=$(find build/native -name fp_native -type f -perm -u+x | head -1)
+          mkdir -p out && cp "$exe" out/fp_native && strip --strip-debug out/fp_native
+      - uses: ./.github/actions/seal
+        if: success()
+        with:
+          name: fat-princess-linux
+          path: out/
+          key: ${{ secrets.FP_ART_KEY }}

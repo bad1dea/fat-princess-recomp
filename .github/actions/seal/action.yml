@@ -1,0 +1,33 @@
+name: Seal and upload
+description: Encrypt a build output with FP_ART_KEY before it becomes a downloadable artifact. Only the key holder can open it.
+inputs:
+  name:
+    description: Artifact name
+    required: true
+  path:
+    description: File or folder to seal
+    required: true
+  key:
+    description: Passphrase (secret FP_ART_KEY)
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Encrypt
+      shell: bash
+      env:
+        FP_ART_KEY: ${{ inputs.key }}
+        SEAL_PATH: ${{ inputs.path }}
+        SEAL_NAME: ${{ inputs.name }}
+      run: |
+        set -euo pipefail
+        test -n "$FP_ART_KEY"
+        mkdir -p "$RUNNER_TEMP/sealed"
+        if [ -d "$SEAL_PATH" ]; then tar -C "$SEAL_PATH" -cf - .; else tar -C "$(dirname "$SEAL_PATH")" -cf - "$(basename "$SEAL_PATH")"; fi \
+          | openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -pass env:FP_ART_KEY -out "$RUNNER_TEMP/sealed/$SEAL_NAME.tar.enc"
+        ls -la "$RUNNER_TEMP/sealed"
+    - uses: actions/upload-artifact@v5
+      with:
+        name: ${{ inputs.name }}-sealed
+        path: ${{ runner.temp }}/sealed/${{ inputs.name }}.tar.enc
+        retention-days: 3

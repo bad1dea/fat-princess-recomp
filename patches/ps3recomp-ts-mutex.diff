@@ -1,0 +1,21 @@
+diff --git a/runtime/spu/spu_workload.c b/runtime/spu/spu_workload.c
+--- a/runtime/spu/spu_workload.c
++++ b/runtime/spu/spu_workload.c
+@@ -468,8 +468,17 @@
+     for (int i = 0; i < TS_TRACK; i++) if (!s_ts_run[i].ea) { s_ts_run[i].ea = taskset_ea; return s_ts_run[i].running; }
+     return NULL;
+ }
++/* The lock is held across a task dispatch (a thread wake and queue work), and the PPU thread creating a task waits for
++ * it while the SPU worker retires one. A Sleep(0) spin made the waiter burn a core in sched_yield for that whole time;
++ * off Windows it is a mutex. */
++#ifdef _WIN32
+ static void ts_lock(void)   { while (InterlockedExchange(&s_ts_lock, 1)) Sleep(0); }
+ static void ts_unlock(void) { InterlockedExchange(&s_ts_lock, 0); }
++#else
++static pthread_mutex_t s_ts_mutex = PTHREAD_MUTEX_INITIALIZER;
++static void ts_lock(void)   { pthread_mutex_lock(&s_ts_mutex); }
++static void ts_unlock(void) { pthread_mutex_unlock(&s_ts_mutex); }
++#endif
+ 
+ void spu_taskset_creation_lock(void) { ts_lock(); }
+ void spu_taskset_creation_unlock(void) { ts_unlock(); }

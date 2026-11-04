@@ -1,0 +1,58 @@
+name: macOS build
+
+# ARM64 compile on Apple Silicon, Vulkan renderer through MoltenVK: the first
+# step toward the iOS app. Lifted sources arrive encrypted; game data never does.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ["src/**", "CMakeLists.txt", "patches/**", "encrypted/**", ".github/**"]
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v5
+      - name: Select Xcode
+        run: |
+          xc="$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)"
+          sudo xcode-select -switch "${xc:-/Applications/Xcode.app}"
+          xcodebuild -version
+      - name: Host tools
+        run: |
+          brew install sdl2 ninja zstd openssl@3 molten-vk vulkan-headers vulkan-loader glslang spirv-tools
+          echo "$(brew --prefix openssl@3)/bin" >> "$GITHUB_PATH"
+      - uses: ./.github/actions/prepare
+        with:
+          lift-key: ${{ secrets.FP_LIFT_KEY }}
+          lift-deploy-key: ${{ secrets.FP_LIFT_DEPLOY_KEY }}
+      - name: Configure
+        run: |
+          cmake -S . -B build/mac -G Ninja -DCMAKE_BUILD_TYPE=Release -DFP_BUILD_GAME=ON -DFP_X86_V3=OFF -DCMAKE_PREFIX_PATH="$(brew --prefix)" \
+            -DFP_DEFAULT_SERVER="${{ secrets.FP_SERVER }}" -DFP_DEFAULT_JOIN_URL="${{ secrets.FP_JOIN_URL }}" -DFP_DEBUG_MENU=OFF -DFP_RELEASE_SECRET="${{ secrets.FP_BUILD_SECRET }}" \
+            -DSPU_DIR="$PWD/private/lift/spu" -DFP_OVERLAY_DIR="$PWD/private/lift/overlays"
+      - name: Build
+        run: |
+          set -o pipefail
+          cmake --build build/mac --target MyGameRecomp -j "$(sysctl -n hw.ncpu)" -- -k 0 2>&1 | tee build.log | grep -E "error:|FAILED|Linking" || true
+          find build/mac -name fp_native -type f -perm -u+x | grep -q .
+      - name: Error summary
+        if: failure()
+        run: |
+          grep -hE "error:" build.log | sed -E 's#^.*/(third_party|src|private)/#\1/#' | sort | uniq -c | sort -rn | head -80 || true
+          echo "--- linker ---"
+          grep -E "Undefined symbols|referenced from|undefined reference|ld: |duplicate symbol|  \"_" build.log | sort -u | head -150 || true
+      - name: Package
+        if: success()
+        run: |
+          exe=$(find build/mac -name fp_native -type f -perm -u+x | head -1)
+          mkdir -p out && cp "$exe" out/fp_native && strip -S out/fp_native
+          printf '%s\n' 'Needs the Vulkan loader and MoltenVK: brew install vulkan-loader molten-vk' \
+            'Run from your game folder (game/ and elf/retail-game-verified.elf next to it).' > out/README.txt
+      - uses: ./.github/actions/seal
+        if: success()
+        with:
+          name: fat-princess-macos-arm64
+          path: out/
+          key: ${{ secrets.FP_ART_KEY }}

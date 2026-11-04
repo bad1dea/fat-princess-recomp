@@ -1,0 +1,37 @@
+--- a/libs/video/rsx_vulkan_backend.c	2026-11-02 22:08:04.761152017 -0500
++++ b/libs/video/rsx_vulkan_backend.c	2026-11-02 22:08:04.751496022 -0500
+@@ -4594,6 +4594,7 @@
+ 
+ /* rsx_be_sampler_desc is the registers decoded the D3D12 way; the wrap codes
+  * stay the guest's 1..8, which vk_gcm_wrap already translates. */
++static int vk_bisect(void);
+ static VkSampler vk_eng_sampler(const rsx_be_sampler_desc* d)
+ {
+     u32 lo, hi;
+@@ -4615,6 +4616,16 @@
+         .addressModeW = vk_gcm_wrap(d->wrap_r),
+         .minLod = min_lod, .maxLod = max_lod,
+         .borderColor = VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK };
++    {   /* RSX_BISECT 32: no border-colour wrap, 64: no LOD range, 128: nearest mip filter */
++        const int bi = vk_bisect();
++        if (bi & 32) {
++            if (sci.addressModeU == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER) sci.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
++            if (sci.addressModeV == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER) sci.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
++            if (sci.addressModeW == VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_BORDER) sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
++        }
++        if (bi & 64) { sci.minLod = 0.0f; sci.maxLod = 0.0f; }
++        if (bi & 128) sci.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
++    }
+     VkSampler smp;
+     if (pvkCreateSampler(s_vk.device, &sci, NULL, &smp) != VK_SUCCESS) return s_vk.sampler;
+     s_esamp[s_esamp_count].key = key;
+@@ -4739,7 +4750,8 @@
+ 
+ /* RSX_BISECT (diagnostic, default 0): 1 copy pooled geometry into the slot
+  * buffers, 2 one sampler for every unit, 4 wait for the GPU after each draw,
+- * 8 dummy texture on every unit, 16 magenta instead of 2D lookups (decompiler). */
++ * 8 dummy texture on every unit, 16 magenta instead of 2D lookups (decompiler),
++ * 32 no border wrap, 64 no LOD range, 128 nearest mip filter (sampler creation). */
+ static int vk_bisect(void)
+ {
+     static int v=-1;

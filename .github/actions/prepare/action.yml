@@ -1,0 +1,103 @@
+name: Prepare sources
+description: Rebuild the ps3recomp fork and decrypt the lifted sources
+inputs:
+  inline-stores:
+    description: "Inline the lifted guest stores (iOS yes; on x86 Linux it measured 2-5% more CPU)"
+    default: 'false'
+  lift-key:
+    description: Decryption key for the build inputs
+    required: true
+  lift-deploy-key:
+    description: Read-only deploy key for the private repository that holds the build inputs
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: ps3recomp fork
+      shell: bash
+      run: |
+        set -euo pipefail
+        git clone -q https://github.com/sp00nznet/ps3recomp.git third_party/ps3recomp
+        cd third_party/ps3recomp
+        git checkout -q 39a3629
+        # One binary-safe diff from upstream: several sources mix CRLF and LF.
+        git apply --whitespace=nowarn ../../patches/ps3recomp.diff
+        # Portability fixes for Apple clang and other non-Linux hosts.
+        git apply --whitespace=nowarn ../../patches/ps3recomp-portability.diff
+        # Per-window frame work and headroom in the stall diagnostics.
+        git apply --whitespace=nowarn ../../patches/ps3recomp-headroom.diff
+        # Fast path for byte and halfword guest stores.
+        git apply --whitespace=nowarn ../../patches/ps3recomp-fast-stores.diff
+        # Wide lines on Metal (priest beams): the vertex program is repeated as instances shifted by whole pixels.
+        git apply --whitespace=nowarn ../../patches/ps3recomp-wide-lines.diff
+        # Direct-mapped cache in front of the indirect-call address hash.
+        git apply --whitespace=nowarn ../../patches/ps3recomp-icall-cache.diff
+        # SPU hop history and the SPU pushbuffer tracker off unless asked for.
+        git apply --whitespace=nowarn ../../patches/ps3recomp-spu-hops.diff
+        # Guest stores: a small leaf on the hot path, the checks out of line.
+        git apply --whitespace=nowarn ../../patches/ps3recomp-store-split.diff
+        # Converted-vertex pool: ask for less memory until the phone grants it.
+        git apply --whitespace=nowarn ../../patches/ps3recomp-vpool-fallback.diff
+        # GPU busy time per 5 s, from the set fences.
+        git apply --whitespace=nowarn ../../patches/ps3recomp-gpu-busy.diff
+        # Guest PPU threads at the top QoS class (FP_PPU_QOS=initiated for the old one).
+        git apply --whitespace=nowarn ../../patches/ps3recomp-ppu-qos.diff
+        # Four command-buffer sets in flight instead of three.
+        git apply --whitespace=nowarn ../../patches/ps3recomp-four-sets.diff
+        # Real GPU time per command-buffer set from timestamp queries.
+        git apply --whitespace=nowarn ../../patches/ps3recomp-gpu-timestamps.diff
+        # Lock-line lock counters ([coh-stats]) and an ARM yield in its spin.
+        git apply --whitespace=nowarn ../../patches/ps3recomp-coh-stats.diff
+        # Lifted SPU float ops: the native round-toward-zero mode is a compile-time constant (SPU_FORCE_RZ).
+        git apply --whitespace=nowarn ../../patches/ps3recomp-spu-force-rz.diff
+        # One log line with the descriptor and sampler limits the device reports.
+        git apply --whitespace=nowarn ../../patches/ps3recomp-limits-log.diff
+        # How the frames reached the screen: gaps between presents in display refreshes (VK_GOOGLE_display_timing).
+        git apply --whitespace=nowarn ../../patches/ps3recomp-present-cadence.diff
+        # RSX_BISECT diagnostic switches (off unless set in env.txt).
+        git apply --whitespace=nowarn ../../patches/ps3recomp-bisect.diff
+        git apply --whitespace=nowarn ../../patches/ps3recomp-bisect-sampler.diff
+        git apply --whitespace=nowarn ../../patches/ps3recomp-bisect-barrier.diff
+        git apply --whitespace=nowarn ../../patches/ps3recomp-bisect-size.diff
+        git apply --whitespace=nowarn ../../patches/ps3recomp-bisect-swizzle.diff
+        git apply --whitespace=nowarn ../../patches/ps3recomp-bisect-split.diff
+        git apply --whitespace=nowarn ../../patches/ps3recomp-bisect-clear.diff
+        git apply --whitespace=nowarn ../../patches/ps3recomp-bisect-torn.diff
+        # Texture creation and uploads record into the open batch; freed textures are retired with their sets (no GPU drain).
+        git apply --whitespace=nowarn ../../patches/ps3recomp-upload-batch.diff
+        # Six command-buffer sets in flight (a dense frame is 6-9 sets; four left the draw thread waiting on the GPU).
+        git apply --whitespace=nowarn ../../patches/ps3recomp-six-sets.diff
+        # SPU thread hot paths: event-flag wakes only on a change, a four-way MFC lookup cache, back-off in a spinning guest yield.
+        git apply --whitespace=nowarn ../../patches/ps3recomp-spu-hotpaths.diff
+        # Each SPU context remembers its MFC engine: no registry lock per job, no cache voiding on release.
+        git apply --whitespace=nowarn ../../patches/ps3recomp-mfc-hint.diff
+        # The taskset lock is a mutex off Windows: a waiting PPU thread no longer spins in sched_yield.
+        git apply --whitespace=nowarn ../../patches/ps3recomp-ts-mutex.diff
+        # Counters and timers that only feed the diagnostic log are built only into dev builds (FP_DIAGNOSTICS).
+        git apply --whitespace=nowarn ../../patches/ps3recomp-diag-switch.diff
+    - name: Decrypt lifted sources
+      shell: bash
+      env:
+        FP_LIFT_KEY: ${{ inputs.lift-key }}
+        FP_LIFT_DEPLOY_KEY: ${{ inputs.lift-deploy-key }}
+      run: |
+        set -euo pipefail
+        mkdir -p private/lift
+        umask 077
+        # Relative paths: ssh on Windows runners does not take the backslashed temp directory.
+        printf '%s\n' "$FP_LIFT_DEPLOY_KEY" > .fp-lift-key
+        chmod 600 .fp-lift-key 2>/dev/null || true
+        GIT_SSH_COMMAND="ssh -i .fp-lift-key -o StrictHostKeyChecking=accept-new -o IdentitiesOnly=yes" \
+          git clone -q --depth 1 git@github.com:bad1dea/fp-lift.git .fp-lift-src
+        rm -f .fp-lift-key
+        openssl enc -d -aes-256-cbc -pbkdf2 -iter 200000 -in .fp-lift-src/lift.tar.zst.enc -pass env:FP_LIFT_KEY > lift.tar.zst
+        rm -rf .fp-lift-src
+        zstd -dq lift.tar.zst -o lift.tar && tar -xf lift.tar -C private/lift && rm lift.tar lift.tar.zst
+        ls private/lift
+        # Cheap guest-memory accessors in the lifted code's header (const globals instead of per-access calls).
+        python3 tools/lift_vm_cache.py private/lift/game
+        # Guest stores inline too (iOS only for now): the runtime's plain-store test in a header the lifted units include.
+        if [ "${{ inputs.inline-stores }}" = "true" ]; then python3 tools/lift_inline_stores.py private/lift/game; fi
+    - name: Hook the native menu bridge into the lifted sources
+      shell: bash
+      run: python3 tools/apply_menu_bridge.py private/lift

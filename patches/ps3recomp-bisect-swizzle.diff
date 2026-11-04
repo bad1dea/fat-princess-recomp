@@ -1,0 +1,24 @@
+--- a/libs/video/rsx_vulkan_backend.c	2026-11-02 23:07:01.473460706 -0500
++++ b/libs/video/rsx_vulkan_backend.c	2026-11-02 23:07:01.464009976 -0500
+@@ -3273,9 +3273,12 @@
+                              vk_remap_sel(sel[3]), vk_remap_sel(sel[0]) };
+     return m;
+ }
++static int vk_bisect(void);
+ static int vk_eng_make_view(VkImage img, VkFormat fmt, u32 levels, VkComponentMapping map,
+                             int cube, VkImageView* out)
+ {
++    /* RSX_BISECT 8192: identity channel mapping on every view (colours come out remapped wrongly; tests MoltenVK's swizzle path). */
++    if (vk_bisect() & 8192) memset(&map, 0, sizeof map);
+     VkImageViewCreateInfo vci = {
+         .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = img,
+         .viewType = cube ? VK_IMAGE_VIEW_TYPE_CUBE : VK_IMAGE_VIEW_TYPE_2D,
+@@ -4751,7 +4754,7 @@
+ /* RSX_BISECT (diagnostic, default 0): 1 copy pooled geometry into the slot
+  * buffers, 2 one sampler for every unit, 4 wait for the GPU after each draw,
+  * 8 dummy texture on every unit, 16 magenta instead of 2D lookups (decompiler),
+- * 256 barrier the sampled render targets and all memory before each pass; 32 no border wrap, 64 no LOD range, 128 nearest mip filter (sampler creation). */
++ * 8192 identity view swizzle, 256 barrier the sampled render targets and all memory before each pass; 32 no border wrap, 64 no LOD range, 128 nearest mip filter (sampler creation). */
+ static int vk_bisect(void)
+ {
+     static int v=-1;

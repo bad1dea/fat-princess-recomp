@@ -1,0 +1,63 @@
+diff --git a/runtime/spu/spu_context.h b/runtime/spu/spu_context.h
+--- a/runtime/spu/spu_context.h
++++ b/runtime/spu/spu_context.h
+@@ -391,6 +391,10 @@
+      * manager then ran its buffer loop a second time on the job's registers
+      * and died in its own assert (the song-freeze). */
+     uint32_t drain_ret_pc;
++
++    /* This context's private MFC engine once looked up (spu_channels.c); cleared by spu_mfc_release. Lets the
++     * hot channel path skip the registry lock, and a job's release no longer invalidates other threads' hints. */
++    void* mfc_hint;
+ } spu_context;
+ 
+ /* Reserved LS addresses (inside the kernel area, below the 0xA00 policy-module
+diff --git a/runtime/spu/spu_channels.c b/runtime/spu/spu_channels.c
+--- a/runtime/spu/spu_channels.c
++++ b/runtime/spu/spu_channels.c
+@@ -327,6 +327,7 @@
+ /* A release invalidates TLS lookup hints before an address can be reused.
+  * As with the registry itself, removal requires the execution owner to stop. */
+ static volatile long long s_mfc_generation = 1;
++static uint64_t mfc_generation(void) __attribute__((unused));
+ static uint64_t mfc_generation(void) {
+ #if defined(_MSC_VER)
+     return (uint64_t)InterlockedCompareExchange64(&s_mfc_generation,0,0);
+@@ -373,31 +374,25 @@
+ 
+ static mfc_engine* mfc_for(spu_context* ctx)
+ {
+-    /* Per-thread cache of four contexts (one thread runs several SPU contexts in turn; a single entry missed on
+-     * every switch and took the registry's read lock). On unless SPU_MFC_LOOKUP_CACHE=0. */
+-    enum { WAYS=4 };
++    /* The engine is remembered in the context itself (ctx->mfc_hint, cleared by spu_mfc_release): a thread that
++     * runs many short-lived job contexts otherwise took the registry lock for each, and every release bumped a
++     * generation that voided every other thread's cache. On unless SPU_MFC_LOOKUP_CACHE=0. */
+     static SPU_TLS int enabled=-1;
+-    static SPU_TLS spu_context* way_ctx[WAYS];
+-    static SPU_TLS mfc_engine* way_engine[WAYS];
+-    static SPU_TLS uint64_t way_generation[WAYS];
+-    static SPU_TLS unsigned next_way;
+     if(enabled<0) {
+         const char* option=getenv("SPU_MFC_LOOKUP_CACHE");
+         enabled=!(option && !strcmp(option,"0"));
+     }
+     if(!enabled) return mfc_for_uncached(ctx);
+-    const uint64_t generation=mfc_generation();
+-    for(int i=0;i<WAYS;i++)
+-        if(way_ctx[i]==ctx && way_engine[i] && way_generation[i]==generation) return way_engine[i];
++    if(ctx->mfc_hint) return (mfc_engine*)ctx->mfc_hint;
+     mfc_engine* engine=mfc_for_uncached(ctx);
+-    const unsigned w=next_way++%WAYS;
+-    way_ctx[w]=ctx;way_engine[w]=engine;way_generation[w]=generation;
++    ctx->mfc_hint=engine;
+     return engine;
+ }
+ 
+ void spu_mfc_release(spu_context* ctx)
+ {
+     if (!ctx) return;
++    ctx->mfc_hint = NULL;
+     AcquireSRWLockExclusive(&s_mfc_claim_lock);
+     for (spu_mfc_slot** link = &s_mfc_slots; *link; link = &(*link)->next) {
+         if ((*link)->ctx != ctx) continue;

@@ -1,0 +1,3448 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 328da532..137caad2 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -50,9 +50,7 @@ list(FILTER HLE_SOURCES EXCLUDE REGEX "/tests/")
+ option(PS3RECOMP_RSX_VULKAN "Build the Vulkan RSX backend (Linux)" OFF)
+ list(FILTER HLE_SOURCES EXCLUDE REGEX "rsx_vulkan_backend\\.c$")
+ if(PS3RECOMP_RSX_VULKAN)
+-    if(APPLE)
+-        message(FATAL_ERROR "PS3RECOMP_RSX_VULKAN is not available on macOS")
+-    endif()
++    # Apple: Vulkan through MoltenVK (the backend enables the portability extensions).
+     find_path(PS3RECOMP_VULKAN_INCLUDE_DIR vulkan/vulkan.h)
+     if(NOT PS3RECOMP_VULKAN_INCLUDE_DIR)
+         message(FATAL_ERROR "Vulkan headers not found. Debian/Ubuntu: "
+@@ -66,7 +64,7 @@ endif()
+ 
+ # The Metal backend is Objective-C and Apple-only, so it is added explicitly
+ # rather than globbed. It needs no platform #ifdef of its own as a result.
+-if(APPLE)
++if(APPLE AND NOT IOS)   # the Metal backend uses AppKit; iOS takes the Vulkan path
+     enable_language(OBJC)
+     list(APPEND HLE_SOURCES "${CMAKE_CURRENT_SOURCE_DIR}/libs/video/rsx_metal_backend.m")
+ endif()
+@@ -163,7 +161,7 @@ else()
+     target_link_libraries(ps3recomp_runtime PRIVATE Threads::Threads)
+ endif()
+ 
+-if(APPLE)
++if(APPLE AND NOT IOS)
+     target_link_libraries(ps3recomp_runtime PUBLIC
+         "-framework Metal"
+         "-framework QuartzCore"
+diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
+index 7da54660..138c07ae 100644
+--- a/libs/audio/cellAudio.c
++++ b/libs/audio/cellAudio.c
+@@ -240,7 +240,7 @@ static int audio_backend_init(void)
+     setenv("PULSE_LATENCY_MSEC", "6", 0);
+ #endif
+     int buf_pinned = 0;
+-    if (const char* e = getenv("FP_AUDIO_BUF_BLOCKS")) { int v = atoi(e); if (v >= 1 && v <= 16) { buf_blocks = v; buf_pinned = 1; } }
++    { const char* e = getenv("FP_AUDIO_BUF_BLOCKS"); if (e) { int v = atoi(e); if (v >= 1 && v <= 16) { buf_blocks = v; buf_pinned = 1; } } }
+     want.samples  = CELL_AUDIO_BLOCK_SAMPLES * buf_blocks;
+     want.callback = NULL; /* push mode: SDL_QueueAudio */
+ #ifndef _WIN32
+@@ -818,7 +818,12 @@ void fp_audio_boost_this_thread(const char* what)
+     done = 1;
+     const char* e = getenv("FP_AUDIO_BOOST");
+     if (e && e[0] == '0') return;
+-#if AUDIO_BACKEND_SDL2
++#if defined(__APPLE__)
++    /* Darwin: a QoS class, not a scheduling priority (setting one opts the thread out of QoS and the
++     * scheduler then treats it as ordinary work). User-interactive keeps it on a performance core. */
++    const int rc = pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
++    fprintf(stderr, "[audio-boost] %s thread QoS user-interactive: %s\n", what, rc == 0 ? "yes" : "no");
++#elif AUDIO_BACKEND_SDL2
+     /* FP_AUDIO_RT=1: real-time scheduling through rtkit (SCHED_RR) instead of nice -10. Off by default: the SPU
+      * audio task also spins on SPU lock lines, and at real-time priority it kept their holder off the core; a
+      * Steam Deck hung and rtkit's RLIMIT_RTTIME then killed the game with SIGXCPU. */
+@@ -907,6 +912,8 @@ static void* audio_adapt_thread(void* arg)
+     }
+ }
+ 
++void cellVoice_mix_output(float* out, int frames);
++
+ static void SDLCALL audio_sdl_pull(void* userdata, Uint8* stream, int len)
+ {
+     (void)userdata;
+@@ -981,6 +988,7 @@ static void SDLCALL audio_sdl_pull(void* userdata, Uint8* stream, int len)
+             memset(dst, 0, (size_t)block_bytes);
+             underruns++;
+         }
++        cellVoice_mix_output(dst, CELL_AUDIO_BLOCK_SAMPLES);
+         if (wf) fwrite(dst, sizeof(float), CELL_AUDIO_BLOCK_SAMPLES * 2, wf);
+     }
+     if (len > n * block_bytes) memset(stream + n * block_bytes, 0, (size_t)(len - n * block_bytes));
+@@ -1154,7 +1162,12 @@ static void* audio_mix_thread_func(void* arg)
+         if (due < last_mix + 3000000ll) due = last_mix + 3000000ll;   /* never two blocks within 3 ms */
+         if (now < due) {
+             struct timespec w; w.tv_sec = due / 1000000000ll; w.tv_nsec = due % 1000000000ll;
++#ifdef __APPLE__
++            /* No clock_nanosleep on Apple: sleep the remaining time to the same deadline. */
++            (void)w; { long long r = due - now; struct timespec rel = { (time_t)(r / 1000000000ll), (long)(r % 1000000000ll) }; nanosleep(&rel, NULL); }
++#else
+             clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &w, NULL);
++#endif
+             continue;
+         }
+         last_mix = now;
+diff --git a/libs/audio/cellVoice.c b/libs/audio/cellVoice.c
+index 37c5ddb8..8877b431 100644
+--- a/libs/audio/cellVoice.c
++++ b/libs/audio/cellVoice.c
+@@ -311,6 +311,26 @@ static void play_callback(void* user, Uint8* stream, int len)
+     free(acc);
+ }
+ 
++/* Some hosts (iOS) offer one output device, already held by cellAudio. Voice then rides in the game mix:
++ * cellAudio calls this per output block and it adds 16 kHz voice upsampled to 48 kHz stereo. */
++static volatile int s_play_mixed;
++void cellVoice_mix_output(float* out, int frames)
++{
++    if (!s_play_mixed) return;
++    static int16_t buf[BLOCK_SAMPLES];
++    static int have, pos, phase;
++    static float prev, cur;
++    for (int i = 0; i < frames; i++) {
++        if (phase == 0) {
++            if (pos >= have) { play_callback(NULL, (Uint8*)buf, (int)sizeof buf); have = BLOCK_SAMPLES; pos = 0; }
++            prev = cur; cur = buf[pos++] / 32768.0f;
++        }
++        const float v = prev + (cur - prev) * (float)phase / 3.0f;
++        out[2 * i] += v; out[2 * i + 1] += v;
++        phase = (phase + 1) % 3;
++    }
++}
++
+ static void open_devices(void)
+ {
+     if (!SDL_WasInit(SDL_INIT_AUDIO)) SDL_InitSubSystem(SDL_INIT_AUDIO);
+@@ -323,6 +343,7 @@ static void open_devices(void)
+         s_play_dev = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
+         printf("[cellVoice] playback device %s\n", s_play_dev ? "open" : SDL_GetError());
+         if (s_play_dev) SDL_PauseAudioDevice(s_play_dev, 0);
++        s_play_mixed = !s_play_dev;
+     }
+     if (s_tone_hz > 0) {
+         if (!s_tone_thread) { s_tone_run = 1; s_tone_thread = SDL_CreateThread(tone_thread, "voice-tone", NULL); }
+@@ -341,6 +362,7 @@ static void close_devices(void)
+     if (s_cap_dev) { SDL_CloseAudioDevice(s_cap_dev); s_cap_dev = 0; }
+     if (s_tone_thread) { s_tone_run = 0; SDL_WaitThread(s_tone_thread, NULL); s_tone_thread = NULL; }
+     if (s_play_dev) { SDL_CloseAudioDevice(s_play_dev); s_play_dev = 0; }
++    s_play_mixed = 0;
+ }
+ 
+ /* ---- API ------------------------------------------------------------------------------------------------- */
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index f78742c2..4cb04d86 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -40,6 +40,9 @@
+ 
+ #define VK_NO_PROTOTYPES
+ #include <vulkan/vulkan.h>
++#if defined(__APPLE__)
++#include <TargetConditionals.h>
++#endif
+ 
+ #include "rsx_vulkan_backend.h"
+ #include "rsx_debug_stats.h"
+@@ -258,6 +261,12 @@ static int vk_load_library(void)
+ {
+ #ifdef _WIN32
+     static const char* names[] = { "vulkan-1.dll" };
++#elif defined(__APPLE__)
++    /* The Vulkan loader if installed, else MoltenVK directly (bundled in the app on iOS). */
++    static const char* names[] = { "libvulkan.1.dylib", "libvulkan.dylib", "libMoltenVK.dylib",
++                                   "@executable_path/Frameworks/MoltenVK.framework/MoltenVK",
++                                   "@executable_path/Frameworks/libMoltenVK.dylib",
++                                   "@executable_path/../Frameworks/libMoltenVK.dylib" };
+ #else
+     static const char* names[] = { "libvulkan.so.1", "libvulkan.so" };
+ #endif
+@@ -2052,6 +2061,9 @@ static void vk_window_open(const char* title)
+         return;
+     }
+     Uint32 flags = SDL_WINDOW_VULKAN | SDL_WINDOW_SHOWN;
++#if defined(__APPLE__) && TARGET_OS_IOS
++    flags |= SDL_WINDOW_ALLOW_HIGHDPI;   /* native pixels: sharper, and host panels at a sane size on phones */
++#endif
+     if (vk_env_on("PS3RECOMP_VK_FULLSCREEN")) flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
+     s_vk.window = SDL_CreateWindow(title && title[0] ? title : "ps3recomp",
+                                    SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+@@ -2589,6 +2601,7 @@ typedef struct vk_eng_obj {
+     u32      block;                  /* bytes per 4x4 block, 0 = not BC     */
+     u32      surface, remap, rsx_fmt;/* VIEW: what it is a view of          */
+     u8       cube;                   /* TEXTURE: six layers, a CUBE view    */
++    u8       decode;                 /* TEXTURE: BC1..3 kept as RGBA8 (no BC on the device) */
+ } vk_eng_obj;
+ 
+ static vk_eng_obj s_eobj[VK_ENG_MAX_OBJ];
+@@ -2713,6 +2726,55 @@ static int vk_eng_upload_region(VkImage img, u32 layer, u32 mip, u32 x, u32 y,
+ }
+ 
+ /* The same into the whole of a level, from its origin. */
++/* Devices without textureCompressionBC (Apple's iOS GPUs) get BC1..3 decoded
++ * here into RGBA8, the same texels a BC image would sample. */
++static void vk_bc_colors(const u8* b, u8 pal[4][4], int bc1)
++{
++    const u32 c0 = b[0] | (b[1] << 8), c1 = b[2] | (b[3] << 8);
++    const u32 cs[2] = { c0, c1 };
++    for (int i = 0; i < 2; i++) {
++        const u32 r = (cs[i] >> 11) & 31, g = (cs[i] >> 5) & 63, bl = cs[i] & 31;
++        pal[i][0] = (u8)((r << 3) | (r >> 2)); pal[i][1] = (u8)((g << 2) | (g >> 4));
++        pal[i][2] = (u8)((bl << 3) | (bl >> 2)); pal[i][3] = 255;
++    }
++    for (int k = 0; k < 3; k++) {
++        if (!bc1 || c0 > c1) {
++            pal[2][k] = (u8)((2 * pal[0][k] + pal[1][k]) / 3);
++            pal[3][k] = (u8)((pal[0][k] + 2 * pal[1][k]) / 3);
++        } else {
++            pal[2][k] = (u8)((pal[0][k] + pal[1][k]) / 2);
++            pal[3][k] = 0;
++        }
++    }
++    pal[2][3] = 255;
++    pal[3][3] = (!bc1 || c0 > c1) ? 255 : 0;
++}
++static void vk_bc_decode_block(int kind, const u8* b, u8* out, size_t pitch)
++{
++    u8 alpha[16];
++    const u8* color = b;
++    if (kind == 2) {                      /* BC2: explicit 4-bit alpha */
++        for (int i = 0; i < 16; i++) { const u8 n = (b[i / 2] >> ((i & 1) * 4)) & 15; alpha[i] = (u8)(n * 17); }
++        color = b + 8;
++    } else if (kind == 3) {               /* BC3: interpolated alpha */
++        u8 a[8] = { b[0], b[1] };
++        if (a[0] > a[1]) for (int i = 1; i < 7; i++) a[i + 1] = (u8)(((7 - i) * a[0] + i * a[1]) / 7);
++        else { for (int i = 1; i < 5; i++) a[i + 1] = (u8)(((5 - i) * a[0] + i * a[1]) / 5); a[6] = 0; a[7] = 255; }
++        u64 bits = 0;
++        for (int i = 0; i < 6; i++) bits |= (u64)b[2 + i] << (8 * i);
++        for (int i = 0; i < 16; i++) alpha[i] = a[(bits >> (3 * i)) & 7];
++        color = b + 8;
++    }
++    u8 pal[4][4];
++    vk_bc_colors(color, pal, kind == 1);
++    const u32 idx = color[4] | (color[5] << 8) | (color[6] << 16) | ((u32)color[7] << 24);
++    for (int i = 0; i < 16; i++) {
++        u8* px = out + (size_t)(i / 4) * pitch + (size_t)(i % 4) * 4;
++        memcpy(px, pal[(idx >> (2 * i)) & 3], 4);
++        if (kind != 1) px[3] = alpha[i];
++    }
++}
++
+ static int vk_eng_upload_rows(VkImage img, u32 layer, u32 mip, u32 w, u32 h,
+                               size_t tight, u32 rows, const void* src, u32 row_bytes)
+ {
+@@ -3124,9 +3186,9 @@ static u32 vk_eng_texture_create(void* user, rsx_be_format fmt, u32 w, u32 h,
+     u32 bpp;
+     const VkFormat vf = vk_eng_format(fmt, &bpp);
+     const int bc = (fmt == RSX_BE_FMT_BC1 || fmt == RSX_BE_FMT_BC2 || fmt == RSX_BE_FMT_BC3);
+-    if (vf == VK_FORMAT_UNDEFINED || !w || !h || w > vk_max_dim() || h > vk_max_dim() ||
+-        (bc && !s_vk.bc_ok))
++    if (vf == VK_FORMAT_UNDEFINED || !w || !h || w > vk_max_dim() || h > vk_max_dim())
+         return 0;
++    const int decode = bc && !s_vk.bc_ok ? (fmt == RSX_BE_FMT_BC1 ? 1 : fmt == RSX_BE_FMT_BC2 ? 2 : 3) : 0;
+     const int cube = (faces == 6);
+     if ((faces != 1 && !cube) || (cube && w != h)) return 0;   /* cube faces are square */
+     if (!mips) mips = 1;
+@@ -3136,7 +3198,7 @@ static u32 vk_eng_texture_create(void* user, rsx_be_format fmt, u32 w, u32 h,
+     VkImageCreateInfo ici = {
+         .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO,
+         .flags = cube ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : 0, .imageType = VK_IMAGE_TYPE_2D,
+-        .format = vf, .extent = { w, h, 1 }, .mipLevels = mips, .arrayLayers = cube ? 6u : 1u,
++        .format = decode ? VK_FORMAT_R8G8B8A8_UNORM : vf, .extent = { w, h, 1 }, .mipLevels = mips, .arrayLayers = cube ? 6u : 1u,
+         .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
+         .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+         .sharingMode = VK_SHARING_MODE_EXCLUSIVE, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED };
+@@ -3150,10 +3212,11 @@ static u32 vk_eng_texture_create(void* user, rsx_be_format fmt, u32 w, u32 h,
+                                  .allocationSize = req.size, .memoryTypeIndex = type };
+     if (pvkAllocateMemory(s_vk.device, &mai, NULL, &o->im.mem) != VK_SUCCESS ||
+         pvkBindImageMemory(s_vk.device, o->im.img, o->im.mem, 0) != VK_SUCCESS ||
+-        vk_eng_make_view(o->im.img, vf, mips, vk_remap(remap, rsx_fmt), cube, &o->im.view))
++        vk_eng_make_view(o->im.img, decode ? VK_FORMAT_R8G8B8A8_UNORM : vf, mips,
++                         vk_remap(remap, rsx_fmt), cube, &o->im.view))
+         goto fail;
+-    o->kind = VK_ENG_TEXTURE; o->fmt = vf; o->w = w; o->h = h; o->cube = (u8)cube;
+-    o->bpp = bc ? 0 : bpp; o->block = bc ? bpp : 0;
++    o->kind = VK_ENG_TEXTURE; o->fmt = decode ? VK_FORMAT_R8G8B8A8_UNORM : vf; o->w = w; o->h = h; o->cube = (u8)cube;
++    o->bpp = bc ? 0 : bpp; o->block = bc ? bpp : 0; o->decode = (u8)decode;
+     /* UNDEFINED -> GENERAL for every level and face before the uploads arrive. */
+     if ((s_begin_reason="vk_eng_texture_create", vk_begin())) goto fail;
+     vk_barrier_image(o->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED);
+@@ -3173,6 +3236,20 @@ static void vk_eng_texture_upload_impl(void* user, u32 texture, u32 face, u32 mi
+     if (!o || !src || !row_bytes || !rows || face >= (o->cube ? 6u : 1u)) return;
+     /* A BC row is a row of 4x4 blocks; the engine's `rows` already counts them. */
+     const size_t tight = o->block ? (size_t)((w + 3u) / 4u) * o->block : (size_t)w * o->bpp;
++    if (o->decode) {
++        const u32 bw = (w + 3u) / 4u, bh = rows, pw = bw * 4u;
++        const size_t pitch = (size_t)pw * 4u;
++        u8* rgba = (u8*)malloc(pitch * bh * 4u);
++        if (!rgba) return;
++        for (u32 by = 0; by < bh; by++)
++            for (u32 bx = 0; bx < bw; bx++)
++                vk_bc_decode_block(o->decode, (const u8*)src + (size_t)by * row_bytes + (size_t)bx * o->block,
++                                   rgba + (size_t)by * 4u * pitch + (size_t)bx * 16u, pitch);
++        u32 out_rows = bh * 4u < h ? bh * 4u : h;
++        vk_eng_upload_rows(o->im.img, face, mip, w, out_rows, (size_t)w * 4u, out_rows, rgba, (u32)pitch);
++        free(rgba);
++        return;
++    }
+     vk_eng_upload_rows(o->im.img, face, mip, w, h, tight, rows, src, row_bytes);
+ }
+ static void vk_eng_texture_upload(void* user, u32 texture, u32 face, u32 mip, u32 w, u32 h,
+@@ -4342,6 +4419,28 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+         ci.enabledExtensionCount   = s_vk.inst_ext_count;
+         ci.ppEnabledExtensionNames = s_vk.inst_exts;
+     }
++#ifdef __APPLE__
++    /* Through the Vulkan loader MoltenVK is only listed when portability enumeration is
++     * asked for; MoltenVK used directly (iOS) does not offer that extension. */
++    static const char* apple_exts[18];
++    PFN_vkEnumerateInstanceExtensionProperties enum_exts =
++        (PFN_vkEnumerateInstanceExtensionProperties)pvkGetInstanceProcAddr(VK_NULL_HANDLE, "vkEnumerateInstanceExtensionProperties");
++    int portability = 0;
++    if (enum_exts) {
++        VkExtensionProperties props[256];
++        uint32_t count = 256;
++        if (enum_exts(NULL, &count, props) >= 0)
++            for (uint32_t i = 0; i < count; i++)
++                if (!strcmp(props[i].extensionName, "VK_KHR_portability_enumeration")) portability = 1;
++    }
++    if (s_vk.windowed && portability) {
++        u32 n = 0;
++        for (; n < s_vk.inst_ext_count && n < 16; n++) apple_exts[n] = s_vk.inst_exts[n];
++        apple_exts[n++] = "VK_KHR_portability_enumeration";
++        ci.enabledExtensionCount = n; ci.ppEnabledExtensionNames = apple_exts;
++        ci.flags |= 0x00000001; /* VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR */
++    }
++#endif
+     static const char* const validation_layer[] = { "VK_LAYER_KHRONOS_validation" };
+     const char* ext_all[18];
+     int validation = 0;
+@@ -4405,7 +4504,12 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+     VkDeviceQueueCreateInfo qci = { .sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO,
+                                     .queueFamilyIndex = s_vk.queue_family,
+                                     .queueCount = 1, .pQueuePriorities = &prio };
++#ifdef __APPLE__
++    /* A portability device must enable VK_KHR_portability_subset. */
++    static const char* dev_exts[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME, "VK_KHR_portability_subset" };
++#else
+     static const char* dev_exts[] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
++#endif
+     /* DXT (BC1-3) is how PS3 titles ship most textures; Vulkan gates it
+      * behind a feature, enabled only when the device reports it. */
+     VkPhysicalDeviceFeatures have, want;
+@@ -4428,7 +4532,7 @@ static int vk_init_all(u32 width, u32 height, const char* title)
+     }
+     VkDeviceCreateInfo dci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+                                .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci,
+-                               .enabledExtensionCount = s_vk.windowed ? 1u : 0u,
++                               .enabledExtensionCount = s_vk.windowed ? (u32)(sizeof dev_exts / sizeof dev_exts[0]) : 0u,
+                                .ppEnabledExtensionNames = s_vk.windowed ? dev_exts : NULL,
+                                .pEnabledFeatures = &want };
+     VK_CHECK(pvkCreateDevice(s_vk.phys, &dci, NULL, &s_vk.device), "vkCreateDevice");
+diff --git a/runtime/memory/vm.h b/runtime/memory/vm.h
+index 9ea87dbd..4d7e78ad 100644
+--- a/runtime/memory/vm.h
++++ b/runtime/memory/vm.h
+@@ -160,6 +160,10 @@ static inline void vm_shutdown(void);
+  * arena and the guest's own variable keeps whatever was in it. The cost of
+  * removing the question is one over-reservation that is trimmed back.
+  */
++#if defined(__APPLE__)
++/* runtime/platform/win32_compat.c: one vm_map with an alignment mask (NULL on failure). */
++void* ps3_vm_reserve_aligned(uint64_t size);
++#endif
+ static inline int32_t vm_init(void)
+ {
+     if (vm_base != NULL) return CELL_OK; /* already initialized */
+@@ -208,6 +212,14 @@ static inline int32_t vm_init(void)
+     /* Over-map and trim: ask for twice the space, keep the 4 GB aligned window
+      * inside it, and give the head and tail back. mmap can hand back part of a
+      * mapping, so this needs no retry and cannot race. */
++#if defined(__APPLE__)
++    /* iOS caps a process's address space well below 8 GB unless the app holds
++     * the extended-virtual-addressing entitlement, so the over-map below fails
++     * there. vm_map takes an alignment mask: ask the kernel for exactly 4 GB on
++     * a 4 GB boundary in one step, and keep the over-map as the fallback. */
++    vm_base = (uint8_t*)ps3_vm_reserve_aligned(VM_TOTAL_SIZE);
++    if (!vm_base)
++#endif
+     {
+         size_t want = (size_t)VM_TOTAL_SIZE;
+         uint8_t* raw = (uint8_t*)mmap(NULL, want * 2, PROT_NONE,
+diff --git a/runtime/platform/win32_compat.c b/runtime/platform/win32_compat.c
+index 11a74804..aa296266 100644
+--- a/runtime/platform/win32_compat.c
++++ b/runtime/platform/win32_compat.c
+@@ -49,7 +49,10 @@
+  * while all that is wanted here is the ucontext_t a signal handler is given. */
+ #  include <sys/ucontext.h>
+ #  include <mach/mach.h>
+-#  include <mach/mach_vm.h>
++#  include <TargetConditionals.h>
++#  if !TARGET_OS_IOS   /* mach_vm.h is not available to iOS apps; vm_region_64 is */
++#    include <mach/mach_vm.h>
++#  endif
+ #  include <mach/thread_act.h>
+ #  include <pthread/qos.h>
+ #else
+@@ -57,6 +60,20 @@
+ #  include <ucontext.h>
+ #endif
+ 
++#if defined(__APPLE__)
++/* The guest arena must sit on a 4 GB boundary. vm_map's alignment mask gets
++ * that in one reservation of exactly the size asked for, which iOS allows
++ * where the POSIX over-map (twice the size, then trim) is refused. */
++void* ps3_vm_reserve_aligned(uint64_t size)
++{
++    vm_address_t addr = 0;
++    if (vm_map(mach_task_self(), &addr, (vm_size_t)size, (vm_address_t)(size - 1u), VM_FLAGS_ANYWHERE,
++               MEMORY_OBJECT_NULL, 0, FALSE, VM_PROT_NONE, VM_PROT_ALL, VM_INHERIT_DEFAULT) != KERN_SUCCESS)
++        return NULL;
++    return (void*)addr;
++}
++#endif
++
+ /* The signal that parks a thread for SuspendThread on Linux. SIGRTMIN and the
+  * two above it belong to the C library's own threading, and SIGRTMIN is not a
+  * compile-time constant there, so this is only ever evaluated at run time. */
+@@ -1547,13 +1564,23 @@ static int os_region(uintptr_t addr, uintptr_t* base, size_t* size, int* prot,
+     /* mach_vm_region searches UPWARDS from the address it is given and reports
+      * where it landed, so one call answers both questions: a base above the
+      * address means nothing is mapped at it, and that base is the gap's end. */
++#  if TARGET_OS_IOS
++    vm_address_t a = (vm_address_t)addr;
++    vm_size_t    sz = 0;
++#  else
+     mach_vm_address_t a = (mach_vm_address_t)addr;
+     mach_vm_size_t    sz = 0;
++#  endif
+     vm_region_basic_info_data_64_t info;
+     mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64;
+     mach_port_t name = MACH_PORT_NULL;
++#  if TARGET_OS_IOS
++    kern_return_t kr = vm_region_64(mach_task_self(), &a, &sz, VM_REGION_BASIC_INFO_64,
++                                    (vm_region_info_t)&info, &cnt, &name);
++#  else
+     kern_return_t kr = mach_vm_region(mach_task_self(), &a, &sz, VM_REGION_BASIC_INFO_64,
+                                       (vm_region_info_t)&info, &cnt, &name);
++#  endif
+     if (name != MACH_PORT_NULL) mach_port_deallocate(mach_task_self(), name);
+     if (kr != KERN_SUCCESS) return 0;             /* nothing at or above it */
+     if ((uintptr_t)a > addr) { *next = (uintptr_t)a; return 0; }
+diff --git a/runtime/spu/spu_channels.c b/runtime/spu/spu_channels.c
+index 17c2a67d..28a8c273 100644
+--- a/runtime/spu/spu_channels.c
++++ b/runtime/spu/spu_channels.c
+@@ -252,6 +252,18 @@ int spu_run_with_halt(void (*entry)(spu_context*), spu_context* ctx)
+     const int outer_rz = g_spu_rz;
+     _mm_setcsr(outer_csr | 0xE040u);
+     g_spu_rz = 1;
++#elif defined(__aarch64__) && defined(__ARM_NEON) && !defined(SPU_SCALAR_HELPERS)
++    /* The same mode on ARM: FPCR RMode = round toward zero (bits 23:22 = 3), FZ (bit 24). FP_SPU_NATIVE_FLOAT=0
++     * keeps the exact double-precision path instead. */
++    static int native = -1;
++    if (native < 0) { const char* e = getenv("FP_SPU_NATIVE_FLOAT"); native = !(e && e[0] == '0'); }
++    uint64_t outer_fpcr;
++    __asm__ volatile("mrs %0, fpcr" : "=r"(outer_fpcr));
++    const int outer_rz = g_spu_rz;
++    if (native) {
++        __asm__ volatile("msr fpcr, %0" :: "r"(outer_fpcr | (3ull << 22) | (1ull << 24)));
++        g_spu_rz = 1;
++    }
+ #endif
+     switch (setjmp(s_spu_halt_env)) {
+     case 1:
+@@ -285,6 +297,9 @@ int spu_run_with_halt(void (*entry)(spu_context*), spu_context* ctx)
+ #if defined(__SSE__) || defined(_M_X64)
+     _mm_setcsr(outer_csr);
+     g_spu_rz = outer_rz;
++#elif defined(__aarch64__) && defined(__ARM_NEON) && !defined(SPU_SCALAR_HELPERS)
++    __asm__ volatile("msr fpcr, %0" :: "r"(outer_fpcr));
++    g_spu_rz = outer_rz;
+ #endif
+     yz_lockstep_unregister(ctx);   /* leave the ring; hand the token onward */
+     s_spu_halt_armed = outer_armed;
+diff --git a/runtime/spu/spu_helpers.h b/runtime/spu/spu_helpers.h
+index 5be8022e..71f25911 100644
+--- a/runtime/spu/spu_helpers.h
++++ b/runtime/spu/spu_helpers.h
+@@ -809,9 +809,7 @@ SPU__NV_INLINE u128 spu__nv_fa(u128 a, u128 b, uint32_t negb) {
+     if (!spu__nv_all4(ok)) r = spu__fa_fix(r, ok, xa, yb, negb);
+     return spu__nv_u128(r);
+ }
+-SPU__NV_INLINE u128 spu_fa(u128 a, u128 b) { return spu__nv_fa(a, b, 0); }
+-SPU__NV_INLINE u128 spu_fs(u128 a, u128 b) { return spu__nv_fa(a, b, 0x80000000u); }
+-SPU__NV_INLINE u128 spu_fm(u128 a, u128 b) {
++SPU__NV_INLINE u128 spu__nv_fm(u128 a, u128 b) {
+     const uint32x4_t x = vld1q_u32(a._u32), y = vld1q_u32(b._u32);
+     uint32x2_t oklo, okhi, zlo, zhi;
+     const float32x2_t lo = spu__nv_trunc0(vmulq_f64(spu__nv_lo(x), spu__nv_lo(y)), &oklo, &zlo, NULL);
+@@ -846,9 +844,51 @@ SPU__NV_INLINE u128 spu__nv_fma(u128 a, u128 b, u128 c, uint32_t negp, uint32_t
+     if (!spu__nv_all4(ok)) r = spu__fma_fix(r, ok, xa, y, zc, negp, negc);
+     return spu__nv_u128(r);
+ }
+-SPU__NV_INLINE u128 spu_fma(u128 a, u128 b, u128 c)  { return spu__nv_fma(a, b, c, 0, 0); }            /* a*b + c */
+-SPU__NV_INLINE u128 spu_fms(u128 a, u128 b, u128 c)  { return spu__nv_fma(a, b, c, 0, 0x80000000u); }  /* a*b - c */
+-SPU__NV_INLINE u128 spu_fnms(u128 a, u128 b, u128 c) { return spu__nv_fma(a, b, c, 0x80000000u, 0); }  /* c - a*b */
++/* Native single precision, as on x86: lifted code runs with FPCR set to round toward zero (RMode = 3) and
++ * flush-to-zero (FZ), which is SPU single precision except for its extended range and its +0. One native op
++ * then gives the exact SPU result unless an operand has biased exponent 255 (Inf/NaN to the host) or the result
++ * reaches 2^127 (round toward zero saturates at FLT_MAX): one test of the result exponent (>= 254) catches every
++ * such lane. A flushed or exact-zero result is returned as +0. Under that mode the TwoSum test of spu__nv_fma no
++ * longer holds, so a failed lane goes to the scalar helpers, whose double paths only need a correct truncation. */
++#if defined(_MSC_VER) && !defined(__clang__)
++extern __declspec(thread) int g_spu_rz;
++#else
++extern __thread int g_spu_rz __attribute__((tls_model("initial-exec")));
++#endif
++SPU__NV_INLINE int spu__nv_native(uint32x4_t* r) {
++    const uint32x4_t e = spu__nv_bexp(*r);
++    *r = vbicq_u32(*r, vceqzq_u32(e));
++    return vmaxvq_u32(vcgtq_u32(e, vdupq_n_u32(253))) == 0;
++}
++SPU__NV_INLINE u128 spu__nv_rz_fa(u128 a, u128 b, uint32_t negb) {
++    const uint32x4_t x = vld1q_u32(a._u32), yb = vld1q_u32(b._u32), y = veorq_u32(yb, vdupq_n_u32(negb));
++    uint32x4_t r = vreinterpretq_u32_f32(vaddq_f32(vreinterpretq_f32_u32(x), vreinterpretq_f32_u32(y)));
++    if (__builtin_expect(!spu__nv_native(&r), 0)) r = spu__fa_fix(r, vdupq_n_u32(0), x, yb, negb);
++    return spu__nv_u128(r);
++}
++SPU__NV_INLINE u128 spu__nv_rz_fm(u128 a, u128 b) {
++    const uint32x4_t x = vld1q_u32(a._u32), y = vld1q_u32(b._u32);
++    uint32x4_t r = vreinterpretq_u32_f32(vmulq_f32(vreinterpretq_f32_u32(x), vreinterpretq_f32_u32(y)));
++    if (__builtin_expect(!spu__nv_native(&r), 0)) r = spu__fm_fix(r, vdupq_n_u32(0), x, y);
++    return spu__nv_u128(r);
++}
++SPU__NV_INLINE u128 spu__nv_rz_fma(u128 a, u128 b, u128 c, uint32_t negp, uint32_t negc) {
++    const uint32x4_t xa = vld1q_u32(a._u32), y = vld1q_u32(b._u32), zc = vld1q_u32(c._u32);
++    const float32x4_t x = vreinterpretq_f32_u32(veorq_u32(xa, vdupq_n_u32(negp)));
++    const float32x4_t z = vreinterpretq_f32_u32(veorq_u32(zc, vdupq_n_u32(negc)));
++    uint32x4_t r = vreinterpretq_u32_f32(vfmaq_f32(z, x, vreinterpretq_f32_u32(y)));
++    if (__builtin_expect(!spu__nv_native(&r), 0)) r = spu__fma_fix(r, vdupq_n_u32(0), xa, y, zc, negp, negc);
++    return spu__nv_u128(r);
++}
++SPU__NV_INLINE u128 spu_fa(u128 a, u128 b) { return g_spu_rz ? spu__nv_rz_fa(a, b, 0) : spu__nv_fa(a, b, 0); }
++SPU__NV_INLINE u128 spu_fs(u128 a, u128 b) { return g_spu_rz ? spu__nv_rz_fa(a, b, 0x80000000u) : spu__nv_fa(a, b, 0x80000000u); }
++SPU__NV_INLINE u128 spu_fm(u128 a, u128 b) { return g_spu_rz ? spu__nv_rz_fm(a, b) : spu__nv_fm(a, b); }
++SPU__NV_INLINE u128 spu_fma(u128 a, u128 b, u128 c)  {                                                  /* a*b + c */
++    return g_spu_rz ? spu__nv_rz_fma(a, b, c, 0, 0) : spu__nv_fma(a, b, c, 0, 0); }
++SPU__NV_INLINE u128 spu_fms(u128 a, u128 b, u128 c)  {                                                  /* a*b - c */
++    return g_spu_rz ? spu__nv_rz_fma(a, b, c, 0, 0x80000000u) : spu__nv_fma(a, b, c, 0, 0x80000000u); }
++SPU__NV_INLINE u128 spu_fnms(u128 a, u128 b, u128 c) {                                                  /* c - a*b */
++    return g_spu_rz ? spu__nv_rz_fma(a, b, c, 0x80000000u, 0) : spu__nv_fma(a, b, c, 0x80000000u, 0); }
+ #elif defined(__AVX2__) && defined(__FMA__) && !defined(SPU_SCALAR_HELPERS)
+ /* x86 form of the NEON fast path above: four lanes widened to f64x4 (exact), operated on, the 29
+  * low significand bits cleared (truncation toward zero) and narrowed back (exact). A lane that is
+diff --git a/runtime/spu/spu_workload.c b/runtime/spu/spu_workload.c
+index 814bea01..bd2ee7ab 100644
+--- a/runtime/spu/spu_workload.c
++++ b/runtime/spu/spu_workload.c
+@@ -1531,6 +1531,10 @@ int spu_workload_dispatch_task_async(const uint8_t* image, uint32_t image_size,
+     pthread_t th;
+     pthread_attr_t attr;
+     pthread_attr_init(&attr);
++#if defined(__APPLE__)
++    /* iOS schedules a thread without a QoS class like background work, often on an efficiency core. */
++    pthread_attr_set_qos_class_np(&attr, QOS_CLASS_USER_INITIATED, 0);
++#endif
+     int prc = EINVAL;
+     if (pthread_attr_setstacksize(&attr, 256u << 20) == 0)
+         prc = pthread_create(&th, &attr, spu_async_thread, j);
+diff --git a/runtime/spu/tests/test_spu_float_neon.c b/runtime/spu/tests/test_spu_float_neon.c
+index 3a717d21..cb41a65c 100644
+--- a/runtime/spu/tests/test_spu_float_neon.c
++++ b/runtime/spu/tests/test_spu_float_neon.c
+@@ -1,6 +1,8 @@
+ /* The NEON spu_fa/fs/fm/fma/fms/fnms must be bit-identical to the scalar
+  * references (spu_*_ref) for every input: random words, ordinary floats, the
+  * normal/extended-range boundaries, zeros and denormals, mixed per lane.
++ * Runs twice: with the host's default FPCR, and in the mode lifted code runs in (round toward zero +
++ * flush-to-zero, g_spu_rz = 1), where the helpers use native single precision.
+  * Prints a rough speed comparison too. Build on arm64:
+  *   cc -O2 -I.. -I../.. -I../../.. test_spu_float_neon.c -o t && ./t */
+ #include "../spu_helpers.h"
+@@ -8,6 +10,9 @@
+ #include <stdlib.h>
+ #include <time.h>
+ 
++__thread int g_spu_rz;
++static int s_native;
++
+ static uint64_t s_rng = 0x9E3779B97F4A7C15ull;
+ static uint32_t rnd32(void)
+ {
+@@ -29,12 +34,8 @@ static uint32_t rnd_float(void)
+     return sign | (e << 23) | man;
+ }
+ 
+-int main(void)
++static int suite(void)
+ {
+-#if !defined(__ARM_NEON)
+-    puts("test_spu_float_neon: no NEON, nothing to compare");
+-    return 0;
+-#else
+     long bad = 0;
+     const long N = 4000000;
+     for (long it = 0; it < N; it++) {
+@@ -107,7 +108,7 @@ int main(void)
+         one._u32[0] = 0x3F800000u; tiny._u32[0] = 0x80000000u | ((127u - 60u) << 23);   /* -2^-60 */
+         const u128 r = spu_fma(one, one, tiny);
+         if (r._u32[0] != 0x3F7FFFFFu) { printf("fma(1, 1, -2^-60) = %08X, want 3F7FFFFF\n", r._u32[0]); bad++; }
+-        if (bad || !hits || !exact_sums) {
++        if (bad || (!s_native && (!hits || !exact_sums))) {
+             printf("test_spu_float_neon: boundary pass: %ld mismatches, %ld rounded-onto-boundary lanes, "
+                    "%ld exact sums\n", bad, hits, exact_sums);
+             return 1;
+@@ -160,8 +161,9 @@ int main(void)
+     }
+ 
+     /* The NEON paths leave the thread in round-toward-zero; double precision
+-     * must still round to nearest: 1 + (2^-53 + 2^-60) -> 1 + 2^-52. */
+-    {
++     * must still round to nearest: 1 + (2^-53 + 2^-60) -> 1 + 2^-52. (Not in the native mode, where the
++     * whole thread rounds toward zero, as on x86.) */
++    if (!s_native) {
+         u128 x, y; memset(&x, 0, 16); memset(&y, 0, 16);
+         x._u32[0] = 0x3FF00000u; y._u32[0] = 0x3CA02000u;          /* 1.0, 2^-53 + 2^-60 */
+         (void)spu_fa(x, y);                                          /* sets RZ */
+@@ -189,8 +191,30 @@ int main(void)
+     for (int i = 0; i < R; i++) { const u128* q = in[i & 255];
+         u128 r1 = spu_fma_ref(q[0], q[1], q[2]), r2 = spu_fm_ref(q[0], q[1]); acc += r1._u32[i & 3] ^ r2._u32[(i + 1) & 3]; }
+     clock_t t2 = clock();
+-    printf("fma+fm pair: neon %.1f ns, scalar %.1f ns (acc %u)\n",
++    printf("fma+fm pair: %s %.1f ns, scalar %.1f ns (acc %u)\n", s_native ? "native" : "neon",
+            (t1 - t0) * 1e9 / CLOCKS_PER_SEC / R, (t2 - t1) * 1e9 / CLOCKS_PER_SEC / R, acc);
+     return 0;
++}
++
++int main(void)
++{
++#if !defined(__ARM_NEON)
++    puts("test_spu_float_neon: no NEON, nothing to compare");
++    return 0;
++#else
++    puts("== default FPCR");
++    if (suite()) return 1;
++#if defined(__aarch64__)
++    puts("== round toward zero + flush to zero (lifted-code mode)");
++    uint64_t fpcr;
++    __asm__ volatile("mrs %0, fpcr" : "=r"(fpcr));
++    __asm__ volatile("msr fpcr, %0" :: "r"(fpcr | (3ull << 22) | (1ull << 24)));
++    g_spu_rz = 1; s_native = 1; s_rng = 0x2545F4914F6CDD1Dull;
++    const int rc = suite();
++    __asm__ volatile("msr fpcr, %0" :: "r"(fpcr));
++    return rc;
++#else
++    return 0;
++#endif
+ #endif
+ }
+diff --git a/runtime/syscalls/lv2_register.c b/runtime/syscalls/lv2_register.c
+index 53d452aa..1f6fa1b5 100644
+--- a/runtime/syscalls/lv2_register.c
++++ b/runtime/syscalls/lv2_register.c
+@@ -689,6 +689,10 @@ static void spu_spawn_host_thread(spu_thread_handle_t* out,
+ {
+     pthread_attr_t attr;
+     pthread_attr_init(&attr);
++#if defined(__APPLE__)
++    /* iOS schedules a thread without a QoS class like background work, often on an efficiency core. */
++    pthread_attr_set_qos_class_np(&attr, QOS_CLASS_USER_INITIATED, 0);
++#endif
+     int rc = EINVAL;
+     if (pthread_attr_setstacksize(&attr, spu_host_stack_bytes()) == 0)
+         rc = pthread_create(out, &attr, fn, arg);
+diff --git a/runtime/syscalls/sys_ppu_thread.c b/runtime/syscalls/sys_ppu_thread.c
+index 37e9a440..a42ce08e 100644
+--- a/runtime/syscalls/sys_ppu_thread.c
++++ b/runtime/syscalls/sys_ppu_thread.c
+@@ -493,6 +493,10 @@ int64_t sys_ppu_thread_create(ppu_context* ctx)
+     {
+         pthread_attr_t attr;
+         pthread_attr_init(&attr);
++#if defined(__APPLE__)
++        /* iOS schedules a thread without a QoS class like background work, often on an efficiency core. */
++        pthread_attr_set_qos_class_np(&attr, QOS_CLASS_USER_INITIATED, 0);
++#endif
+         if (pthread_attr_setstacksize(&attr, PPU_HOST_STACK_BYTES) == 0) {
+             rc = pthread_create(&t->host_thread, &attr, ppu_host_thread_proc, t);
+         } else {
+diff --git a/runtime/spu/spu_channels.c b/runtime/spu/spu_channels.c
+--- a/runtime/spu/spu_channels.c
++++ b/runtime/spu/spu_channels.c
+@@ -393,10 +393,10 @@
+ {
+     if (!ctx) return;
+     AcquireSRWLockExclusive(&s_mfc_claim_lock);
+-    mfc_invalidate_hints();
+     for (spu_mfc_slot** link = &s_mfc_slots; *link; link = &(*link)->next) {
+         if ((*link)->ctx != ctx) continue;
+         spu_mfc_slot* slot = *link;
++        mfc_invalidate_hints();
+         *link = slot->next;
+         free(slot);
+         break;
+@@ -409,11 +409,12 @@
+ void spu_mfc_forget_range(uintptr_t lo, uintptr_t hi)
+ {
+     AcquireSRWLockExclusive(&s_mfc_claim_lock);
+-    mfc_invalidate_hints();
++    int invalidated = 0;
+     for (spu_mfc_slot** link = &s_mfc_slots; *link;) {
+         spu_mfc_slot* slot = *link;
+         uintptr_t owner = (uintptr_t)slot->ctx;
+         if (owner >= lo && owner < hi) {
++            if (!invalidated) { mfc_invalidate_hints(); invalidated = 1; }
+             *link = slot->next;
+             free(slot);
+         } else {
+diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
+--- a/libs/audio/cellAudio.c
++++ b/libs/audio/cellAudio.c
+@@ -196,6 +196,11 @@
+ static int s_buf_blocks = 1, s_buf_adapt = 0;
+ static volatile int s_buf_blocks_wanted = 1;
+ static void* audio_adapt_thread(void* arg);
++#ifndef _WIN32
++static pthread_t s_adapt_thread;
++static int s_adapt_thread_live;
++static int s_adapt_stop;
++#endif
+ #endif
+ 
+ #ifndef _WIN32
+@@ -262,7 +267,11 @@
+       /* the dummy driver sleeps for its timing, so its callbacks are always a little late */
+       const int force = ad && !strcmp(ad, "force");   /* FP_AUDIO_ADAPT=force: also on the dummy driver, for testing */
+       s_buf_adapt = s_pull && !buf_pinned && !(ad && ad[0] == '0') && (force || !(drv && !strcmp(drv, "dummy")));
+-      if (s_buf_adapt) { pthread_t t; if (pthread_create(&t, NULL, audio_adapt_thread, NULL) == 0) pthread_detach(t); else s_buf_adapt = 0; } }
++      if (s_buf_adapt) {
++          __atomic_store_n(&s_adapt_stop, 0, __ATOMIC_RELEASE);
++          if (pthread_create(&s_adapt_thread, NULL, audio_adapt_thread, NULL) == 0) s_adapt_thread_live = 1;
++          else s_buf_adapt = 0;
++      } }
+ #endif
+     printf("[cellAudio] SDL audio driver '%s', device buffer %u frames (%.1f ms), %s\n",
+            SDL_GetCurrentAudioDriver() ? SDL_GetCurrentAudioDriver() : "?", (unsigned)have.samples,
+@@ -278,6 +287,10 @@
+ 
+ static void audio_backend_shutdown(void)
+ {
++#ifndef _WIN32
++    __atomic_store_n(&s_adapt_stop, 1, __ATOMIC_RELEASE);
++    if (s_adapt_thread_live) { pthread_join(s_adapt_thread, NULL); s_adapt_thread_live = 0; }
++#endif
+     if (s_sdl_audio_dev) {
+         SDL_CloseAudioDevice(s_sdl_audio_dev);
+         s_sdl_audio_dev = 0;
+@@ -893,18 +906,26 @@
+     (void)arg;
+     for (;;) {
+         struct timespec d = {0, 250000000}; nanosleep(&d, NULL);
++        if (__atomic_load_n(&s_adapt_stop, __ATOMIC_ACQUIRE)) return NULL;
+         const int want_blocks = s_buf_blocks_wanted;
+-        if (want_blocks == s_buf_blocks || !s_sdl_audio_dev) continue;
++        if (want_blocks == s_buf_blocks && s_sdl_audio_dev) continue;
+         /* Close first: two open devices would run the mixer callback on two threads at once. The game's audio
+          * thread waits for the callback's notify, so it simply pauses for the reopen. */
+-        SDL_CloseAudioDevice(s_sdl_audio_dev);
++        if (s_sdl_audio_dev) SDL_CloseAudioDevice(s_sdl_audio_dev);
+         s_sdl_audio_dev = 0;
+         SDL_AudioSpec want = s_want, have;
+         want.samples = (Uint16)(CELL_AUDIO_BLOCK_SAMPLES * want_blocks);
+         SDL_AudioDeviceID dev = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
+         if (!dev) { want.samples = (Uint16)(CELL_AUDIO_BLOCK_SAMPLES * s_buf_blocks); dev = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0); s_buf_blocks_wanted = s_buf_blocks; }
+         else s_buf_blocks = want_blocks;
+-        if (!dev) { fprintf(stderr, "[audio-adapt] reopening the device failed: %s\n", SDL_GetError()); s_buf_adapt = 0; return NULL; }
++        if (!dev) {
++            /* iOS can reject session activation while backgrounded. Keep the
++             * recovery worker alive so foregrounding can restore the device. */
++            static unsigned failures;
++            if ((failures++ % 20) == 0)
++                fprintf(stderr, "[audio-adapt] reopen pending, will retry: %s\n", SDL_GetError());
++            continue;
++        }
+         s_sdl_audio_dev = dev; s_sdl_have_samples = have.samples;
+         SDL_PauseAudioDevice(dev, 0);
+         fprintf(stderr, "[audio-adapt] callbacks arrived late, device buffer now %d block(s) = %.1f ms\n", s_buf_blocks,
+diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
+--- a/libs/audio/cellAudio.c
++++ b/libs/audio/cellAudio.c
+@@ -522,6 +522,7 @@
+  * guest, which only writes when the index moves, and made it later still (response p50 2.7 -> 9.6 ms). */
+ /* Blocks of the main port the guest wrote as all zeros while the port was playing (producer output, not lateness). */
+ static unsigned long long g_audio_zero_blocks;
++static unsigned long long g_audio_unwritten_blocks;
+ static int s_sent = -1;
+ static int s_port_recent[CELL_AUDIO_PORT_MAX];
+ static int s_stall_run[CELL_AUDIO_PORT_MAX];
+@@ -749,7 +750,10 @@
+             s_mix_buffer[s * 2 + 1] += right;
+         }
+ 
+-        if (p == 0 && s_port_recent[p] > 0 && audio_block_all(src, nfloats, 0)) g_audio_zero_blocks++;
++        if (p == 0 && s_port_recent[p] > 0) {
++            if (audio_block_all(src, nfloats, 0)) g_audio_zero_blocks++;
++            else if (audio_sent_on() && audio_block_all(src, nfloats, 0x80u)) g_audio_unwritten_blocks++;
++        }
+         if (!audio_block_silent(src, nfloats)) s_port_recent[p] = 64;
+         else if (s_port_recent[p] > 0) s_port_recent[p]--;
+ 
+@@ -1064,10 +1068,10 @@
+         const double p99 = nerr ? err_us[(unsigned)(nerr * 0.99)] : 0.0, pmax = nerr ? err_us[nerr - 1] : 0.0;
+         fprintf(stderr, "[audio-rate] pull %.1f blocks/s (real time 187.5), callback period %.2f ms, timing error p99 %.2f ms max %.2f ms, "
+                 "mix in callback avg %.2f max %.2f ms, silent callbacks %.0f%%, game-late (held) ring blocks so far %llu, "
+-                "guest writes avg %.1f blocks ahead of read index, output underruns so far %llu, guest-written zero blocks so far %llu, idle give-ups %llu, SDL buffer %.1f ms, clipped samples so far %llu, limited blocks so far %llu, NaN samples so far %llu\n",
++                "guest writes avg %.1f blocks ahead of read index, output underruns so far %llu, guest-written zero blocks so far %llu, untouched blocks so far %llu (marker=%d), idle give-ups %llu, SDL buffer %.1f ms, clipped samples so far %llu, limited blocks so far %llu, NaN samples so far %llu\n",
+                 nblk * 1e9 / (double)(t_out - win_t0), period_us / 1000.0, p99 / 1000.0, pmax / 1000.0,
+                 cb ? mix_sum / cb / 1000.0 : 0.0, mix_max / 1000.0, cb ? 100.0 * silent / cb : 0.0, g_audio_ring_dropouts,
+-                ahead_n ? ahead_sum / ahead_n : 0.0, underruns, g_audio_zero_blocks, s_n_stall_giveup, AUDIO_DEV_BUF_MS,
++                ahead_n ? ahead_sum / ahead_n : 0.0, underruns, g_audio_zero_blocks, g_audio_unwritten_blocks, audio_sent_on(), s_n_stall_giveup, AUDIO_DEV_BUF_MS,
+                 g_audio_clipped_samples, g_audio_limited_blocks, g_audio_nan_samples);
+         if (g_audio_ch_n) {
+             static const char* const cn[8] = {"L","R","C","LFE","RL","RR","SL","SR"};
+diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
+--- a/libs/audio/cellAudio.c
++++ b/libs/audio/cellAudio.c
+@@ -1159,7 +1159,9 @@
+ {
+     (void)arg;
+     printf("[cellAudio] Mixing thread started\n");
+-#if AUDIO_BACKEND_SDL2
++#if defined(__APPLE__)
++    fp_audio_boost_this_thread("audio clock");
++#elif AUDIO_BACKEND_SDL2
+     /* The game's mixer polls the ring index and refills one block per change, so a late wakeup is audible. */
+     SDL_SetThreadPriority(SDL_THREAD_PRIORITY_TIME_CRITICAL);
+ #endif
+@@ -1199,6 +1201,9 @@
+         blocks++;
+         audio_mix_one_block();
+         audio_apply_gain();
++#if AUDIO_BACKEND_SDL2
++        cellVoice_mix_output(s_mix_buffer, CELL_AUDIO_BLOCK_SAMPLES);
++#endif
+         /* AUDIO_PEAK=1 reports the peak of the mixed block, AUDIO_WAV=<file> appends it as raw f32le
+          * stereo 48 kHz (the Windows thread above has the same two switches). */
+         { static int _ap = -1; if (_ap < 0) _ap = getenv("AUDIO_PEAK") ? 1 : 0;
+@@ -1221,8 +1226,9 @@
+             { int nz = 0; for (u32 i = 0; i < CELL_AUDIO_BLOCK_SAMPLES * 2; i++) if (s_mix_buffer[i] != 0.0f) { nz = 1; break; }
+               if (!nz) silent++; }
+             if (now - t0 >= 5000) {
+-                fprintf(stderr, "[audio-rate] %.1f blocks/s (real time 187.5), empty device queue %llu times, silent blocks %.0f%%, game-late ring blocks so far %llu, queued ahead avg %.1f max %.1f ms + device buffer %.1f ms\n",
++                fprintf(stderr, "[audio-rate] %.1f blocks/s (real time 187.5), empty device queue %llu times, silent blocks %.0f%%, game-late ring blocks so far %llu, untouched blocks so far %llu, written-zero blocks so far %llu (marker=%d), queued ahead avg %.1f max %.1f ms + device buffer %.1f ms\n",
+                         n * 1000.0 / (now - t0), gaps, n ? 100.0 * silent / n : 0.0, g_audio_ring_dropouts,
++                        g_audio_unwritten_blocks, g_audio_zero_blocks, audio_sent_on(),
+                         n ? qsum * 1000.0 / CELL_AUDIO_SAMPLE_RATE / n : 0.0, qmax * 1000.0 / CELL_AUDIO_SAMPLE_RATE,
+                         AUDIO_DEV_BUF_MS);
+                 t0 = now; n = gaps = silent = qsum = qmax = 0; } } }
+diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
+--- a/libs/audio/cellAudio.c
++++ b/libs/audio/cellAudio.c
+@@ -1169,7 +1169,7 @@
+     /* One block per 5.33 ms of clock time, as the Windows thread does. Mixing whenever the device queue had
+      * room advanced the ring index in bursts: the game refills one block per index change and could not
+      * keep up, so it re-read stale ring blocks (repeating sounds) and SFX waited behind up to six queued
+-     * blocks. Starts two blocks ahead; the device queue only nudges the clock when it drifts. */
++     * blocks. Starts two blocks ahead; queue backpressure must not move the clock forward. */
+     const long long period_ns = (long long)CELL_AUDIO_BLOCK_SAMPLES * 1000000000ll / CELL_AUDIO_SAMPLE_RATE;
+     struct timespec ts0; clock_gettime(CLOCK_MONOTONIC, &ts0);
+     long long t0 = (long long)ts0.tv_sec * 1000000000ll + ts0.tv_nsec - 2 * period_ns;
+@@ -1181,10 +1181,6 @@
+         long long due = t0 + blocks * period_ns;
+         if (now - due > 50000000ll) {                      /* stalled (suspend, debugger): drop the backlog */
+             t0 = now - blocks * period_ns; due = now;
+-        }
+-        if (audio_backend_queued_samples() > CELL_AUDIO_BLOCK_SAMPLES * 3) {
+-            t0 += period_ns;                               /* device clock runs slow: hold one block back */
+-            due += period_ns;
+         }
+         if (due < last_mix + 3000000ll) due = last_mix + 3000000ll;   /* never two blocks within 3 ms */
+         if (now < due) {
+@@ -1195,6 +1191,12 @@
+ #else
+             clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &w, NULL);
+ #endif
++            continue;
++        }
++        if (audio_backend_queued_samples() > CELL_AUDIO_BLOCK_SAMPLES * 3) {
++            /* A device may consume several blocks in one callback. Wait for
++             * space without repeatedly shifting all future mixer deadlines. */
++            struct timespec wait = {0, 1000000}; nanosleep(&wait, NULL);
+             continue;
+         }
+         last_mix = now;
+diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
+--- a/libs/audio/cellAudio.c
++++ b/libs/audio/cellAudio.c
+@@ -21,6 +21,9 @@
+ #include <stdint.h>
+ #include <math.h>
+ #include <time.h>
++#if defined(__APPLE__)
++#include <mach/mach_time.h>
++#endif
+ 
+ /* Event-queue push/lookup (runtime/syscalls/sys_event.c). Forward-declared
+  * rather than including sys_event.h to avoid pulling PPU context/syscall
+@@ -273,8 +276,8 @@
+           else s_buf_adapt = 0;
+       } }
+ #endif
+-    printf("[cellAudio] SDL audio driver '%s', device buffer %u frames (%.1f ms), %s\n",
+-           SDL_GetCurrentAudioDriver() ? SDL_GetCurrentAudioDriver() : "?", (unsigned)have.samples,
++    printf("[cellAudio] SDL audio driver '%s', requested %d Hz, negotiated %d Hz, device buffer %u frames (%.1f ms), %s\n",
++           SDL_GetCurrentAudioDriver() ? SDL_GetCurrentAudioDriver() : "?", want.freq, have.freq, (unsigned)have.samples,
+            have.samples * 1000.0 / CELL_AUDIO_SAMPLE_RATE,
+ #ifndef _WIN32
+            s_pull ? "pull (mixed in the device callback)" :
+@@ -1155,6 +1158,28 @@
+     return 0;
+ }
+ #else
++static long long audio_wait_deadline_ns(long long deadline)
++{
++#ifdef __APPLE__
++    static mach_timebase_info_data_t timebase;
++    if (!timebase.denom) mach_timebase_info(&timebase);
++    const uint64_t start = mach_absolute_time();
++    const long long remaining = deadline - audio_mono_ns();
++    if (remaining > 0 && timebase.numer && timebase.denom) {
++        const uint64_t ticks = ((uint64_t)remaining * timebase.denom + timebase.numer - 1) / timebase.numer;
++        mach_wait_until(start + ticks);
++    } else if (remaining > 0) {
++        struct timespec relative = { (time_t)(remaining / 1000000000ll), (long)(remaining % 1000000000ll) };
++        nanosleep(&relative, NULL);
++    }
++#else
++    struct timespec until = { (time_t)(deadline / 1000000000ll), (long)(deadline % 1000000000ll) };
++    clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &until, NULL);
++#endif
++    const long long late = audio_mono_ns() - deadline;
++    return late > 0 ? late : 0;
++}
++
+ static void* audio_mix_thread_func(void* arg)
+ {
+     (void)arg;
+@@ -1174,6 +1199,8 @@
+     struct timespec ts0; clock_gettime(CLOCK_MONOTONIC, &ts0);
+     long long t0 = (long long)ts0.tv_sec * 1000000000ll + ts0.tv_nsec - 2 * period_ns;
+     long long blocks = 0, last_mix = 0;
++    long long wake_late_sum = 0, wake_late_max = 0;
++    unsigned long long wake_count = 0, queue_waits = 0;
+ 
+     while (s_mix_thread_running) {
+         struct timespec tn; clock_gettime(CLOCK_MONOTONIC, &tn);
+@@ -1184,19 +1211,16 @@
+         }
+         if (due < last_mix + 3000000ll) due = last_mix + 3000000ll;   /* never two blocks within 3 ms */
+         if (now < due) {
+-            struct timespec w; w.tv_sec = due / 1000000000ll; w.tv_nsec = due % 1000000000ll;
+-#ifdef __APPLE__
+-            /* No clock_nanosleep on Apple: sleep the remaining time to the same deadline. */
+-            (void)w; { long long r = due - now; struct timespec rel = { (time_t)(r / 1000000000ll), (long)(r % 1000000000ll) }; nanosleep(&rel, NULL); }
+-#else
+-            clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &w, NULL);
+-#endif
++            const long long late = audio_wait_deadline_ns(due);
++            wake_late_sum += late; wake_count++;
++            if (late > wake_late_max) wake_late_max = late;
+             continue;
+         }
+         if (audio_backend_queued_samples() > CELL_AUDIO_BLOCK_SAMPLES * 3) {
+             /* A device may consume several blocks in one callback. Wait for
+              * space without repeatedly shifting all future mixer deadlines. */
+-            struct timespec wait = {0, 1000000}; nanosleep(&wait, NULL);
++            queue_waits++;
++            audio_wait_deadline_ns(now + 1000000ll);
+             continue;
+         }
+         last_mix = now;
+@@ -1228,11 +1252,13 @@
+             { int nz = 0; for (u32 i = 0; i < CELL_AUDIO_BLOCK_SAMPLES * 2; i++) if (s_mix_buffer[i] != 0.0f) { nz = 1; break; }
+               if (!nz) silent++; }
+             if (now - t0 >= 5000) {
+-                fprintf(stderr, "[audio-rate] %.1f blocks/s (real time 187.5), empty device queue %llu times, silent blocks %.0f%%, game-late ring blocks so far %llu, untouched blocks so far %llu, written-zero blocks so far %llu (marker=%d), queued ahead avg %.1f max %.1f ms + device buffer %.1f ms\n",
++                fprintf(stderr, "[audio-rate] %.1f blocks/s (real time 187.5), empty device queue %llu times, silent blocks %.0f%%, game-late ring blocks so far %llu, untouched blocks so far %llu, written-zero blocks so far %llu (marker=%d), queued ahead avg %.1f max %.1f ms + device buffer %.1f ms, wake late avg %.3f max %.3f ms, queue waits %llu\n",
+                         n * 1000.0 / (now - t0), gaps, n ? 100.0 * silent / n : 0.0, g_audio_ring_dropouts,
+                         g_audio_unwritten_blocks, g_audio_zero_blocks, audio_sent_on(),
+                         n ? qsum * 1000.0 / CELL_AUDIO_SAMPLE_RATE / n : 0.0, qmax * 1000.0 / CELL_AUDIO_SAMPLE_RATE,
+-                        AUDIO_DEV_BUF_MS);
++                        AUDIO_DEV_BUF_MS, wake_count ? wake_late_sum / (double)wake_count / 1000000.0 : 0.0,
++                        wake_late_max / 1000000.0, queue_waits);
++                wake_count = queue_waits = 0; wake_late_sum = wake_late_max = 0;
+                 t0 = now; n = gaps = silent = qsum = qmax = 0; } } }
+         audio_backend_submit(s_mix_buffer, CELL_AUDIO_BLOCK_SAMPLES);
+         audio_notify_event_queues();
+diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
+--- a/libs/audio/cellAudio.c
++++ b/libs/audio/cellAudio.c
+@@ -92,7 +92,7 @@
+ /* Portable threading */
+ #ifdef _WIN32
+   #include <windows.h>
+-  typedef HANDLE thread_t;
++  typedef HANDLE fp_audio_thread_t;
+   typedef CRITICAL_SECTION mutex_t;
+   #define mutex_init(m)    InitializeCriticalSection(m)
+   #define mutex_destroy(m) DeleteCriticalSection(m)
+@@ -102,7 +102,7 @@
+   #include <pthread.h>
+   #include <unistd.h>
+   #include <time.h>
+-  typedef pthread_t thread_t;
++  typedef pthread_t fp_audio_thread_t;
+   typedef pthread_mutex_t mutex_t;
+   #define mutex_init(m)    pthread_mutex_init(m, NULL)
+   #define mutex_destroy(m) pthread_mutex_destroy(m)
+@@ -148,7 +148,7 @@
+ /* Mixing thread */
+ static unsigned long long g_audio_dropped;   /* frames the device had no room for */
+ static volatile int  s_mix_thread_running = 0;
+-static thread_t      s_mix_thread;
++static fp_audio_thread_t      s_mix_thread;
+ #ifndef _WIN32
+ /* Is s_mix_thread a thread that exists and has not been joined? The Win32
+  * branch asks that of the HANDLE itself, which it nulls after closing;
+@@ -1044,13 +1044,13 @@
+      * index the guest has written (that lead is latency the guest adds, and the floor for the total). */
+     static int on = -1; if (on < 0) on = getenv("AUDIO_RATE") ? 1 : 0;
+     if (!on) return;
+-    static long long win_t0; static unsigned cb, nblk; static double err_us[4096]; static unsigned nerr;
++    static long long win_t0; static unsigned cb, nblk; static double audio_err_us[4096]; static unsigned nerr;
+     static double mix_sum, mix_max, ahead_sum; static unsigned ahead_n, silent;
+     clock_gettime(CLOCK_MONOTONIC, &ts);
+     const long long t_out = (long long)ts.tv_sec * 1000000000ll + ts.tv_nsec;
+     if (!win_t0) win_t0 = t_in;
+     const double period_us = (double)(len / (2 * (int)sizeof(float))) * 1e6 / CELL_AUDIO_SAMPLE_RATE;
+-    if (last_in && nerr < 4096) { double e = (t_in - last_in) / 1000.0 - period_us; err_us[nerr++] = e < 0 ? -e : e; }
++    if (last_in && nerr < 4096) { double e = (t_in - last_in) / 1000.0 - period_us; audio_err_us[nerr++] = e < 0 ? -e : e; }
+     last_in = t_in;
+     cb++; nblk += (unsigned)n;
+     { const double m = (t_out - t_in) / 1000.0; mix_sum += m; if (m > mix_max) mix_max = m; }
+@@ -1067,8 +1067,8 @@
+           ahead_sum += ahead; ahead_n++;
+       } }
+     if (t_out - win_t0 >= 5000000000ll) {
+-        for (unsigned a = 1; a < nerr; a++) { double v = err_us[a]; unsigned b = a; while (b && err_us[b - 1] > v) { err_us[b] = err_us[b - 1]; b--; } err_us[b] = v; }
+-        const double p99 = nerr ? err_us[(unsigned)(nerr * 0.99)] : 0.0, pmax = nerr ? err_us[nerr - 1] : 0.0;
++        for (unsigned a = 1; a < nerr; a++) { double v = audio_err_us[a]; unsigned b = a; while (b && audio_err_us[b - 1] > v) { audio_err_us[b] = audio_err_us[b - 1]; b--; } audio_err_us[b] = v; }
++        const double p99 = nerr ? audio_err_us[(unsigned)(nerr * 0.99)] : 0.0, pmax = nerr ? audio_err_us[nerr - 1] : 0.0;
+         fprintf(stderr, "[audio-rate] pull %.1f blocks/s (real time 187.5), callback period %.2f ms, timing error p99 %.2f ms max %.2f ms, "
+                 "mix in callback avg %.2f max %.2f ms, silent callbacks %.0f%%, game-late (held) ring blocks so far %llu, "
+                 "guest writes avg %.1f blocks ahead of read index, output underruns so far %llu, guest-written zero blocks so far %llu, untouched blocks so far %llu (marker=%d), idle give-ups %llu, SDL buffer %.1f ms, clipped samples so far %llu, limited blocks so far %llu, NaN samples so far %llu\n",
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -47,6 +47,7 @@
+ #include "rsx_vulkan_backend.h"
+ #include "rsx_debug_stats.h"
+ #include "rsx_notify.h"
++#include "rsx_overlay_layout.h"
+ #include "rsx_vertex_fetch.h"
+ #include "rsx_texture_layout.h"
+ #include "rsx_vp_decompiler.h"
+@@ -492,6 +493,31 @@
+         if (file) { fputs("submission,reason,batch_draws,wait_ms\n", file); setvbuf(file,NULL,_IOLBF,0); }
+     }
+     if (file) fprintf(file,"%llu,%s,%u,%.6f\n",(unsigned long long)++serial,reason,draws,ms);
++    static int summary=-1;
++    if(summary<0) { const char* e=getenv("RSX_SUBMIT_SUMMARY"); summary=e && !strcmp(e,"1"); }
++    if(!summary) return;
++    struct WaitBucket { const char* reason; unsigned calls, draws; double total, max; };
++    static struct WaitBucket buckets[32];
++    static unsigned used;
++    static Uint32 window;
++    const Uint32 now=SDL_GetTicks();
++    if(!window) window=now;
++    unsigned i=0;
++    while(i<used && strcmp(buckets[i].reason,reason)) i++;
++    if(i==used && used<32) { buckets[used++].reason=reason; }
++    if(i<32) {
++        struct WaitBucket* b=&buckets[i];
++        b->calls++; b->draws+=draws; b->total+=ms;
++        if(ms>b->max) b->max=ms;
++    }
++    if(now-window>=5000) {
++        for(unsigned j=0;j<used;j++) {
++            const struct WaitBucket* b=&buckets[j];
++            fprintf(stderr,"[rsx-wait] window_ms=%u reason=%s calls=%u draws=%u wait_ms=%.3f max_ms=%.3f\n",
++                    now-window,b->reason,b->calls,b->draws,b->total,b->max);
++        }
++        memset(buckets,0,sizeof buckets); used=0; window=now;
++    }
+ }
+ /* Draw batches are submitted without waiting (RSX_ASYNC_SUBMIT=0 turns this off): they rotate through
+  * VK_ASYNC_SETS command buffers, fences and draw-slot sets. A set is waited on only when it is
+@@ -619,8 +645,17 @@
+ static int s_debug_anchor;   /* 0 top-left, 1 bottom centre, 2 centre */
+ static vk_buffer s_notify;   /* the host's notification card, window byte order (rsx_notify.h) */
+ static u32 s_notify_w, s_notify_h, s_notify_radius;
++static float s_overlay_area[6] = {0, 0, 1, 1, 0, 0};
++static uint8_t* s_debug_source;
++static size_t s_debug_source_capacity;
++static u32 s_debug_source_w, s_debug_source_h, s_debug_screen_w, s_debug_screen_h;
++static float s_debug_source_area[6], s_debug_source_opacity, s_debug_scale = 1;
++static u32 s_debug_draw_radius;
++void rsx_vulkan_backend_set_overlay_area(const float area[6]) {
++    memcpy(s_overlay_area, area, sizeof s_overlay_area);
++}
+ static u32 s_debug_radius;   /* host panel corner radius, 0 square */
+-void rsx_vulkan_backend_set_overlay_radius(u32 radius) { s_debug_radius = radius; }
++void rsx_vulkan_backend_set_overlay_radius(u32 radius) { s_debug_radius = radius; s_debug_draw_radius = (u32)(radius * s_debug_scale); }
+ void rsx_vulkan_backend_set_overlay_anchor(int anchor) { s_debug_anchor = anchor; }
+ static int vk_submit_and_wait(void)
+ {
+@@ -2403,8 +2438,12 @@
+             ox = (int32_t)(s_vk.sc_extent.width - s_debug_width) / 2;
+             oy = (int32_t)(s_vk.sc_extent.height - s_debug_height) / 2;
+         }
++        if (s_overlay_area[4] > 0) {
++            const rsx_overlay_rect safe = rsx_overlay_safe_rect(s_vk.sc_extent.width, s_vk.sc_extent.height, s_overlay_area);
++            rsx_overlay_origin(safe, s_debug_width, s_debug_height, s_debug_anchor, &ox, &oy);
++        }
+         if (!vk_hud_blend(src, dx, dy, dw, dh, s_debug_width, s_debug_height, s_vk.sc_images[idx], ox, oy)) {
+-            vk_copy_rounded(s_debug_overlay.buf, s_debug_width, s_debug_height, s_debug_radius, ox, oy, s_vk.sc_images[idx]);
++            vk_copy_rounded(s_debug_overlay.buf, s_debug_width, s_debug_height, s_debug_draw_radius, ox, oy, s_vk.sc_images[idx]);
+         }
+     }
+     if (s_notify_w && s_notify_h && s_notify.buf &&
+@@ -4574,6 +4613,7 @@
+     if (vk_guest_init()) {
+         VK_LOG("guest programs: setup failed, fixed-function path only\n");
+         vk_destroy_buffer(&s_debug_overlay);
++        free(s_debug_source); s_debug_source=NULL; s_debug_source_capacity=0; s_debug_width=s_debug_height=0;
+         vk_destroy_buffer(&s_notify); s_notify_w = s_notify_h = 0;
+         vk_guest_shutdown();
+     }
+@@ -4761,21 +4801,53 @@
+ 
+ void rsx_vulkan_backend_set_debug_overlay(const uint8_t* rgba,u32 w,u32 h,const char* title) {
+     if(s_vk.window && title) SDL_SetWindowTitle(s_vk.window,title);
++    if(!s_vk.windowed || !rgba || !w || !h || w>2048 || h>1536) {
++        s_debug_width=s_debug_height=0;
++        return;
++    }
++    const size_t source_bytes = (size_t)w*h*4;
++    /* The persistent AI badge is identical each half second. Re-uploading it drained
++     * all in-flight command sets, even though the displayed pixels never changed. */
++    if(s_debug_width && s_debug_source && s_debug_source_w==w && s_debug_source_h==h &&
++       s_debug_screen_w==s_vk.sc_extent.width && s_debug_screen_h==s_vk.sc_extent.height &&
++       s_debug_source_opacity==s_overlay_opacity &&
++       !memcmp(s_debug_source_area,s_overlay_area,sizeof s_overlay_area) &&
++       !memcmp(s_debug_source,rgba,source_bytes)) return;
+     s_debug_width=s_debug_height=0;
+-    if(!s_vk.windowed || !rgba || !w || !h || w>2048 || h>1536) return;
++    const u32 source_w=w, source_h=h;
++    if(s_overlay_area[4]>0) {
++        const rsx_overlay_rect safe=rsx_overlay_safe_rect(s_vk.sc_extent.width,s_vk.sc_extent.height,s_overlay_area);
++        rsx_overlay_fit(w,h,safe,s_vk.sc_extent.height,s_overlay_area[5],&w,&h);
++    }
+     if(vk_ensure_buffer(&s_debug_overlay,(VkDeviceSize)w*h*4,VK_BUFFER_USAGE_TRANSFER_SRC_BIT) ||
+        !s_debug_overlay.coherent) return;
+     if(s_vk.sc_format != VK_FORMAT_B8G8R8A8_UNORM && s_vk.sc_format != VK_FORMAT_B8G8R8A8_SRGB &&
+        s_vk.sc_format != VK_FORMAT_R8G8B8A8_UNORM && s_vk.sc_format != VK_FORMAT_R8G8B8A8_SRGB) return;
+     vk_flush_at("overlay update");   /* an async present may still be copying the previous contents */
+-    memcpy(s_debug_overlay.ptr,rgba,(size_t)w*h*4);
++    uint8_t* pixels=s_debug_overlay.ptr;
++    if(w==source_w && h==source_h) memcpy(pixels,rgba,(size_t)w*h*4);
++    else for(u32 y=0;y<h;y++) for(u32 x=0;x<w;x++) {
++        const size_t src=((size_t)((uint64_t)y*source_h/h)*source_w+(uint64_t)x*source_w/w)*4;
++        memcpy(pixels+((size_t)y*w+x)*4,rgba+src,4);
++    }
+     if(s_overlay_opacity<0.99f && !vk_ensure_buffer(&s_hud_rgba,(VkDeviceSize)w*h*4,VK_BUFFER_USAGE_STORAGE_BUFFER_BIT) && s_hud_rgba.coherent)
+-        memcpy(s_hud_rgba.ptr,rgba,(size_t)w*h*4);
++        memcpy(s_hud_rgba.ptr,pixels,(size_t)w*h*4);
+     if(s_vk.sc_format==VK_FORMAT_B8G8R8A8_UNORM || s_vk.sc_format==VK_FORMAT_B8G8R8A8_SRGB) {
+-        uint8_t* p=s_debug_overlay.ptr;
+-        for(size_t i=0;i<(size_t)w*h;i++) { uint8_t r=p[i*4];p[i*4]=p[i*4+2];p[i*4+2]=r; }
+-    }
++        for(size_t i=0;i<(size_t)w*h;i++) { uint8_t r=pixels[i*4];pixels[i*4]=pixels[i*4+2];pixels[i*4+2]=r; }
++    }
++    s_debug_scale=(float)w/source_w;
++    s_debug_draw_radius=(u32)(s_debug_radius*s_debug_scale);
+     s_debug_width=w;s_debug_height=h;
++    if(source_bytes>s_debug_source_capacity) {
++        uint8_t* cache=realloc(s_debug_source,source_bytes);
++        if(!cache) return;   /* upload is valid; retry caching on the next update */
++        s_debug_source=cache;s_debug_source_capacity=source_bytes;
++    }
++    memcpy(s_debug_source,rgba,source_bytes);
++    s_debug_source_w=source_w;s_debug_source_h=source_h;
++    s_debug_screen_w=s_vk.sc_extent.width;s_debug_screen_h=s_vk.sc_extent.height;
++    memcpy(s_debug_source_area,s_overlay_area,sizeof s_overlay_area);
++    s_debug_source_opacity=s_overlay_opacity;
+ }
+ 
+ /* The notification card (R, G, B, A bytes, w x h, corner radius in pixels); NULL hides it. */
+diff --git a/libs/video/rsx_vulkan_backend.h b/libs/video/rsx_vulkan_backend.h
+--- a/libs/video/rsx_vulkan_backend.h
++++ b/libs/video/rsx_vulkan_backend.h
+@@ -76,6 +76,8 @@
+ void rsx_vulkan_backend_present(void);
+ /* Where the host overlay sits: 0 top-left (menus, stats), 1 bottom centre (the on-screen keyboard). */
+ void rsx_vulkan_backend_set_overlay_anchor(int anchor);
++/* Normalized safe bounds and logical view size in points; width=0 keeps desktop layout. */
++void rsx_vulkan_backend_set_overlay_area(const float area[6]);
+ /* Host panel corner radius in pixels; non-zero also pads a top-left panel off the window corner. */
+ void rsx_vulkan_backend_set_overlay_radius(uint32_t radius);
+ 
+diff --git a/libs/video/vulkan/rsx_vk_hud.inc b/libs/video/vulkan/rsx_vk_hud.inc
+--- a/libs/video/vulkan/rsx_vk_hud.inc
++++ b/libs/video/vulkan/rsx_vk_hud.inc
+@@ -22,7 +22,7 @@
+ 
+ static int vk_hud_create(void)
+ {
+-    if (vk_create_image(&s_hud.t, VK_FORMAT_R8G8B8A8_UNORM, 1024, 512,
++    if (vk_create_image(&s_hud.t, VK_FORMAT_R8G8B8A8_UNORM, 2048, 1536,
+                         VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                         VK_IMAGE_ASPECT_COLOR_BIT)) return -1;
+     VkDescriptorSetLayoutBinding b[2];
+@@ -55,7 +55,7 @@
+ static int vk_hud_blend(VkImage src, int32_t dx, int32_t dy, int32_t dw, int32_t dh, u32 w, u32 h, VkImage dst,
+                         int32_t ox, int32_t oy)
+ {
+-    if (s_overlay_opacity >= 0.99f || !s_hud_rgba.buf || s_hud.failed || w > 1024 || h > 512 || dw <= 0 || dh <= 0) return 0;
++    if (s_overlay_opacity >= 0.99f || !s_hud_rgba.buf || s_hud.failed || w > 2048 || h > 1536 || dw <= 0 || dh <= 0) return 0;
+     if (!s_hud.ready && vk_hud_create()) { s_hud.failed = 1; return 0; }
+     const int32_t wx0 = dx > ox ? dx : ox, wy0 = dy > oy ? dy : oy;
+     const int32_t wx1 = ox + (int32_t)w < dx + dw ? ox + (int32_t)w : dx + dw, wy1 = oy + (int32_t)h < dy + dh ? oy + (int32_t)h : dy + dh;
+@@ -90,7 +90,7 @@
+     pvkCmdBlitImage(s_vk.cmd, src, VK_IMAGE_LAYOUT_GENERAL, s_hud.t.img, VK_IMAGE_LAYOUT_GENERAL, 1, &under, VK_FILTER_LINEAR);
+     pvkCmdPipelineBarrier(s_vk.cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
+ 
+-    struct { uint32_t w, h; float opacity, radius; } pc = { w, h, s_overlay_opacity, (float)s_debug_radius };
++    struct { uint32_t w, h; float opacity, radius; } pc = { w, h, s_overlay_opacity, (float)s_debug_draw_radius };
+     pvkCmdBindPipeline(s_vk.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_hud.pipe);
+     pvkCmdBindDescriptorSets(s_vk.cmd, VK_PIPELINE_BIND_POINT_COMPUTE, s_hud.pl, 0, 1, &s_hud.set, 0, NULL);
+     pvkCmdPushConstants(s_vk.cmd, s_hud.pl, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof pc, &pc);
+diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
+--- a/libs/audio/cellAudio.c
++++ b/libs/audio/cellAudio.c
+@@ -1201,6 +1201,9 @@
+     long long blocks = 0, last_mix = 0;
+     long long wake_late_sum = 0, wake_late_max = 0;
+     unsigned long long wake_count = 0, queue_waits = 0;
++    unsigned long long mix_count = 0, mix_ns_sum = 0, mix_ns_max = 0;
++    unsigned long long clipped_before = g_audio_clipped_samples, limited_before = g_audio_limited_blocks;
++    unsigned long long nan_before = g_audio_nan_samples;
+ 
+     while (s_mix_thread_running) {
+         struct timespec tn; clock_gettime(CLOCK_MONOTONIC, &tn);
+@@ -1225,11 +1228,15 @@
+         }
+         last_mix = now;
+         blocks++;
++        const long long mix_start = audio_mono_ns();
+         audio_mix_one_block();
+         audio_apply_gain();
+ #if AUDIO_BACKEND_SDL2
+         cellVoice_mix_output(s_mix_buffer, CELL_AUDIO_BLOCK_SAMPLES);
+ #endif
++        const unsigned long long mix_ns = (unsigned long long)(audio_mono_ns() - mix_start);
++        mix_count++; mix_ns_sum += mix_ns;
++        if (mix_ns > mix_ns_max) mix_ns_max = mix_ns;
+         /* AUDIO_PEAK=1 reports the peak of the mixed block, AUDIO_WAV=<file> appends it as raw f32le
+          * stereo 48 kHz (the Windows thread above has the same two switches). */
+         { static int _ap = -1; if (_ap < 0) _ap = getenv("AUDIO_PEAK") ? 1 : 0;
+@@ -1258,6 +1265,12 @@
+                         n ? qsum * 1000.0 / CELL_AUDIO_SAMPLE_RATE / n : 0.0, qmax * 1000.0 / CELL_AUDIO_SAMPLE_RATE,
+                         AUDIO_DEV_BUF_MS, wake_count ? wake_late_sum / (double)wake_count / 1000000.0 : 0.0,
+                         wake_late_max / 1000000.0, queue_waits);
++                fprintf(stderr, "[audio-quality] mix_us_avg=%.2f mix_us_max=%.2f limited_blocks=%llu clipped_samples=%llu nan_samples=%llu\n",
++                        mix_count ? mix_ns_sum / (double)mix_count / 1000.0 : 0.0, mix_ns_max / 1000.0,
++                        g_audio_limited_blocks - limited_before, g_audio_clipped_samples - clipped_before,
++                        g_audio_nan_samples - nan_before);
++                clipped_before = g_audio_clipped_samples; limited_before = g_audio_limited_blocks;
++                nan_before = g_audio_nan_samples; mix_count = mix_ns_sum = mix_ns_max = 0;
+                 wake_count = queue_waits = 0; wake_late_sum = wake_late_max = 0;
+                 t0 = now; n = gaps = silent = qsum = qmax = 0; } } }
+         audio_backend_submit(s_mix_buffer, CELL_AUDIO_BLOCK_SAMPLES);
+diff --git a/libs/video/rsx_overlay_layout.h b/libs/video/rsx_overlay_layout.h
+new file mode 100644
+--- /dev/null
++++ b/libs/video/rsx_overlay_layout.h
+@@ -0,0 +1,43 @@
++#ifndef RSX_OVERLAY_LAYOUT_H
++#define RSX_OVERLAY_LAYOUT_H
++#include <stdint.h>
++#include <math.h>
++
++typedef struct rsx_overlay_rect { int32_t x, y; uint32_t w, h; } rsx_overlay_rect;
++
++/* area is left/top/right/bottom in normalized window coordinates. */
++static inline rsx_overlay_rect rsx_overlay_safe_rect(uint32_t w, uint32_t h, const float area[6]) {
++    int32_t l = (int32_t)ceilf(w * area[0]), t = (int32_t)ceilf(h * area[1]);
++    int32_t r = (int32_t)floorf(w * area[2]), b = (int32_t)floorf(h * area[3]);
++    if (l < 0) l = 0;
++    if (t < 0) t = 0;
++    if (r > (int32_t)w) r = (int32_t)w;
++    if (b > (int32_t)h) b = (int32_t)h;
++    if (r <= l || b <= t) return (rsx_overlay_rect){0, 0, w, h};
++    return (rsx_overlay_rect){l, t, (uint32_t)(r-l), (uint32_t)(b-t)};
++}
++
++/* A bitmap pixel becomes a UIKit point, bounded by the available safe area.
++ * The menu's 14-pixel glyphs therefore read as 14 points on Retina displays. */
++static inline void rsx_overlay_fit(uint32_t w, uint32_t h, rsx_overlay_rect safe,
++                                  uint32_t screen_h, float point_h, uint32_t* out_w, uint32_t* out_h) {
++    float scale = point_h > 0 ? screen_h / point_h : 1;
++    if (scale * w > safe.w) scale = (float)safe.w / w;
++    if (scale * h > safe.h) scale = (float)safe.h / h;
++    if (scale * w > 2048) scale = 2048.f / w;
++    if (scale * h > 1536) scale = 1536.f / h;
++    *out_w = (uint32_t)floorf(w * scale);
++    *out_h = (uint32_t)floorf(h * scale);
++    if (!*out_w) *out_w = 1;
++    if (!*out_h) *out_h = 1;
++}
++
++/* All mobile panels are horizontally centred; 0 top, 1 bottom, 2 middle. */
++static inline void rsx_overlay_origin(rsx_overlay_rect safe, uint32_t w, uint32_t h,
++                                     int anchor, int32_t* x, int32_t* y) {
++    *x = safe.x + ((int32_t)safe.w - (int32_t)w) / 2;
++    *y = safe.y;
++    if (anchor == 1) *y += (int32_t)safe.h - (int32_t)h;
++    if (anchor == 2) *y += ((int32_t)safe.h - (int32_t)h) / 2;
++}
++#endif
+diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
+--- a/libs/audio/cellAudio.c
++++ b/libs/audio/cellAudio.c
+@@ -167,6 +167,11 @@
+ /* 1: lower the level when the mix passes full scale, 0: clip it as the console output does. -1 reads FP_AUDIO_LIMITER. The host's AUDIO setting sets it. */
+ int g_audio_limiter = -1;
+ static double g_audio_ch_sq[8]; static float g_audio_ch_peak[8]; static unsigned long long g_audio_ch_n;
++/* One decoded block of lookahead: the preceding block fades down before a
++ * louder overlapping sound arrives, rather than clipping through the attack. */
++static float s_limiter_pending[CELL_AUDIO_BLOCK_SAMPLES * 2];
++static float s_limiter_peak, s_limiter_gain = 1.0f;
++
+ static void audio_apply_gain(void)
+ {
+     const float g = g_audio_gain;
+@@ -781,40 +786,39 @@
+ 
+     mutex_unlock(&s_audio_mutex);
+ 
+-    /* The game's own mix goes past full scale when many sounds overlap (peaks near 2.0 in a crowded fight). Clipping that
+-     * flat sounds like harsh distortion, so a limiter lowers the level instead: it drops at once to what the loudest
+-     * sample of the block needs and comes back up slowly (about 300 ms). Off (the AUDIO setting or FP_AUDIO_LIMITER=0) clips instead, as the console does.
+-     * A NaN from a producer would otherwise reach the device as is. */
++    /* One block (5.33 ms) of lookahead lets the current block's peak set
++     * the gain at the END of the preceding output block. Every output block
++     * also respects its own peak, so an attack cannot clip during its ramp.
++     * The linked stereo gain preserves left/right balance. */
+     {
+-        static float gain = 1.0f;
+         if (g_audio_limiter < 0) { const char* e = getenv("FP_AUDIO_LIMITER"); g_audio_limiter = !(e && e[0] == '0'); }
+-        const int limiter = g_audio_limiter;
+         float peak = 0.0f;
+         for (u32 i = 0; i < CELL_AUDIO_BLOCK_SAMPLES * 2; i++) {
+             float v = s_mix_buffer[i];
+-            if (v != v) { s_mix_buffer[i] = 0.0f; g_audio_nan_samples++; continue; }
+-            const float a = fabsf(v);
+-            if (a > peak) peak = a;
+-        }
+-        if (limiter) {
+-            const float ceiling = 0.97f;
+-            const float target = peak > ceiling ? ceiling / peak : 1.0f;
+-            float next = gain + (1.0f - gain) * 0.018f;      /* release */
+-            if (target < next) { next = target; g_audio_limited_blocks++; }
+-            /* ramp over the first 64 sample pairs, so the gain change is not a step */
+-            for (u32 i = 0; i < CELL_AUDIO_BLOCK_SAMPLES; i++) {
+-                const float g = i < 64 ? gain + (next - gain) * (float)(i + 1) / 64.0f : next;
+-                s_mix_buffer[i * 2] *= g;
+-                s_mix_buffer[i * 2 + 1] *= g;
++            if (!isfinite(v)) { s_mix_buffer[i] = 0.0f; g_audio_nan_samples++; continue; }
++            if (fabsf(v) > peak) peak = fabsf(v);
++        }
++        const float ceiling = 0.97f;
++        const float own_target = s_limiter_peak > ceiling ? ceiling / s_limiter_peak : 1.0f;
++        const float future_target = peak > ceiling ? ceiling / peak : 1.0f;
++        float start = 1.0f, end = 1.0f;
++        if (g_audio_limiter) {
++            start = fminf(s_limiter_gain, own_target);
++            end = fminf(start + (1.0f - start) * 0.018f, fminf(own_target, future_target));
++            if (end < 1.0f && (own_target < 1.0f || future_target < 1.0f)) g_audio_limited_blocks++;
++        }
++        for (u32 frame = 0; frame < CELL_AUDIO_BLOCK_SAMPLES; frame++) {
++            const float gain = start + (end - start) * (float)(frame + 1) / CELL_AUDIO_BLOCK_SAMPLES;
++            for (u32 channel = 0; channel < 2; channel++) {
++                const u32 i = frame * 2 + channel;
++                float v = s_limiter_pending[i] * gain;
++                s_limiter_pending[i] = s_mix_buffer[i];
++                if (v > 1.0f) { v = 1.0f; g_audio_clipped_samples++; }
++                else if (v < -1.0f) { v = -1.0f; g_audio_clipped_samples++; }
++                s_mix_buffer[i] = v;
+             }
+-            gain = next;
+-        }
+-        for (u32 i = 0; i < CELL_AUDIO_BLOCK_SAMPLES * 2; i++) {   /* safety: whatever the ramp let through */
+-            float v = s_mix_buffer[i];
+-            if (v > 1.0f) { v = 1.0f; g_audio_clipped_samples++; }
+-            else if (v < -1.0f) { v = -1.0f; g_audio_clipped_samples++; }
+-            s_mix_buffer[i] = v;
+-        }
++        }
++        s_limiter_peak = peak; s_limiter_gain = end;
+     }
+     if (!held || consumed) g_audio_blocks_mixed++;
+     return held && !consumed;
+@@ -1265,7 +1269,7 @@
+                         n ? qsum * 1000.0 / CELL_AUDIO_SAMPLE_RATE / n : 0.0, qmax * 1000.0 / CELL_AUDIO_SAMPLE_RATE,
+                         AUDIO_DEV_BUF_MS, wake_count ? wake_late_sum / (double)wake_count / 1000000.0 : 0.0,
+                         wake_late_max / 1000000.0, queue_waits);
+-                fprintf(stderr, "[audio-quality] mix_us_avg=%.2f mix_us_max=%.2f limited_blocks=%llu clipped_samples=%llu nan_samples=%llu\n",
++                fprintf(stderr, "[audio-quality] lookahead_ms=5.333 mix_us_avg=%.2f mix_us_max=%.2f limited_blocks=%llu clipped_samples=%llu nan_samples=%llu\n",
+                         mix_count ? mix_ns_sum / (double)mix_count / 1000.0 : 0.0, mix_ns_max / 1000.0,
+                         g_audio_limited_blocks - limited_before, g_audio_clipped_samples - clipped_before,
+                         g_audio_nan_samples - nan_before);
+@@ -1344,9 +1348,10 @@
+         return (s32)CELL_AUDIO_ERROR_NOT_INIT;
+     }
+     printf("[cellAudio] Init()\n");
+-
+     if (s_audio_initialized)
+         return CELL_AUDIO_ERROR_ALREADY_INIT;
++    memset(s_limiter_pending,0,sizeof s_limiter_pending);
++    s_limiter_peak=0; s_limiter_gain=1;
+ 
+     memset(s_ports, 0, sizeof(s_ports));
+     memset(s_notify_queues, 0, sizeof(s_notify_queues));
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -2647,7 +2647,16 @@
+ 
+ /* Defined with the E2 pipeline state further down. */
+ static void vk_eng_drop_framebuffers(void);
+-#define VK_DRAW_BATCH_SIZE 96
++#define VK_DRAW_BATCH_SIZE 192
++static unsigned vk_draw_batch_limit(void) {
++    static unsigned limit;
++    if(!limit) {
++        const char* e=getenv("RSX_DRAW_BATCH_LIMIT");
++        const int n=e?atoi(e):96;
++        limit=n>0 && n<=VK_DRAW_BATCH_SIZE?(unsigned)n:96;
++    }
++    return limit;
++}
+ static unsigned char* s_batch_constants;
+ static struct vk_draw_slot {
+     vk_buffer vertices, indices, constants;
+@@ -4270,7 +4279,7 @@
+     struct vk_draw_slot* slot = NULL;
+     unsigned slot_index = 0;
+     if (vk_batch_enabled()) {
+-        if (s_batch_count >= VK_DRAW_BATCH_SIZE && vk_flush_async_at("vk_eng_draw")) return;
++        if (s_batch_count >= vk_draw_batch_limit() && vk_flush_async_at("vk_eng_draw")) return;
+         /* Lazy cube creation may upload; complete it before choosing a slot. */
+         if (P->cube_mask && !vk_eng_dummy_cube_view()) return;
+         /* The set's slot buffers are written below, so its previous use must be finished. */
+@@ -4869,7 +4878,14 @@
+ 
+ void rsx_vulkan_backend_present(void)
+ {
+-    vk_flush_at("rsx_vulkan_backend_present");
++    /* Presentation already orders its copies after the draw batches on the
++     * same queue. Keep them in flight until a set/resource actually needs reuse.
++     * Changing async mode still drains using the OLD mode before switching. */
++    static int frame_async=-1;
++    if(frame_async<0) {const char* e=getenv("PS3RECOMP_VK_FRAME_ASYNC");frame_async=e && !strcmp(e,"1");}
++    if(frame_async && s_async_wanted<0 && vk_present_async_enabled())
++        vk_flush_async_at("rsx_vulkan_backend_present");
++    else vk_flush_at("rsx_vulkan_backend_present");
+     if (s_async_wanted >= 0) { s_async_enabled = s_async_wanted; s_async_wanted = -1; }
+     static unsigned frames;
+     if (s_submit_trace > 0 && ++frames % 120 == 0) {
+diff --git a/libs/audio/cellAudio.c b/libs/audio/cellAudio.c
+--- a/libs/audio/cellAudio.c
++++ b/libs/audio/cellAudio.c
+@@ -188,6 +188,26 @@
+ int g_audio_jitter_blocks;   /* output delay in blocks, for the stats overlay */
+ unsigned long long g_audio_late_blocks;   /* callbacks where the guest had not delivered a block in time */
+ 
++/* Lifecycle callbacks only publish state. The push worker owns close/reopen,
++ * so UIKit never blocks on an audio thread/device lock. */
++static int s_audio_interrupted;
++static unsigned s_audio_resume_generation;
++void fp_audio_set_interrupted(int paused)
++{
++#if AUDIO_BACKEND_SDL2 && !defined(_WIN32)
++    const int old=__atomic_exchange_n(&s_audio_interrupted,paused!=0,__ATOMIC_ACQ_REL);
++    if(old && !paused) __atomic_add_fetch(&s_audio_resume_generation,1,__ATOMIC_RELEASE);
++#else
++    (void)paused;
++#endif
++}
++void fp_audio_reset_output(void)
++{
++#if AUDIO_BACKEND_SDL2 && !defined(_WIN32)
++    __atomic_add_fetch(&s_audio_resume_generation,1,__ATOMIC_RELEASE);
++#endif
++}
++
+ #if AUDIO_BACKEND_SDL2
+ 
+ static SDL_AudioDeviceID s_sdl_audio_dev = 0;
+@@ -260,6 +280,13 @@
+     if (s_pull) want.callback = audio_sdl_pull;
+ #endif
+ 
++#ifndef _WIN32
++    s_want=want;  /* retained even when activation is currently unavailable */
++    if(!s_pull && __atomic_load_n(&s_audio_interrupted,__ATOMIC_ACQUIRE)) {
++        fprintf(stderr,"[audio-recover] waiting for active application before opening output\n");
++        return 0;
++    }
++#endif
+     s_sdl_audio_dev = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0);
+ #ifndef _WIN32
+     if (!s_sdl_audio_dev && s_pull) { s_pull = 0; want.callback = NULL; s_sdl_audio_dev = SDL_OpenAudioDevice(NULL, 0, &want, &have, 0); }
+@@ -1184,6 +1211,28 @@
+     return late > 0 ? late : 0;
+ }
+ 
++#if AUDIO_BACKEND_SDL2
++static int audio_push_reopen(void)
++{
++    if(s_sdl_audio_dev) { SDL_CloseAudioDevice(s_sdl_audio_dev); s_sdl_audio_dev=0; }
++    if(!SDL_WasInit(SDL_INIT_AUDIO) && SDL_InitSubSystem(SDL_INIT_AUDIO)<0) return 0;
++    SDL_AudioSpec want=s_want,have;
++    if(!want.freq) {
++        memset(&want,0,sizeof want);want.freq=CELL_AUDIO_SAMPLE_RATE;
++        want.format=AUDIO_F32SYS;want.channels=2;want.samples=CELL_AUDIO_BLOCK_SAMPLES*2;
++    }
++    want.callback=NULL;
++    SDL_AudioDeviceID dev=SDL_OpenAudioDevice(NULL,0,&want,&have,0);
++    if(!dev) return 0;
++    if(__atomic_load_n(&s_audio_interrupted,__ATOMIC_ACQUIRE)) {SDL_CloseAudioDevice(dev);return 0;}
++    s_sdl_audio_dev=dev;s_sdl_have_samples=have.samples;s_want=want;
++    memset(s_limiter_pending,0,sizeof s_limiter_pending);s_limiter_peak=0;s_limiter_gain=1;
++    SDL_PauseAudioDevice(dev,0);
++    fprintf(stderr,"[audio-recover] push output reopened %d Hz, %u frames; stale output cleared\n",have.freq,(unsigned)have.samples);
++    return 1;
++}
++#endif
++
+ static void* audio_mix_thread_func(void* arg)
+ {
+     (void)arg;
+@@ -1208,10 +1257,41 @@
+     unsigned long long mix_count = 0, mix_ns_sum = 0, mix_ns_max = 0;
+     unsigned long long clipped_before = g_audio_clipped_samples, limited_before = g_audio_limited_blocks;
+     unsigned long long nan_before = g_audio_nan_samples;
++    int reset_rate=0;
++#if AUDIO_BACKEND_SDL2
++    unsigned resume_generation=__atomic_load_n(&s_audio_resume_generation,__ATOMIC_ACQUIRE);
++    int reopen_pending=0;
++    unsigned reopen_failures=0;
++#endif
+ 
+     while (s_mix_thread_running) {
+         struct timespec tn; clock_gettime(CLOCK_MONOTONIC, &tn);
+         long long now = (long long)tn.tv_sec * 1000000000ll + tn.tv_nsec;
++#if AUDIO_BACKEND_SDL2
++        if(__atomic_load_n(&s_audio_interrupted,__ATOMIC_ACQUIRE)) {
++            if(s_sdl_audio_dev) {
++                SDL_CloseAudioDevice(s_sdl_audio_dev);s_sdl_audio_dev=0;
++                fprintf(stderr,"[audio-recover] inactive: push output closed\n");
++            }
++            reopen_pending=1;
++            audio_wait_deadline_ns(now+20000000ll);
++            continue;
++        }
++        const unsigned generation=__atomic_load_n(&s_audio_resume_generation,__ATOMIC_ACQUIRE);
++        if(reopen_pending || generation!=resume_generation || !s_sdl_audio_dev) {
++            reopen_pending=1;
++            if(!audio_push_reopen()) {
++                if((reopen_failures++%20)==0) fprintf(stderr,"[audio-recover] reopen pending: %s\n",SDL_GetError());
++                audio_wait_deadline_ns(audio_mono_ns()+250000000ll);
++                continue;
++            }
++            reopen_failures=0;reopen_pending=0;resume_generation=generation;
++            now=audio_mono_ns();t0=now-2*period_ns;blocks=0;last_mix=0;reset_rate=1;
++            wake_count=queue_waits=0;wake_late_sum=wake_late_max=0;
++            mix_count=mix_ns_sum=mix_ns_max=0;
++            clipped_before=g_audio_clipped_samples;limited_before=g_audio_limited_blocks;nan_before=g_audio_nan_samples;
++        }
++#endif
+         long long due = t0 + blocks * period_ns;
+         if (now - due > 50000000ll) {                      /* stalled (suspend, debugger): drop the backlog */
+             t0 = now - blocks * period_ns; due = now;
+@@ -1257,6 +1337,7 @@
+           if (on) { static unsigned long long t0 = 0, n = 0, gaps = 0, silent = 0, qsum = 0, qmax = 0;
+             struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts);
+             unsigned long long now = (unsigned long long)ts.tv_sec * 1000ull + ts.tv_nsec / 1000000ull;
++            if(reset_rate) {t0=0;n=gaps=silent=qsum=qmax=0;reset_rate=0;}
+             if (!t0) t0 = now;
+             n++;
+             { const u32 q = audio_backend_queued_samples(); if (q == 0) gaps++; qsum += q; if (q > qmax) qmax = q; }
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -482,6 +482,7 @@
+     s_submit_reason = reason;
+     return vk_batch_flush_ex(0);
+ }
++static uint64_t s_state_issued,s_state_skipped;
+ static void vk_trace_submit(const char* reason, unsigned draws, double ms) {
+     static FILE* file;
+     static int initialized;
+@@ -511,6 +512,9 @@
+         if(ms>b->max) b->max=ms;
+     }
+     if(now-window>=5000) {
++        fprintf(stderr,"[rsx-state] window_ms=%u issued=%llu skipped=%llu\n",now-window,
++                (unsigned long long)s_state_issued,(unsigned long long)s_state_skipped);
++        s_state_issued=s_state_skipped=0;
+         for(unsigned j=0;j<used;j++) {
+             const struct WaitBucket* b=&buckets[j];
+             fprintf(stderr,"[rsx-wait] window_ms=%u reason=%s calls=%u draws=%u wait_ms=%.3f max_ms=%.3f\n",
+@@ -541,7 +545,16 @@
+ static int s_batch_recording, s_batch_draw;
+ static int s_batch_renderpass;
+ static VkFramebuffer s_batch_framebuffer;
++static struct {
++    int valid;
++    VkPipeline pipeline;
++    VkViewport viewport;
++    VkRect2D scissor;
++    u32 stencil;
++    float line_width,depth_min,depth_max;
++} s_draw_state;
+ static void vk_batch_end_pass(void) {
++    s_draw_state.valid=0;   /* never carry state into another pass/command buffer */
+     if(s_batch_renderpass) {
+         pvkCmdEndRenderPass(s_vk.cmd);
+         s_batch_renderpass=0;s_batch_framebuffer=VK_NULL_HANDLE;
+@@ -4238,6 +4251,34 @@
+     return set;
+ }
+ 
++/* All engine pipelines declare these states dynamic. Cache only inside a
++ * retained render pass, where no transfer/compute commands can intervene.
++ * Descriptor/vertex/index bindings remain private to each draw slot. */
++static void vk_eng_record_draw_state(VkPipeline pipe,const VkViewport* vp,const VkRect2D* sc,
++                                     u32 stencil,float line_width,float depth_min,float depth_max)
++{
++    static int enabled=-1;
++    if(enabled<0) {const char* e=getenv("RSX_DRAW_STATE_CACHE");enabled=e && !strcmp(e,"1");}
++    const int keep=enabled && s_batch_renderpass;
++    const int valid=keep && s_draw_state.valid;
++    if(!valid || s_draw_state.pipeline!=pipe) {pvkCmdBindPipeline(s_vk.cmd,VK_PIPELINE_BIND_POINT_GRAPHICS,pipe);s_state_issued++;}
++    else s_state_skipped++;
++    if(!valid || memcmp(&s_draw_state.viewport,vp,sizeof *vp)) {pvkCmdSetViewport(s_vk.cmd,0,1,vp);s_state_issued++;}
++    else s_state_skipped++;
++    if(!valid || memcmp(&s_draw_state.scissor,sc,sizeof *sc)) {pvkCmdSetScissor(s_vk.cmd,0,1,sc);s_state_issued++;}
++    else s_state_skipped++;
++    if(!valid || s_draw_state.stencil!=stencil) {pvkCmdSetStencilReference(s_vk.cmd,VK_STENCIL_FACE_FRONT_AND_BACK,stencil);s_state_issued++;}
++    else s_state_skipped++;
++    if(!valid || s_draw_state.line_width!=line_width) {pvkCmdSetLineWidth(s_vk.cmd,line_width);s_state_issued++;}
++    else s_state_skipped++;
++    if(s_vk.depth_bounds_ok) {
++        if(!valid || s_draw_state.depth_min!=depth_min || s_draw_state.depth_max!=depth_max) {pvkCmdSetDepthBounds(s_vk.cmd,depth_min,depth_max);s_state_issued++;}
++        else s_state_skipped++;
++    }
++    s_draw_state.valid=keep;s_draw_state.pipeline=pipe;s_draw_state.viewport=*vp;s_draw_state.scissor=*sc;
++    s_draw_state.stencil=stencil;s_draw_state.line_width=line_width;s_draw_state.depth_min=depth_min;s_draw_state.depth_max=depth_max;
++}
++
+ static void vk_eng_draw(void* user, rsx_topology topology, const void* vertices, u32 vertex_count,
+                         u32 stride, const u32* indices, u32 index_count)
+ {
+@@ -4328,7 +4369,6 @@
+     pvkCmdBeginRenderPass(s_vk.cmd, &rbi, VK_SUBPASS_CONTENTS_INLINE);
+     if(keep_pass) {s_batch_renderpass=1;s_batch_framebuffer=fb;}
+     }
+-    pvkCmdBindPipeline(s_vk.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+     VkViewport vp = { 0.0f, 0.0f, (float)w, (float)h, 0.0f, 1.0f };
+     if (s_e2.have_vp && s_e2.vp[2] > 0.0f && s_e2.vp[3] > 0.0f) {
+         vp.x = s_e2.vp[0] * fx; vp.y = s_e2.vp[1] * fy; vp.width = s_e2.vp[2] * fx; vp.height = s_e2.vp[3] * fy;
+@@ -4343,17 +4383,10 @@
+         sc.offset.x = (int32_t)x0; sc.offset.y = (int32_t)y0;
+         sc.extent.width = x1 > x0 ? x1 - x0 : 0; sc.extent.height = y1 > y0 ? y1 - y0 : 0;
+     }
+-    pvkCmdSetViewport(s_vk.cmd, 0, 1, &vp);
+-    pvkCmdSetScissor(s_vk.cmd, 0, 1, &sc);
+-    pvkCmdSetStencilReference(s_vk.cmd, VK_STENCIL_FACE_FRONT_AND_BACK, s_e2.stencil_ref & 0xFFu);
+-    {   /* guest pixels to target pixels, as the viewport above */
+-        float lw = s_vk.wide_lines_ok ? s_e2.line_width * fy : 1.0f;
+-        if (lw < 1.0f) lw = 1.0f;
+-        if (lw > s_vk.line_width_max) lw = s_vk.line_width_max;
+-        pvkCmdSetLineWidth(s_vk.cmd, lw);
+-    }
+-    if (s_vk.depth_bounds_ok)
+-        pvkCmdSetDepthBounds(s_vk.cmd, s_e2.depth_bounds[0], s_e2.depth_bounds[1]);
++    float line_width=s_vk.wide_lines_ok?s_e2.line_width*fy:1.0f;
++    if(line_width<1.0f) line_width=1.0f;
++    if(line_width>s_vk.line_width_max) line_width=s_vk.line_width_max;
++    vk_eng_record_draw_state(pipe,&vp,&sc,s_e2.stencil_ref&0xFFu,line_width,s_e2.depth_bounds[0],s_e2.depth_bounds[1]);
+     pvkCmdBindDescriptorSets(s_vk.cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                              P->cube_mask ? s_e2.split_pipe_layout : s_g.pipe_layout,
+                              0, 1, &set, 0, NULL);
+diff --git a/runtime/spu/spu_workload.c b/runtime/spu/spu_workload.c
+--- a/runtime/spu/spu_workload.c
++++ b/runtime/spu/spu_workload.c
+@@ -1213,12 +1213,69 @@
+ static unsigned long long spu_task_cpu_us(void)
+ {
+ #ifdef _WIN32
+-    FILETIME c, e, k, u; GetThreadTimes(GetCurrentThread(), &c, &e, &k, &u);
++    FILETIME c, e, k, u; if(!GetThreadTimes(GetCurrentThread(), &c, &e, &k, &u)) return 0;
+     return (((unsigned long long)u.dwHighDateTime << 32 | u.dwLowDateTime) + ((unsigned long long)k.dwHighDateTime << 32 | k.dwLowDateTime)) / 10ull;
+ #else
+-    struct timespec t; clock_gettime(CLOCK_THREAD_CPUTIME_ID, &t);
++    struct timespec t; if(clock_gettime(CLOCK_THREAD_CPUTIME_ID, &t)!=0) return 0;
+     return (unsigned long long)t.tv_sec * 1000000ull + (unsigned long long)t.tv_nsec / 1000ull;
+ #endif
++}
++
++/* Optional per-thread timing, without sampling or cross-task signal timestamps.
++ * Compare run CPU with run wall time to distinguish expensive decode/mix work
++ * from descheduling/other waits inside the work cycle. Park is the whole wait,
++ * including time until the producer signals; it is NOT a signal-wakeup latency. */
++static int task_run_timing_on(void)
++{
++    static _Thread_local int on=-1;
++    if(on<0) {const char* e=getenv("SPU_TASK_RUN_STATS");on=e && !strcmp(e,"1");}
++    return on;
++}
++static _Thread_local struct {
++    uint32_t taskset,task;
++    unsigned long long epoch,resume,cpu_resume,enter,run_n,park_n,cpu_n;
++    unsigned long long run_sum,run_max,cpu_sum,cpu_max,park_sum,park_max;
++} s_run_timing;
++static void task_run_before_wait(uint32_t taskset,uint32_t task)
++{
++    if(!task_run_timing_on()) return;
++    const unsigned long long now=spu_task_us(),cpu=spu_task_cpu_us();
++    if(s_run_timing.taskset!=taskset || s_run_timing.task!=task) {
++        memset(&s_run_timing,0,sizeof s_run_timing);s_run_timing.taskset=taskset;s_run_timing.task=task;
++    }
++    if(!s_run_timing.epoch) s_run_timing.epoch=now;
++    if(s_run_timing.resume && now>=s_run_timing.resume) {
++        const unsigned long long run=now-s_run_timing.resume;
++        s_run_timing.run_n++;s_run_timing.run_sum+=run;
++        if(run>s_run_timing.run_max) s_run_timing.run_max=run;
++        if(cpu && s_run_timing.cpu_resume && cpu>=s_run_timing.cpu_resume) {
++            const unsigned long long used=cpu-s_run_timing.cpu_resume;
++            s_run_timing.cpu_n++;s_run_timing.cpu_sum+=used;
++            if(used>s_run_timing.cpu_max) s_run_timing.cpu_max=used;
++        }
++    }
++    s_run_timing.enter=now;
++}
++static void task_run_after_wait(void)
++{
++    if(!task_run_timing_on()) return;
++    const unsigned long long now=spu_task_us();
++    if(s_run_timing.enter && now>=s_run_timing.enter) {
++        const unsigned long long park=now-s_run_timing.enter;
++        s_run_timing.park_n++;s_run_timing.park_sum+=park;
++        if(park>s_run_timing.park_max) s_run_timing.park_max=park;
++    }
++    const unsigned long long elapsed=now-s_run_timing.epoch;
++    if(elapsed>=5000000 && s_run_timing.run_n) {
++        fprintf(stderr,"[task-run] taskset=%08X task=%u rounds=%.1f/s run_wall_avg=%.3f max=%.3f ms run_cpu_avg=%.3f max=%.3f ms cpu_samples=%llu park_avg=%.3f max=%.3f ms\n",
++                s_run_timing.taskset,s_run_timing.task,s_run_timing.park_n*1e6/(double)elapsed,
++                s_run_timing.run_sum/1000.0/s_run_timing.run_n,s_run_timing.run_max/1000.0,
++                s_run_timing.cpu_n?s_run_timing.cpu_sum/1000.0/s_run_timing.cpu_n:0.0,s_run_timing.cpu_max/1000.0,s_run_timing.cpu_n,
++                s_run_timing.park_n?s_run_timing.park_sum/1000.0/s_run_timing.park_n:0.0,s_run_timing.park_max/1000.0);
++        s_run_timing.epoch=now;s_run_timing.run_n=s_run_timing.park_n=s_run_timing.cpu_n=0;
++        s_run_timing.run_sum=s_run_timing.run_max=s_run_timing.cpu_sum=s_run_timing.cpu_max=s_run_timing.park_sum=s_run_timing.park_max=0;
++    }
++    s_run_timing.resume=spu_task_us();s_run_timing.cpu_resume=spu_task_cpu_us();
+ }
+ 
+ /* Deliver a signal to a task (callable from any PPU/host thread). */
+@@ -1300,6 +1357,7 @@
+ int spu_taskset_wait_signal(uint32_t taskset_ea, uint32_t taskId)
+ {
+     if (!taskset_ea || taskId >= 128) return 0;
++    task_run_before_wait(taskset_ea,taskId);
+     /* ran= is the wall time this task spent OUT of the wait (decode/mix work
+      * per round) -- decisive for "is the Bink decode CPU-bound". TLS: each
+      * task runs on its own host thread. */
+@@ -1422,6 +1480,7 @@
+         }
+         t_resume = now;
+     }
++    task_run_after_wait();
+     return 0;
+ }
+ 
+diff --git a/runtime/spu/spu_helpers.h b/runtime/spu/spu_helpers.h
+--- a/runtime/spu/spu_helpers.h
++++ b/runtime/spu/spu_helpers.h
+@@ -855,21 +855,25 @@
+ #else
+ extern __thread int g_spu_rz __attribute__((tls_model("initial-exec")));
+ #endif
+-SPU__NV_INLINE int spu__nv_native(uint32x4_t* r) {
++/* Retain the native lanes even when a sibling needs extended-range repair.
++ * The old all-zero repair mask recomputed all four lanes for one exception. */
++SPU__NV_INLINE uint32x4_t spu__nv_native(uint32x4_t* r) {
+     const uint32x4_t e = spu__nv_bexp(*r);
+     *r = vbicq_u32(*r, vceqzq_u32(e));
+-    return vmaxvq_u32(vcgtq_u32(e, vdupq_n_u32(253))) == 0;
++    return vcleq_u32(e, vdupq_n_u32(253));
+ }
+ SPU__NV_INLINE u128 spu__nv_rz_fa(u128 a, u128 b, uint32_t negb) {
+     const uint32x4_t x = vld1q_u32(a._u32), yb = vld1q_u32(b._u32), y = veorq_u32(yb, vdupq_n_u32(negb));
+     uint32x4_t r = vreinterpretq_u32_f32(vaddq_f32(vreinterpretq_f32_u32(x), vreinterpretq_f32_u32(y)));
+-    if (__builtin_expect(!spu__nv_native(&r), 0)) r = spu__fa_fix(r, vdupq_n_u32(0), x, yb, negb);
++    const uint32x4_t ok = spu__nv_native(&r);
++    if (__builtin_expect(!spu__nv_all4(ok), 0)) r = spu__fa_fix(r, ok, x, yb, negb);
+     return spu__nv_u128(r);
+ }
+ SPU__NV_INLINE u128 spu__nv_rz_fm(u128 a, u128 b) {
+     const uint32x4_t x = vld1q_u32(a._u32), y = vld1q_u32(b._u32);
+     uint32x4_t r = vreinterpretq_u32_f32(vmulq_f32(vreinterpretq_f32_u32(x), vreinterpretq_f32_u32(y)));
+-    if (__builtin_expect(!spu__nv_native(&r), 0)) r = spu__fm_fix(r, vdupq_n_u32(0), x, y);
++    const uint32x4_t ok = spu__nv_native(&r);
++    if (__builtin_expect(!spu__nv_all4(ok), 0)) r = spu__fm_fix(r, ok, x, y);
+     return spu__nv_u128(r);
+ }
+ SPU__NV_INLINE u128 spu__nv_rz_fma(u128 a, u128 b, u128 c, uint32_t negp, uint32_t negc) {
+@@ -877,7 +881,8 @@
+     const float32x4_t x = vreinterpretq_f32_u32(veorq_u32(xa, vdupq_n_u32(negp)));
+     const float32x4_t z = vreinterpretq_f32_u32(veorq_u32(zc, vdupq_n_u32(negc)));
+     uint32x4_t r = vreinterpretq_u32_f32(vfmaq_f32(z, x, vreinterpretq_f32_u32(y)));
+-    if (__builtin_expect(!spu__nv_native(&r), 0)) r = spu__fma_fix(r, vdupq_n_u32(0), xa, y, zc, negp, negc);
++    const uint32x4_t ok = spu__nv_native(&r);
++    if (__builtin_expect(!spu__nv_all4(ok), 0)) r = spu__fma_fix(r, ok, xa, y, zc, negp, negc);
+     return spu__nv_u128(r);
+ }
+ SPU__NV_INLINE u128 spu_fa(u128 a, u128 b) { return g_spu_rz ? spu__nv_rz_fa(a, b, 0) : spu__nv_fa(a, b, 0); }
+diff --git a/runtime/platform/win32_compat.h b/runtime/platform/win32_compat.h
+--- a/runtime/platform/win32_compat.h
++++ b/runtime/platform/win32_compat.h
+@@ -522,7 +522,7 @@
+ typedef CONDITION_VARIABLE* PCONDITION_VARIABLE;
+ #define CONDITION_VARIABLE_INIT NULL
+ 
+-typedef struct { pthread_mutex_t m; pthread_cond_t c; unsigned gen; } ps3_condvar;
++typedef struct { pthread_mutex_t m; pthread_cond_t c; unsigned gen; unsigned waiters; } ps3_condvar;
+ 
+ static inline void ps3__cv_init(void* p)
+ {
+@@ -530,6 +530,7 @@
+     pthread_mutex_init(&cv->m, NULL);
+     pthread_cond_init(&cv->c, NULL);
+     cv->gen = 0;
++    cv->waiters = 0;
+ }
+ static inline ps3_condvar* ps3_cv(CONDITION_VARIABLE* c)
+ { return (ps3_condvar*)ps3_lazy_obj((void**)c, sizeof(ps3_condvar), ps3__cv_init); }
+@@ -537,20 +538,28 @@
+ static inline void InitializeConditionVariable(CONDITION_VARIABLE* c) { *c = NULL; }
+ static inline void WakeConditionVariable(CONDITION_VARIABLE* c)
+ {
+-    ps3_condvar* cv = ps3_cv(c);
++    /* A wake has no memory for a future wait. Avoid allocating an object
++     * for SPU channel notifications that have never had a sleeper. */
++    ps3_condvar* cv = (ps3_condvar*)__atomic_load_n(c, __ATOMIC_ACQUIRE);
+     if (!cv) return;
+     pthread_mutex_lock(&cv->m);
+     cv->gen++;
+-    pthread_cond_signal(&cv->c);
++    /* Registration and this test share cv->m: a sleeper cannot enter
++     * between the test and the generation change. */
++    if (cv->waiters) pthread_cond_signal(&cv->c);
+     pthread_mutex_unlock(&cv->m);
+ }
+ static inline void WakeAllConditionVariable(CONDITION_VARIABLE* c)
+ {
+-    ps3_condvar* cv = ps3_cv(c);
++    /* A wake has no memory for a future wait. Avoid allocating an object
++     * for SPU channel notifications that have never had a sleeper. */
++    ps3_condvar* cv = (ps3_condvar*)__atomic_load_n(c, __ATOMIC_ACQUIRE);
+     if (!cv) return;
+     pthread_mutex_lock(&cv->m);
+     cv->gen++;
+-    pthread_cond_broadcast(&cv->c);
++    /* Registration and this test share cv->m: a sleeper cannot enter
++     * between the test and the generation change. */
++    if (cv->waiters) pthread_cond_broadcast(&cv->c);
+     pthread_mutex_unlock(&cv->m);
+ }
+ 
+@@ -562,6 +571,7 @@
+     if (!cv) return FALSE;
+     pthread_mutex_lock(&cv->m);
+     unsigned g = cv->gen;
++    cv->waiters++;
+     unlock(lock);
+     int rc = 0;
+     if (ms == INFINITE) {
+@@ -570,6 +580,7 @@
+         struct timespec ts = ps3__deadline_ms(ms);
+         while (cv->gen == g && rc == 0) rc = pthread_cond_timedwait(&cv->c, &cv->m, &ts);
+     }
++    cv->waiters--;
+     BOOL woke = (cv->gen != g);
+     pthread_mutex_unlock(&cv->m);
+     relock(lock);
+diff --git a/runtime/spu/spu_workload.c b/runtime/spu/spu_workload.c
+--- a/runtime/spu/spu_workload.c
++++ b/runtime/spu/spu_workload.c
+@@ -1225,6 +1225,7 @@
+  * Compare run CPU with run wall time to distinguish expensive decode/mix work
+  * from descheduling/other waits inside the work cycle. Park is the whole wait,
+  * including time until the producer signals; it is NOT a signal-wakeup latency. */
++void (*g_spu_task_run_observer)(uint32_t, uint32_t, int, uint64_t, uint64_t);
+ static int task_run_timing_on(void)
+ {
+     static _Thread_local int on=-1;
+@@ -1246,13 +1247,17 @@
+     if(!s_run_timing.epoch) s_run_timing.epoch=now;
+     if(s_run_timing.resume && now>=s_run_timing.resume) {
+         const unsigned long long run=now-s_run_timing.resume;
++        unsigned long long observed_cpu=0;
+         s_run_timing.run_n++;s_run_timing.run_sum+=run;
+         if(run>s_run_timing.run_max) s_run_timing.run_max=run;
+         if(cpu && s_run_timing.cpu_resume && cpu>=s_run_timing.cpu_resume) {
+             const unsigned long long used=cpu-s_run_timing.cpu_resume;
++            observed_cpu=used;
+             s_run_timing.cpu_n++;s_run_timing.cpu_sum+=used;
+             if(used>s_run_timing.cpu_max) s_run_timing.cpu_max=used;
+         }
++        if(g_spu_task_run_observer)
++            g_spu_task_run_observer(taskset,task,0,run,observed_cpu);
+     }
+     s_run_timing.enter=now;
+ }
+@@ -1276,6 +1281,8 @@
+         s_run_timing.run_sum=s_run_timing.run_max=s_run_timing.cpu_sum=s_run_timing.cpu_max=s_run_timing.park_sum=s_run_timing.park_max=0;
+     }
+     s_run_timing.resume=spu_task_us();s_run_timing.cpu_resume=spu_task_cpu_us();
++    if(g_spu_task_run_observer)
++        g_spu_task_run_observer(s_run_timing.taskset,s_run_timing.task,1,0,0);
+ }
+ 
+ /* Deliver a signal to a task (callable from any PPU/host thread). */
+diff --git a/runtime/spu/spu_workload.h b/runtime/spu/spu_workload.h
+--- a/runtime/spu/spu_workload.h
++++ b/runtime/spu/spu_workload.h
+@@ -33,6 +33,14 @@
+ #endif
+ 
+ typedef void (*spu_lifted_entry_fn)(spu_context*);
++
++/* Optional host observer, installed before task threads start. Timing must be
++ * enabled with SPU_TASK_RUN_STATS. running=1 begins a work round; running=0
++ * ends it, with measured wall/CPU microseconds (zero CPU means unavailable).
++ * The callback runs on the task's execution thread and must remain short. */
++extern void (*g_spu_task_run_observer)(uint32_t taskset, uint32_t task,
++    int running, uint64_t wall_us, uint64_t cpu_us);
++
+ 
+ /* FNV-1a 64-bit over a byte range. The canonical workload fingerprint; the
+  * offline extractor computes the same value so registrations and the images a
+diff --git a/runtime/spu/spu_helpers.h b/runtime/spu/spu_helpers.h
+--- a/runtime/spu/spu_helpers.h
++++ b/runtime/spu/spu_helpers.h
+@@ -1092,12 +1092,61 @@
+     const uint32_t v = sh >= 0 ? m << sh : (sh <= -24 ? 0 : m >> -sh);
+     return neg ? 0u - v : v;
+ }
+-static inline u128 spu_cflts(u128 a, int i8) { u128 r; for (int i = 0; i < 4; i++) r._u32[i] = spu__cfl_lane(a._u32[i], 173 - (i8 & 0xFF), 0); return r; }
+-static inline u128 spu_cfltu(u128 a, int i8) { u128 r; for (int i = 0; i < 4; i++) r._u32[i] = spu__cfl_lane(a._u32[i], 173 - (i8 & 0xFF), 1); return r; }
+-static inline u128 spu_csflt(u128 a, int i8) { u128 r; for (int i = 0; i < 4; i++) { const int32_t v = a._s32[i];
++static inline u128 spu_cflts_ref(u128 a, int i8) { u128 r; for (int i = 0; i < 4; i++) r._u32[i] = spu__cfl_lane(a._u32[i], 173 - (i8 & 0xFF), 0); return r; }
++static inline u128 spu_cfltu_ref(u128 a, int i8) { u128 r; for (int i = 0; i < 4; i++) r._u32[i] = spu__cfl_lane(a._u32[i], 173 - (i8 & 0xFF), 1); return r; }
++static inline u128 spu_csflt_ref(u128 a, int i8) { u128 r; for (int i = 0; i < 4; i++) { const int32_t v = a._s32[i];
+     r._u32[i] = v ? spu__sf_pack(v < 0 ? 0x80000000u : 0, v < 0 ? 0u - (uint32_t)v : (uint32_t)v, -(155 - (i8 & 0xFF))) : 0; } return r; }
+-static inline u128 spu_cuflt(u128 a, int i8) { u128 r; for (int i = 0; i < 4; i++) { const uint32_t v = a._u32[i];
++static inline u128 spu_cuflt_ref(u128 a, int i8) { u128 r; for (int i = 0; i < 4; i++) { const uint32_t v = a._u32[i];
+     r._u32[i] = v ? spu__sf_pack(0, v, -(155 - (i8 & 0xFF))) : 0; } return r; }
++
++#if defined(__ARM_NEON) && !defined(SPU_SCALAR_HELPERS) && !defined(SPU_SCALAR_INT)
++/* Pack integer magnitudes directly, four lanes at once. No host floating
++ * rounding mode, f64 conversion, or 128-bit scalar packing is needed. */
++static inline u128 spu__int_to_sf(uint32x4_t magnitude, uint32x4_t sign, int i8) {
++    const int32x4_t leading = vreinterpretq_s32_u32(vclzq_u32(magnitude));
++    const int32x4_t exponent = vsubq_s32(vdupq_n_s32((i8 & 255) + 3), leading);
++    const uint32x4_t fraction = vandq_u32(vshrq_n_u32(vshlq_u32(magnitude, leading), 8), vdupq_n_u32(0x7FFFFF));
++    uint32x4_t result = vorrq_u32(sign, vorrq_u32(vshlq_n_u32(vreinterpretq_u32_s32(exponent), 23), fraction));
++    result = vbslq_u32(vcgtq_s32(exponent, vdupq_n_s32(255)), vorrq_u32(sign, vdupq_n_u32(0x7FFFFFFF)), result);
++    result = vandq_u32(result, vandq_u32(vcgtq_s32(exponent, vdupq_n_s32(0)), vcgtq_u32(magnitude, vdupq_n_u32(0))));
++    return spu__st(result);
++}
++static inline u128 spu_csflt(u128 a, int i8) {
++    const int32x4_t x = vreinterpretq_s32_u32(spu__ld(a));
++    return spu__int_to_sf(vreinterpretq_u32_s32(vabsq_s32(x)), vandq_u32(vreinterpretq_u32_s32(x), vdupq_n_u32(0x80000000)), i8);
++}
++static inline u128 spu_cuflt(u128 a, int i8) {
++    return spu__int_to_sf(spu__ld(a), vdupq_n_u32(0), i8);
++}
++static inline u128 spu__sf_to_int(u128 a, int i8, int is_unsigned) {
++    const uint32x4_t x = spu__ld(a);
++    const uint32x4_t exponent = vandq_u32(vshrq_n_u32(x, 23), vdupq_n_u32(255));
++    const uint32x4_t negative = vreinterpretq_u32_s32(vshrq_n_s32(vreinterpretq_s32_u32(x), 31));
++    const uint32x4_t magnitude = vorrq_u32(vandq_u32(x, vdupq_n_u32(0x7FFFFF)), vdupq_n_u32(0x800000));
++    const int32x4_t shift = vsubq_s32(vreinterpretq_s32_u32(exponent), vdupq_n_s32((i8 & 255) - 23));
++    const int limit = is_unsigned ? 8 : 7;
++    // NEON variable shifts interpret only the low byte. Clamp first so large
++    // exponents cannot wrap into an unrelated shift direction or count.
++    const int32x4_t bounded = vminq_s32(vmaxq_s32(shift, vdupq_n_s32(-32)), vdupq_n_s32(limit));
++    uint32x4_t result = vshlq_u32(magnitude, bounded);
++    if (is_unsigned) {
++        result = vorrq_u32(result, vcgtq_s32(shift, vdupq_n_s32(limit)));
++        result = vbicq_u32(result, negative);
++    } else {
++        result = vbslq_u32(negative, vsubq_u32(vdupq_n_u32(0), result), result);
++        const uint32x4_t saturated = vbslq_u32(negative, vdupq_n_u32(0x80000000), vdupq_n_u32(0x7FFFFFFF));
++        result = vbslq_u32(vcgtq_s32(shift, vdupq_n_s32(limit)), saturated, result);
++    }
++    return spu__st(vandq_u32(result, vcgtq_u32(exponent, vdupq_n_u32(0))));
++}
++static inline u128 spu_cflts(u128 a, int i8) { return spu__sf_to_int(a, i8, 0); }
++static inline u128 spu_cfltu(u128 a, int i8) { return spu__sf_to_int(a, i8, 1); }
++#else
++static inline u128 spu_csflt(u128 a, int i8) { return spu_csflt_ref(a, i8); }
++static inline u128 spu_cuflt(u128 a, int i8) { return spu_cuflt_ref(a, i8); }
++static inline u128 spu_cflts(u128 a, int i8) { return spu_cflts_ref(a, i8); }
++static inline u128 spu_cfltu(u128 a, int i8) { return spu_cfltu_ref(a, i8); }
++#endif
+ 
+ /* fi -- Floating Interpolate (SPU ISA v1.2, p. 219; frest/frsqest output
+  * format p. 215; single-precision rules section 9.1).
+diff --git a/runtime/spu/tests/test_spu_conversion_neon.c b/runtime/spu/tests/test_spu_conversion_neon.c
+new file mode 100644
+--- /dev/null
++++ b/runtime/spu/tests/test_spu_conversion_neon.c
+@@ -0,0 +1,86 @@
++/* Exact integer/extended-single conversions at every encoded scale, including
++ * scales outside the ISA-defined range, against the scalar implementation.
++ * ARM64: clang -O2 -Iinclude runtime/spu/tests/test_spu_conversion_neon.c -o test */
++#include "../spu_helpers.h"
++#include <time.h>
++#if defined(_MSC_VER)
++__declspec(thread) int g_spu_rz;
++#else
++__thread int g_spu_rz;
++#endif
++static uint64_t rng = 0xD1B54A32D192ED03ull;
++static uint32_t random_word(void) {
++    rng ^= rng << 13; rng ^= rng >> 7; rng ^= rng << 17;
++    return (uint32_t)(rng >> 16);
++}
++static __attribute__((noinline)) u128 scalar(u128 a, int scale, int op) {
++    switch (op) {
++    case 0: return spu_csflt_ref(a,scale);
++    case 1: return spu_cuflt_ref(a,scale);
++    case 2: return spu_cflts_ref(a,scale);
++    default:return spu_cfltu_ref(a,scale);
++    }
++}
++static __attribute__((noinline)) u128 vector(u128 a, int scale, int op) {
++    switch (op) {
++    case 0: return spu_csflt(a,scale);
++    case 1: return spu_cuflt(a,scale);
++    case 2: return spu_cflts(a,scale);
++    default:return spu_cfltu(a,scale);
++    }
++}
++static int check(u128 a,int scale) {
++    for(int op=0;op<4;op++) {
++        u128 got=vector(a,scale,op),want=scalar(a,scale,op);
++        if(memcmp(&got,&want,16)) {
++            for(int i=0;i<4;i++) if(got._u32[i]!=want._u32[i])
++                printf("FAIL op=%d scale=%d lane=%d in=%08X got=%08X want=%08X\n",op,scale,i,a._u32[i],got._u32[i],want._u32[i]);
++            return 1;
++        }
++    }
++    return 0;
++}
++static volatile uint32_t sink;
++int main(void) {
++#if !defined(__ARM_NEON)
++    puts("SKIP: native conversion test requires ARM64 NEON");return 0;
++#else
++    unsigned long long cases=0;
++    const uint32_t edges[]={0,1,0x7fffff,0x800000,0xffffff,0x1000000,0x1000001,
++        0x7fffffff,0x80000000,0xffffffff,0x007fffff,0x00800000,0x3f800000,
++        0x4effffff,0x4f000000,0x4f7fffff,0x4f800000,0xcf000000,0xcf800000,
++        0x7f000000,0x7f7fffff,0x7f800000,0x7fffffff,0xff800000,0xffffffff};
++    for(int scale=0;scale<256;scale++) {
++        for(unsigned j=0;j<sizeof(edges)/sizeof(edges[0]);j++) {
++            u128 a;for(int i=0;i<4;i++)a._u32[i]=edges[(j+i)% (sizeof(edges)/sizeof(edges[0]))];
++            if(check(a,scale))return 1;cases+=4;
++        }
++        // Every normalization position, sign, and adjacent integer/float boundary.
++        for(int bit=0;bit<32;bit++) for(int delta=-1;delta<=1;delta++) {
++            u128 a;for(int i=0;i<4;i++)a._u32[i]=((1u<<bit)+(uint32_t)delta) ^ ((i&1)?0x80000000u:0);
++            if(check(a,scale))return 1;cases+=4;
++        }
++        for(int j=0;j<32768;j++) {
++            u128 a;for(int i=0;i<4;i++)a._u32[i]=random_word();
++            if(check(a,scale))return 1;cases+=4;
++        }
++    }
++    // Immediate decoding masks to eight bits, including negative C arguments.
++    for(int scale=-513;scale<=513;scale++) {
++        u128 a;for(int i=0;i<4;i++)a._u32[i]=random_word();
++        if(check(a,scale))return 1;cases+=4;
++    }
++    printf("PASS: %llu vector conversions (%llu lanes), all 256 scales + boundary/decoded immediates\n",cases,cases*4);
++    u128 inputs[64];for(int j=0;j<64;j++)for(int i=0;i<4;i++)inputs[j]._u32[i]=random_word();
++    for(int op=0;op<4;op++) {
++        const int scale=op<2?155:173,N=4000000;
++        uint32_t sum=0;clock_t start=clock();
++        for(int n=0;n<N;n++){u128 r=scalar(inputs[n&63],scale,op);sum+=r._u32[n&3];}
++        double before=(double)(clock()-start)*1e9/CLOCKS_PER_SEC/N;sink=sum;start=clock();
++        for(int n=0;n<N;n++){u128 r=vector(inputs[n&63],scale,op);sum+=r._u32[n&3];}
++        double after=(double)(clock()-start)*1e9/CLOCKS_PER_SEC/N;sink=sum;
++        printf("op=%d scale=%d scalar_ns=%.2f vector_ns=%.2f speedup=%.2f\n",op,scale,before,after,before/after);
++    }
++    return 0;
++#endif
++}
+diff --git a/runtime/spu/spu_helpers.h b/runtime/spu/spu_helpers.h
+--- a/runtime/spu/spu_helpers.h
++++ b/runtime/spu/spu_helpers.h
+@@ -402,22 +402,23 @@
+ }
+ #elif defined(__ARM_NEON)
+ #include <arm_neon.h>
+-/* NEON version: tbl over the 32-byte {a,b} concatenation. SPU byte P lives at
+- * host byte P^3 (each word's bytes reversed), so rev32 into SPU order,
+- * select, and rev32 back. */
++/* Select directly in host byte order. Host byte j uses control c[j], and
++ * SPU source byte n resides at host byte n^3. This avoids reversing both
++ * sources, the control and the result for every shuffle in mixer loops. */
+ static inline u128 spu_shufb(u128 a, u128 b, u128 c) {
+     uint8x16x2_t t;
+-    t.val[0] = vrev32q_u8(vld1q_u8(a._u8));
+-    t.val[1] = vrev32q_u8(vld1q_u8(b._u8));
+-    const uint8x16_t C = vrev32q_u8(vld1q_u8(c._u8));
+-    uint8x16_t r = vqtbl2q_u8(t, vandq_u8(C, vdupq_n_u8(0x1F)));
+-    /* Special selectors: 10x -> 0x00, 110 -> 0xFF, 111 -> 0x80. */
+-    const uint8x16_t m80 = vtstq_u8(C, vdupq_n_u8(0x80));
+-    const uint8x16_t mC0 = vceqq_u8(vandq_u8(C, vdupq_n_u8(0xC0)), vdupq_n_u8(0xC0));
+-    const uint8x16_t mE0 = vceqq_u8(vandq_u8(C, vdupq_n_u8(0xE0)), vdupq_n_u8(0xE0));
+-    const uint8x16_t special = vbslq_u8(mE0, vdupq_n_u8(0x80), mC0);
+-    r = vrev32q_u8(vbslq_u8(m80, special, r));
+-    u128 out; vst1q_u8(out._u8, r); return out;
++    t.val[0] = vld1q_u8(a._u8);
++    t.val[1] = vld1q_u8(b._u8);
++    const uint8x16_t control = vld1q_u8(c._u8);
++    const uint8x16_t index = veorq_u8(vandq_u8(control, vdupq_n_u8(31)), vdupq_n_u8(3));
++    const uint8x16_t selected = vqtbl2q_u8(t, index);
++    /* Top-nibble specials: 8..B -> zero, C..D -> FF, E..F -> 80. */
++    static const uint8_t special_bytes[16] = {0,0,0,0,0,0,0,0,0,0,0,0,255,255,128,128};
++    const uint8x16_t special = vqtbl1q_u8(vld1q_u8(special_bytes), vshrq_n_u8(control, 4));
++    const uint8x16_t special_mask = vcltq_s8(vreinterpretq_s8_u8(control), vdupq_n_s8(0));
++    u128 out;
++    vst1q_u8(out._u8, vbslq_u8(special_mask, special, selected));
++    return out;
+ }
+ #endif
+ #if defined(__SSE4_1__) || defined(__ARM_NEON)
+diff --git a/runtime/spu/tests/test_spu_shufb.c b/runtime/spu/tests/test_spu_shufb.c
+--- a/runtime/spu/tests/test_spu_shufb.c
++++ b/runtime/spu/tests/test_spu_shufb.c
+@@ -12,6 +12,28 @@
+     puts("test_spu_shufb: built without SSE4.1 or NEON, nothing to compare");
+     return 0;
+ #else
++    /* Cover every control value at every host byte position explicitly.
++     * Distinct source bytes expose endian or a/b selection mistakes. */
++    for (int seed = 0; seed < 16; ++seed) {
++        u128 a, b;
++        for (int i = 0; i < 16; ++i) {
++            a._u8[i] = (uint8_t)(37 * i + 17 * seed);
++            b._u8[i] = (uint8_t)(119 * i + seed);
++        }
++        for (int control = 0; control < 256; ++control) {
++            for (int position = 0; position < 16; ++position) {
++                u128 c;
++                for (int i = 0; i < 16; ++i) c._u8[i] = (uint8_t)(control + 19 * i);
++                c._u8[position] = (uint8_t)control;
++                const u128 got = spu_shufb(a,b,c), ref = spu_shufb_ref(a,b,c);
++                if (memcmp(&got,&ref,16)) {
++                    printf("test_spu_shufb: selector mismatch seed=%d control=%d position=%d\n",seed,control,position);
++                    return 1;
++                }
++            }
++        }
++    }
++    puts("test_spu_shufb: ok (65536 exhaustive selector/position cases)");
+     srand(12345);
+     for (int it = 0; it < 200000; it++) {
+         u128 a, b, c;
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -483,6 +483,8 @@
+     return vk_batch_flush_ex(0);
+ }
+ static uint64_t s_state_issued,s_state_skipped;
++static uint64_t s_descriptor_epoch=1;
++static uint64_t s_descriptor_calls,s_descriptor_skipped,s_descriptor_written,s_descriptor_reused;
+ static void vk_trace_submit(const char* reason, unsigned draws, double ms) {
+     static FILE* file;
+     static int initialized;
+@@ -515,6 +517,10 @@
+         fprintf(stderr,"[rsx-state] window_ms=%u issued=%llu skipped=%llu\n",now-window,
+                 (unsigned long long)s_state_issued,(unsigned long long)s_state_skipped);
+         s_state_issued=s_state_skipped=0;
++        fprintf(stderr,"[rsx-descriptors] window_ms=%u calls=%llu skipped_calls=%llu written=%llu reused=%llu\n",now-window,
++            (unsigned long long)s_descriptor_calls,(unsigned long long)s_descriptor_skipped,
++            (unsigned long long)s_descriptor_written,(unsigned long long)s_descriptor_reused);
++        s_descriptor_calls=s_descriptor_skipped=s_descriptor_written=s_descriptor_reused=0;
+         for(unsigned j=0;j<used;j++) {
+             const struct WaitBucket* b=&buckets[j];
+             fprintf(stderr,"[rsx-wait] window_ms=%u reason=%s calls=%u draws=%u wait_ms=%.3f max_ms=%.3f\n",
+@@ -568,7 +574,10 @@
+ static void vk_destroy_image(vk_image* im)
+ {
+     vk_flush_at("vk_destroy_image");
+-    if (im->view) pvkDestroyImageView(s_vk.device, im->view, NULL);
++    if (im->view) {
++        ++s_descriptor_epoch;  /* a recreated view may reuse this numeric handle */
++        pvkDestroyImageView(s_vk.device, im->view, NULL);
++    }
+     if (im->img)  pvkDestroyImage(s_vk.device, im->img, NULL);
+     if (im->mem)  pvkFreeMemory(s_vk.device, im->mem, NULL);
+     memset(im, 0, sizeof *im);
+@@ -2671,10 +2680,19 @@
+     return limit;
+ }
+ static unsigned char* s_batch_constants;
++struct vk_eng_desc_state {
++    VkDescriptorSet set;
++    uint64_t epoch;
++    int valid,split;
++    VkDescriptorBufferInfo buffers[2];
++    VkDescriptorImageInfo images[RSX_MAX_TEXTURES],samplers[RSX_MAX_TEXTURES];
++    VkDescriptorImageInfo vertex_images[RSX_MAX_VERTEX_TEXTURES],vertex_samplers[RSX_MAX_VERTEX_TEXTURES];
++};
+ static struct vk_draw_slot {
+     vk_buffer vertices, indices, constants;
+     VkDescriptorPool pool;
+     VkDescriptorSet normal, split;
++    struct vk_eng_desc_state descriptors;
+ } s_draw_slot[VK_DRAW_BATCH_SIZE * VK_ASYNC_SETS];
+ 
+ static void vk_eng2_shutdown(void* user);
+@@ -4154,11 +4172,14 @@
+ 
+ static int vk_draw_slot_prepare(struct vk_draw_slot* slot, VkDeviceSize vb, VkDeviceSize ib)
+ {
++    if(!slot->constants.buf || slot->constants.size<s_g.ubo.size)
++        slot->descriptors.valid=0;  /* buffer recreation may recycle the handle */
+     if (vk_ensure_buffer(&slot->vertices, vb, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT) ||
+         (ib && vk_ensure_buffer(&slot->indices, ib, VK_BUFFER_USAGE_INDEX_BUFFER_BIT)) ||
+         vk_ensure_buffer(&slot->constants, s_g.ubo.size, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT)) return -1;
+     if (!slot->vertices.coherent || !slot->constants.coherent || (ib && !slot->indices.coherent)) return -1;
+     if (!slot->pool) {
++        slot->descriptors.valid=0;
+         VkDescriptorPoolSize sizes[] = {
+             {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 4},
+             {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 2*(RSX_MAX_TEXTURES+RSX_MAX_VERTEX_TEXTURES)},
+@@ -4171,6 +4192,70 @@
+     return 0;
+ }
+ 
++/* Descriptor contents outlive command buffers. A draw slot is reused only
++ * after its fence; changing mapped constant bytes does not change a binding.
++ * Image-view destruction advances the epoch, even if a driver recycles handles. */
++static int vk_desc_buffer_equal(const VkDescriptorBufferInfo* a,const VkDescriptorBufferInfo* b)
++{
++    return a->buffer==b->buffer && a->offset==b->offset && a->range==b->range;
++}
++static int vk_desc_image_equal(const VkDescriptorImageInfo* a,const VkDescriptorImageInfo* b)
++{
++    return a->sampler==b->sampler && a->imageView==b->imageView && a->imageLayout==b->imageLayout;
++}
++static void vk_desc_image_writes(VkWriteDescriptorSet* writes,u32* count,VkDescriptorSet set,
++                                 u32 binding,VkDescriptorType type,const VkDescriptorImageInfo* value,
++                                 const VkDescriptorImageInfo* previous,u32 size,int separate,int reusable)
++{
++    for(u32 u=0;u<size;) {
++        if(reusable && vk_desc_image_equal(&value[u],&previous[u])) {++u;continue;}
++        const u32 first=u++;
++        if(!separate)
++            while(u<size && (!reusable || !vk_desc_image_equal(&value[u],&previous[u]))) ++u;
++        writes[(*count)++]=(VkWriteDescriptorSet){.sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
++            .dstSet=set,.dstBinding=binding+(separate?first:0),.dstArrayElement=separate?0:first,
++            .descriptorCount=u-first,.descriptorType=type,.pImageInfo=&value[first]};
++    }
++}
++static void vk_eng_update_descriptor_state(VkDescriptorSet set,int split,struct vk_eng_desc_state* cache,
++                                            const VkDescriptorBufferInfo bi[2],
++                                            const VkDescriptorImageInfo ii[RSX_MAX_TEXTURES],
++                                            const VkDescriptorImageInfo si[RSX_MAX_TEXTURES],
++                                            const VkDescriptorImageInfo vii[RSX_MAX_VERTEX_TEXTURES],
++                                            const VkDescriptorImageInfo vsi[RSX_MAX_VERTEX_TEXTURES])
++{
++    const int reusable=cache && cache->valid && cache->set==set && cache->split==split && cache->epoch==s_descriptor_epoch;
++    VkWriteDescriptorSet writes[2+2*RSX_MAX_TEXTURES+2*RSX_MAX_VERTEX_TEXTURES];
++    u32 n=0;
++    for(u32 u=0;u<2;u++) {
++        if(reusable && vk_desc_buffer_equal(&bi[u],&cache->buffers[u])) continue;
++        writes[n++]=(VkWriteDescriptorSet){.sType=VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,.dstSet=set,
++            .dstBinding=u?RSX_SPIRV_PSCONST_BINDING:RSX_SPIRV_VPCONST_BINDING,.descriptorCount=1,
++            .descriptorType=VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,.pBufferInfo=&bi[u]};
++    }
++    vk_desc_image_writes(writes,&n,set,RSX_SPIRV_TEXTURE_BINDING,VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
++        ii,reusable?cache->images:NULL,RSX_MAX_TEXTURES,split,reusable);
++    vk_desc_image_writes(writes,&n,set,RSX_SPIRV_SAMPLER_BINDING,VK_DESCRIPTOR_TYPE_SAMPLER,
++        si,reusable?cache->samplers:NULL,RSX_MAX_TEXTURES,0,reusable);
++    vk_desc_image_writes(writes,&n,set,RSX_SPIRV_TEXTURE_BINDING+RSX_MAX_TEXTURES,VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
++        vii,reusable?cache->vertex_images:NULL,RSX_MAX_VERTEX_TEXTURES,1,reusable);
++    vk_desc_image_writes(writes,&n,set,RSX_SPIRV_SAMPLER_BINDING+RSX_MAX_TEXTURES,VK_DESCRIPTOR_TYPE_SAMPLER,
++        vsi,reusable?cache->vertex_samplers:NULL,RSX_MAX_VERTEX_TEXTURES,1,reusable);
++    u32 descriptors=0;
++    for(u32 u=0;u<n;u++) descriptors+=writes[u].descriptorCount;
++    if(n) {pvkUpdateDescriptorSets(s_vk.device,n,writes,0,NULL);++s_descriptor_calls;}
++    else ++s_descriptor_skipped;
++    s_descriptor_written+=descriptors;
++    s_descriptor_reused+=2+2*RSX_MAX_TEXTURES+2*RSX_MAX_VERTEX_TEXTURES-descriptors;
++    if(cache && n) {
++        cache->valid=1;cache->set=set;cache->split=split;cache->epoch=s_descriptor_epoch;
++        memcpy(cache->buffers,bi,sizeof cache->buffers);
++        memcpy(cache->images,ii,sizeof cache->images);memcpy(cache->samplers,si,sizeof cache->samplers);
++        memcpy(cache->vertex_images,vii,sizeof cache->vertex_images);
++        memcpy(cache->vertex_samplers,vsi,sizeof cache->vertex_samplers);
++    }
++}
++
+ /* Fill the set the bound pipeline uses: the shared one (sixteen textures in
+  * one binding), or for a pipeline with cube units the split one (one binding
+  * per unit). Returns the set, or VK_NULL_HANDLE. */
+@@ -4181,6 +4266,7 @@
+     if (slot) {
+         VkDescriptorSet* target = split ? &slot->split : &slot->normal;
+         if (!*target) {
++            slot->descriptors.valid=0;
+             VkDescriptorSetLayout layout = split ? s_e2.split_layout : s_g.set_layout;
+             VkDescriptorSetAllocateInfo ai = {.sType=VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
+                 .descriptorPool=slot->pool,.descriptorSetCount=1,.pSetLayouts=&layout};
+@@ -4216,38 +4302,9 @@
+                                           VK_IMAGE_LAYOUT_GENERAL };
+         vsi[u] = (VkDescriptorImageInfo){ smp, VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED };
+     }
+-    VkWriteDescriptorSet w[3 + RSX_MAX_TEXTURES + 2 * RSX_MAX_VERTEX_TEXTURES];
+-    u32 n = 0;
+-    w[n++] = (VkWriteDescriptorSet){ .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set,
+-          .dstBinding = RSX_SPIRV_VPCONST_BINDING, .descriptorCount = 1,
+-          .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .pBufferInfo = &bi[0] };
+-    w[n++] = (VkWriteDescriptorSet){ .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set,
+-          .dstBinding = RSX_SPIRV_PSCONST_BINDING, .descriptorCount = 1,
+-          .descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, .pBufferInfo = &bi[1] };
+-    w[n++] = (VkWriteDescriptorSet){ .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set,
+-          .dstBinding = RSX_SPIRV_SAMPLER_BINDING, .descriptorCount = RSX_MAX_TEXTURES,
+-          .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER, .pImageInfo = si };
+-    if (split) {
+-        for (u32 u = 0; u < RSX_MAX_TEXTURES; u++)
+-            w[n++] = (VkWriteDescriptorSet){ .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+-                  .dstSet = set, .dstBinding = RSX_SPIRV_TEXTURE_BINDING + u, .descriptorCount = 1,
+-                  .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, .pImageInfo = &ii[u] };
+-    } else {
+-        w[n++] = (VkWriteDescriptorSet){ .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = set,
+-              .dstBinding = RSX_SPIRV_TEXTURE_BINDING, .descriptorCount = RSX_MAX_TEXTURES,
+-              .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, .pImageInfo = ii };
+-    }
+-    for (u32 u = 0; u < RSX_MAX_VERTEX_TEXTURES; u++)
+-        w[n++] = (VkWriteDescriptorSet){ .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+-            .dstSet = set, .dstBinding = RSX_SPIRV_TEXTURE_BINDING + RSX_MAX_TEXTURES + u,
+-            .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+-            .pImageInfo = &vii[u] };
+-    for (u32 u = 0; u < RSX_MAX_VERTEX_TEXTURES; u++)
+-        w[n++] = (VkWriteDescriptorSet){ .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET,
+-            .dstSet = set, .dstBinding = RSX_SPIRV_SAMPLER_BINDING + RSX_MAX_TEXTURES + u,
+-            .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER,
+-            .pImageInfo = &vsi[u] };
+-    pvkUpdateDescriptorSets(s_vk.device, n, w, 0, NULL);
++    static int enabled=-1;
++    if(enabled<0) {const char* option=getenv("RSX_DESCRIPTOR_CACHE");enabled=option && !strcmp(option,"1");}
++    vk_eng_update_descriptor_state(set,split,enabled && slot?&slot->descriptors:NULL,bi,ii,si,vii,vsi);
+     return set;
+ }
+ 
+
+--- a/runtime/spu/spu_helpers.h
++++ b/runtime/spu/spu_helpers.h
+@@ -589,23 +589,32 @@
+     if (!nz) return spu__sf_pack(sp, p, ex + ey);
+     return spu__sf_sum(sp, p, ex + ey, sz, mz, ez);
+ }
+-/* Fast path, exact by construction, for the common case where every operand is an ordinary
+- * normal single (biased exponent 1..254): the value is formed in double precision and truncated
++/* Fast path, exact by construction, for nonzero operands, including extended-range
++ * finite SPU singles (biased exponent 1..255): the value is formed in double precision and truncated
+  * by masking the 29 low significand bits, which is truncation toward zero of the magnitude.
+  *  - a product of two 24-bit significands is exact in double;
+  *  - a sum is exact in double when the exponents differ by at most 29;
+  *  - x*y + z through a double fma is rounded once at 53 bits; that rounding can only change the
+  *    24-bit truncation when the double lands exactly on a 24-bit boundary (its 29 low bits all
+  *    zero), so such lanes take the exact path.
+- * Anything else -- zero, extended, or a result outside the normal range -- returns 0 here,
++ * Zero operands or a result below the SPU normal range return 0 here,
+  * meaning "use the exact path". */
+-static inline int spu__sf_plain(uint32_t x) { const uint32_t e = (x >> 23) & 0xFFu; return e - 1u < 254u; }
++static inline int spu__sf_plain(uint32_t x) { return (x & 0x7F800000u) != 0; }
+ static inline float spu__sf_f(uint32_t x) { float f; memcpy(&f, &x, 4); return f; }
+-/* d (finite, nonzero) truncated to a single; 0 if outside the normal single range or zero. */
++/* Exponent 255 is finite on the SPU. Widen it by constructing its exact
++ * double representation instead of converting a host Inf/NaN. */
++static inline double spu__sf_double(uint32_t x) {
++    if (__builtin_expect((x & 0x7F800000u) != 0x7F800000u, 1)) return (double)spu__sf_f(x);
++    const uint64_t bits = ((uint64_t)(x & 0x80000000u) << 32) |
++        ((uint64_t)(255 + 896) << 52) | ((uint64_t)(x & 0x7FFFFFu) << 29);
++    double d; memcpy(&d, &bits, 8); return d;
++}
++/* Finite d truncated to SPU range, saturating overflow; 0 requests exact repair. */
+ static inline uint32_t spu__sf_from_d(double d, int boundary_check) {
+     uint64_t u; memcpy(&u, &d, 8);
+     const int e = (int)((u >> 52) & 0x7FFu) - 1023;
+-    if (e < -126 || e > 127) return 0;                     /* zero, denormal, or not a normal single */
++    if (e < -126) return 0;
++    if (e > 128) return (uint32_t)(u >> 32 & 0x80000000u) | 0x7FFFFFFFu;
+     if (boundary_check && !(u & 0x1FFFFFFFull)) return 0;  /* possibly rounded onto the boundary */
+     return (uint32_t)(u >> 32 & 0x80000000u) | ((uint32_t)(e + 127) << 23) | (uint32_t)((u >> 29) & 0x7FFFFFu);
+ }
+@@ -613,16 +622,16 @@
+     if (!spu__sf_plain(x) || !spu__sf_plain(y)) return 0;
+     const int d = (int)((x >> 23) & 0xFFu) - (int)((y >> 23) & 0xFFu);
+     if (d > 29 || d < -29) return 0;
+-    return spu__sf_from_d((double)spu__sf_f(x) + (double)spu__sf_f(y), 0);
++    return spu__sf_from_d(spu__sf_double(x) + spu__sf_double(y), 0);
+ }
+ static inline uint32_t spu__fm_fast(uint32_t x, uint32_t y) {
+     if (!spu__sf_plain(x) || !spu__sf_plain(y)) return 0;
+-    return spu__sf_from_d((double)spu__sf_f(x) * (double)spu__sf_f(y), 0);
++    return spu__sf_from_d(spu__sf_double(x) * spu__sf_double(y), 0);
+ }
+ static inline uint32_t spu__fma_fast(uint32_t x, uint32_t y, uint32_t z, uint32_t negp, uint32_t negc) {
+     if (!spu__sf_plain(x) || !spu__sf_plain(y) || !spu__sf_plain(z)) return 0;
+-    const double p = (double)spu__sf_f(x ^ negp) * (double)spu__sf_f(y);      /* exact */
+-    return spu__sf_from_d(fma(1.0, p, (double)spu__sf_f(z ^ negc)), 1);
++    const double p = spu__sf_double(x ^ negp) * spu__sf_double(y);      /* exact */
++    return spu__sf_from_d(fma(1.0, p, spu__sf_double(z ^ negc)), 1);
+ }
+ static inline uint32_t spu__fa_any(uint32_t x, uint32_t y) { const uint32_t f = spu__fa_fast(x, y); return f ? f : spu__fa_lane(x, y); }
+ static inline uint32_t spu__fm_any(uint32_t x, uint32_t y) { const uint32_t f = spu__fm_fast(x, y); return f ? f : spu__fm_lane(x, y); }
+--- /dev/null
++++ b/runtime/spu/tests/test_spu_extended_fast.c
+@@ -0,0 +1,34 @@
++/* Compare optimized scalar repairs and native vector arithmetic with the
++ * independent integer reference, including extended range and cancellation. */
++#include "../spu_helpers.h"
++#include <stdio.h>
++#include <fenv.h>
++#if defined(_MSC_VER) && !defined(__clang__)
++__declspec(thread) int g_spu_rz;
++#else
++__thread int g_spu_rz;
++#endif
++static uint64_t state=0x7f123456789abcdeull;
++static uint32_t word(void){state^=state<<13;state^=state>>7;state^=state<<17;return (uint32_t)state;}
++static int check(uint32_t a,uint32_t b,uint32_t c){
++ uint32_t got[5]={spu__fa_any(a,b),spu__fm_any(a,b),spu__fma_any(a,b,c,0,0),spu__fma_any(a,b,c,0,0x80000000u),spu__fma_any(a,b,c,0x80000000u,0)};
++ uint32_t ref[5]={spu__fa_lane(a,b),spu__fm_lane(a,b),spu__fma_lane(a,b,c,0,0),spu__fma_lane(a,b,c,0,0x80000000u),spu__fma_lane(a,b,c,0x80000000u,0)};
++ for(int i=0;i<5;i++)if(got[i]!=ref[i]){printf("FAIL op%d %08x %08x %08x got%08x ref%08x\n",i,a,b,c,got[i],ref[i]);return 1;}
++ return 0;
++}
++int main(void){
++ const uint32_t edges[]={0,0x80000000,1,0x807fffff,0x00800000,0x00800001,0x3f000000,0x3f800000,0xbf800000,0x7effffff,0x7f000000,0x7f7fffff,0x7f800000,0x7f800001,0x7fffffff,0xff800000,0xffffffff};
++ for(int mode=0;mode<2;mode++){
++  fesetround(mode?FE_TOWARDZERO:FE_TONEAREST);
++  for(unsigned i=0;i<sizeof(edges)/4;i++)for(unsigned j=0;j<sizeof(edges)/4;j++)for(unsigned k=0;k<sizeof(edges)/4;k++)if(check(edges[i],edges[j],edges[k]))return 1;
++  for(unsigned i=0;i<3000000;i++){
++   uint32_t a=word(),b=word(),c=word();
++   if(i%3==0)a=(a&0x807fffffu)|0x7f800000u;
++   if(i%7==0)c=a^0x80000000u;
++   if(i%11==0)b=0x3f800000u;
++   if(check(a,b,c))return 1;
++  }
++ }
++ fesetround(FE_TONEAREST);
++ puts("PASS: extended repairs, 30 million random operations plus boundary triples, nearest/toward-zero");return 0;
++}
+
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -48,6 +48,8 @@
+ #include "rsx_debug_stats.h"
+ #include "rsx_notify.h"
+ #include "rsx_overlay_layout.h"
++#include "rsx_stall_trace.h"
++#include <stdarg.h>
+ #include "rsx_vertex_fetch.h"
+ #include "rsx_texture_layout.h"
+ #include "rsx_vp_decompiler.h"
+@@ -701,6 +703,112 @@
+     return 0;
+ }
+
++/* Bounded five-second attribution. All operation durations are inclusive;
++ * frame records use a shared SDL monotonic clock and explicit phase bits.
++ * Try-lock drops diagnostics instead of blocking a rendering thread. */
++static SDL_atomic_t s_stall_mode,s_stall_dropped;
++static SDL_SpinLock s_stall_lock;
++static rsx_stall_trace s_stall;
++static int vk_stall_enabled(void) {
++    int mode=SDL_AtomicGet(&s_stall_mode);
++    if(!mode) {
++        const char* e=getenv("FP_STALL_TRACE");mode=e && !strcmp(e,"1")?2:1;
++        SDL_AtomicCAS(&s_stall_mode,0,mode);mode=SDL_AtomicGet(&s_stall_mode);
++    }
++    return mode==2;
++}
++static uint64_t vk_stall_start(void) {return vk_stall_enabled()?SDL_GetPerformanceCounter():0;}
++static void vk_stall_end(unsigned kind,uint64_t start,uint64_t bytes) {
++    if(!start)return;
++    const uint64_t end=SDL_GetPerformanceCounter();
++    if(!SDL_AtomicTryLock(&s_stall_lock)){SDL_AtomicAdd(&s_stall_dropped,1);return;}
++    extern uint32_t cellGcm_flip_request_count(void);
++    rsx_stall_record(&s_stall,kind,start,end,(uint64_t)SDL_ThreadID(),
++        cellGcm_flip_request_count(),bytes,SDL_GetPerformanceFrequency()/125);
++    SDL_AtomicUnlock(&s_stall_lock);
++}
++static void vk_stall_cache_result(int hit) {
++    if(!vk_stall_enabled())return;
++    if(!SDL_AtomicTryLock(&s_stall_lock)){SDL_AtomicAdd(&s_stall_dropped,1);return;}
++    if(hit)s_stall.shader_hits++;else s_stall.shader_misses++;
++    SDL_AtomicUnlock(&s_stall_lock);
++}
++typedef struct vk_stall_log {char data[16384];size_t used;int truncated;} vk_stall_log;
++static void vk_stall_append(vk_stall_log*log,const char*format,...) {
++    if(log->truncated)return;
++    va_list args;va_start(args,format);
++    const size_t room=sizeof log->data-log->used;
++    const int n=vsnprintf(log->data+log->used,room,format,args);va_end(args);
++    if(n<0 || (size_t)n>=room){log->data[log->used]=0;log->truncated=1;return;}
++    log->used+=(size_t)n;
++}
++void rsx_vulkan_backend_stall_frame(uint32_t frame,uint32_t flip,uint32_t draws,
++    double ms,double fifo,double cpu,double present,double pace,double guest,
++    uint32_t phase,uint32_t resume) {
++    if(!vk_stall_enabled())return;
++    static uint64_t window;
++    static uint32_t old_phase=~0u,old_resume=~0u;
++    const uint64_t now=SDL_GetPerformanceCounter(),freq=SDL_GetPerformanceFrequency();
++    const double us=1000000.0*(double)now/(double)freq;
++    if(!SDL_AtomicTryLock(&s_stall_lock)){SDL_AtomicAdd(&s_stall_dropped,1);return;}
++    if(!window)window=s_stall.begin?s_stall.begin:now;
++    if(old_resume!=~0u && old_resume!=resume){memset(&s_stall,0,sizeof s_stall);window=now;}
++    if(phase!=old_phase || resume!=old_resume) {
++        s_stall.phases[s_stall.phase_count++%8]=(rsx_stall_phase){now,frame,flip,phase,resume};
++        old_phase=phase;old_resume=resume;
++    }
++    if(ms>=0)rsx_stall_frame_add(&s_stall,(rsx_stall_frame){now,frame,flip,draws,phase,resume,ms,fifo,cpu,present,pace,guest});
++    if(now-window<freq*5){SDL_AtomicUnlock(&s_stall_lock);return;}
++    rsx_stall_trace snapshot=s_stall;memset(&s_stall,0,sizeof s_stall);
++    SDL_AtomicUnlock(&s_stall_lock);
++    vk_stall_log log={0};
++    static const char* names[]={"buffer_grow","shader_read","shader_write","translate",
++        "pipeline_create","cache_save","staging_alloc","upload_copy","upload_submit","bc_decode",
++        "set_fence","swap_acquire","queue_present","cache_serialize","cache_write","shader_module","driver_cache_read","driver_cache_create","texture_total","texture_create"};
++    _Static_assert(sizeof names/sizeof names[0]==RSX_STALL_KINDS,"stall kind names");
++    vk_stall_append(&log,"[stall-window] ts_us=%.0f frame=%u flip=%u window_ms=%.2f frames=%llu frame_avg=%.2f frame_max=%.2f draws_mean=%.1f draws_max=%u shader_hits=%llu shader_misses=%llu events=%llu overwritten=%llu dropped=%d over50=%llu over100=%llu over250=%llu inclusive_ops=1 gpu_timing=0\n",
++        us,frame,flip,1000.0*(double)(now-window)/freq,(unsigned long long)snapshot.frames,
++        snapshot.frames?snapshot.total_ms/snapshot.frames:0,snapshot.max_ms,
++        snapshot.frames?(double)snapshot.draws/snapshot.frames:0,snapshot.max_draws,
++        (unsigned long long)snapshot.shader_hits,(unsigned long long)snapshot.shader_misses,
++        (unsigned long long)snapshot.event_count,(unsigned long long)(snapshot.event_count>RSX_STALL_EVENTS?snapshot.event_count-RSX_STALL_EVENTS:0),
++        SDL_AtomicSet(&s_stall_dropped,0),(unsigned long long)snapshot.over50,(unsigned long long)snapshot.over100,(unsigned long long)snapshot.over250);
++    const uint64_t first_phase=snapshot.phase_count>8?snapshot.phase_count-8:0;
++    for(uint64_t i=first_phase;i<snapshot.phase_count;i++) {
++        const rsx_stall_phase*p=&snapshot.phases[i%8];
++        vk_stall_append(&log,"[stall-phase] ts_us=%.0f frame=%u flip=%u bits=%u resume=%u phase_changes=%llu (host_menu=1 ai=2 player=4; zero=unknown)\n",
++            1000000.0*(double)p->tick/freq,p->frame,p->flip,p->bits,p->resume,(unsigned long long)snapshot.phase_count);
++    }
++    for(unsigned i=0;i<RSX_STALL_FRAMES;i++) {
++        const rsx_stall_frame*f=&snapshot.worst[i];if(!f->tick)continue;
++        vk_stall_append(&log,"[stall-frame] ts_us=%.0f frame=%u flip=%u bits=%u resume=%u ms=%.2f draws=%u fifo_work=%.2f fifo_cpu=%.2f present=%.2f pacing=%.2f guest_release_to_queue=%.2f\n",
++            1000000.0*(double)f->tick/freq,f->frame,f->flip,f->phase,f->resume,f->ms,f->draws,f->fifo,f->cpu,f->present,f->pace,f->guest);
++    }
++    /* Summarize every category, rather than printing each operation. */
++    for(unsigned i=0;i<RSX_STALL_KINDS;i++) {
++        const rsx_stall_op*o=&snapshot.ops[i];if(!o->calls)continue;
++        vk_stall_append(&log,"[stall-op] ts_us=%.0f kind=%s calls=%llu total_ms=%.3f max_ms=%.3f bytes=%llu inclusive=1\n",
++            us,names[i],(unsigned long long)o->calls,1000.0*(double)o->ticks/freq,1000.0*(double)o->maximum/freq,(unsigned long long)o->bytes);
++    }
++    /* At most eight slow operations per window, longest first. */
++    for(unsigned n=0;n<8;n++) {
++        unsigned best=0;uint64_t longest=0;
++        for(unsigned i=0;i<RSX_STALL_EVENTS;i++) {
++            rsx_stall_event*e=&snapshot.events[i];
++            if(e->end-e->start>longest){longest=e->end-e->start;best=i;}
++        }
++        if(!longest)break;
++        rsx_stall_event*e=&snapshot.events[best];
++        vk_stall_append(&log,"[stall-event] begin_us=%.0f end_us=%.0f flip=%u thread=%llu kind=%s ms=%.3f inclusive=1\n",
++            1000000.0*(double)e->start/freq,1000000.0*(double)e->end/freq,e->flip,
++            (unsigned long long)e->thread,names[e->kind],1000.0*(double)longest/freq);
++        e->start=e->end;
++    }
++    fwrite(log.data,1,log.used,stderr);
++    fprintf(stderr,"[stall-overhead] ts_us=%.0f flush_ms=%.3f truncated=%d\n",us,1000.0*(double)(SDL_GetPerformanceCounter()-now)/freq,log.truncated);
++    window=now;
++}
++
+ static VkPipelineCache s_pipe_cache;
+ static unsigned s_pipe_cache_new;
+ /* The driver's pipeline cache is kept in FP_SHADER_CACHE_DIR (one file per GPU name; the driver ignores
+@@ -717,33 +825,47 @@
+ {
+     const char* dir = getenv("FP_SHADER_CACHE_DIR");
+     if (!dir || !*dir || s_pipe_cache) return;
++    const uint64_t read_start=vk_stall_start();
+     char path[600]; vk_pipe_cache_path(path, sizeof path);
+     void* data = NULL; size_t size = 0;
+     FILE* f = fopen(path, "rb");
+     if (f) { fseek(f, 0, SEEK_END); long n = ftell(f); fseek(f, 0, SEEK_SET);
+              if (n > 0 && (data = malloc((size_t)n)) && fread(data, 1, (size_t)n, f) == (size_t)n) size = (size_t)n; else { free(data); data = NULL; }
+              fclose(f); }
++    vk_stall_end(ST_CACHE_READ,read_start,size);
+     VkPipelineCacheCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO, .initialDataSize = size, .pInitialData = data };
++    const uint64_t create_start=vk_stall_start();
+     if (pvkCreatePipelineCache(s_vk.device, &ci, NULL, &s_pipe_cache) != VK_SUCCESS) s_pipe_cache = VK_NULL_HANDLE;
++    vk_stall_end(ST_CACHE_INIT,create_start,size);
+     VK_LOG("pipeline cache %s (%zu bytes loaded)\n", s_pipe_cache ? "on" : "unavailable", size);
+     free(data);
+ }
+ static int s_disk_cache_off;
+-static void vk_pipe_cache_save(void)
++static void vk_pipe_cache_save_impl(void)
+ {
+     if (!s_pipe_cache || s_disk_cache_off) return;
++    const uint64_t serialize_start=vk_stall_start();
+     size_t size = 0;
+     if (pvkGetPipelineCacheData(s_vk.device, s_pipe_cache, &size, NULL) != VK_SUCCESS || !size) return;
+     void* data = malloc(size);
+     if (!data) return;
+-    if (pvkGetPipelineCacheData(s_vk.device, s_pipe_cache, &size, data) == VK_SUCCESS) {
++    const VkResult cache_result=pvkGetPipelineCacheData(s_vk.device,s_pipe_cache,&size,data);
++    vk_stall_end(ST_CACHE_SERIALIZE,serialize_start,size);
++    if (cache_result == VK_SUCCESS) {
++        const uint64_t write_start=vk_stall_start();
+         char path[600], tmp[640]; vk_pipe_cache_path(path, sizeof path);
+         snprintf(tmp, sizeof tmp, "%s.tmp%d", path, (int)getpid());
+         FILE* f = fopen(tmp, "wb");
+         if (f) { const int ok = fwrite(data, 1, size, f) == size; fclose(f); if (ok) rename(tmp, path); else remove(tmp); }
++        vk_stall_end(ST_CACHE_WRITE,write_start,size);
+     }
+     free(data);
+     s_pipe_cache_new = 0;
++}
++
++static void vk_pipe_cache_save(void) {
++    if(!s_pipe_cache || s_disk_cache_off)return;
++    const uint64_t start=vk_stall_start();vk_pipe_cache_save_impl();vk_stall_end(ST_CACHE_SAVE,start,0);
+ }
+
+ /* FP_HITCH_MS=n: log engine operations that take longer than n ms (shader translation, pipeline
+@@ -756,6 +878,12 @@
+ void rsx_vulkan_backend_set_hitch_ms(double ms) { s_hitch_ms = ms > 0 ? ms : -1.0; }
+ static double vk_ms_since(uint64_t start);
+ static void vk_hitch(const char* what, uint64_t start) {
++    unsigned kind=RSX_STALL_KINDS;
++    if(!strcmp(what,"buffer_grow"))kind=ST_BUFFER;
++    else if(!strcmp(what,"hlsl_to_spirv"))kind=ST_TRANSLATE;
++    else if(!strcmp(what,"vkCreateGraphicsPipelines"))kind=ST_PIPELINE;
++    else if(!strcmp(what,"texture_upload"))kind=ST_TEXTURE_TOTAL;
++    vk_stall_end(kind,vk_stall_enabled()?start:0,0);
+     const double t = vk_hitch_threshold();
+     if (t < 0) return;
+     const double ms = vk_ms_since(start);
+@@ -773,6 +901,7 @@
+     VK_CHECK(pvkWaitForFences(s_vk.device, 1, &s_set_fence[set], VK_TRUE, UINT64_MAX), "vkWaitForFences");
+     s_set_inflight[set] = 0;
+     const double ms = vk_ms_since(start);
++    vk_stall_end(ST_SET_WAIT,vk_stall_enabled()?start:0,0);
+     vk_trace_submit(reason, 0, ms);
+     s_debug_stats.submit_wait_ms += ms;
+     return 0;
+@@ -2378,8 +2507,10 @@
+     /* Two acquire semaphores on alternate presents: by the second present after this one, the set this present's
+      * submit used has been waited on again, so its wait on the semaphore is complete before it is signalled anew. */
+     const VkSemaphore acquire_sem = (s_win_presents & 1u) && s_vk.sem_acquire2 ? s_vk.sem_acquire2 : s_vk.sem_acquire;
++    const uint64_t acquire_start=vk_stall_start();
+     VkResult r = pvkAcquireNextImageKHR(s_vk.device, s_vk.swapchain, UINT64_MAX,
+                                         acquire_sem, VK_NULL_HANDLE, &idx);
++    vk_stall_end(ST_ACQUIRE,acquire_start,0);
+     if (r == VK_ERROR_OUT_OF_DATE_KHR) { ++s_win_ood; vk_swapchain_lost(); return; }
+     if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) {
+         s_win_acq_last = (int)r;
+@@ -2534,7 +2665,9 @@
+         .waitSemaphoreCount = 1, .pWaitSemaphores = &s_vk.sc_done[idx],
+         .swapchainCount = 1, .pSwapchains = &s_vk.swapchain, .pImageIndices = &idx,
+     };
++    const uint64_t queue_present_start=vk_stall_start();
+     r = pvkQueuePresentKHR(s_vk.queue, &pi);
++    vk_stall_end(ST_PRESENT,queue_present_start,0);
+     ++s_win_presents;
+     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) { ++s_win_ood; vk_swapchain_lost(); }
+     else if (r != VK_SUCCESS) {
+@@ -2784,11 +2917,16 @@
+                                 const void* src, u32 row_bytes)
+ {
+     if (tight > row_bytes) tight = row_bytes;
++    const uint64_t alloc_start=vk_stall_start();
+     vk_buffer st = {0};
+     if (vk_create_host_buffer(&st, (VkDeviceSize)tight * rows, VK_BUFFER_USAGE_TRANSFER_SRC_BIT) ||
+         !st.coherent) { vk_destroy_buffer(&st); return -1; }
++    vk_stall_end(ST_STAGING,alloc_start,(uint64_t)tight*rows);
++    const uint64_t copy_start=vk_stall_start();
+     for (u32 y = 0; y < rows; y++)
+         memcpy((u8*)st.ptr + (size_t)y * tight, (const u8*)src + (size_t)y * row_bytes, tight);
++    vk_stall_end(ST_COPY,copy_start,(uint64_t)tight*rows);
++    const uint64_t submit_start=vk_stall_start();
+     int rc = (s_begin_reason="vk_eng_upload_region", vk_begin());
+     if (!rc) {
+         vk_barrier_image(img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
+@@ -2801,6 +2939,7 @@
+         rc = (s_submit_reason="vk_eng_upload_region", vk_submit_and_wait());
+     }
+     vk_destroy_buffer(&st);
++    vk_stall_end(ST_UPLOAD,submit_start,(uint64_t)tight*rows);
+     return rc;
+ }
+
+@@ -3258,7 +3397,7 @@
+  * six-layer cube-compatible image, each face uploaded into its layer, sampled
+  * through a CUBE view; the pipelines that sample one use the split set layout
+  * (vk_eng_split_layout). */
+-static u32 vk_eng_texture_create(void* user, rsx_be_format fmt, u32 w, u32 h,
++static u32 vk_eng_texture_create_impl(void* user, rsx_be_format fmt, u32 w, u32 h,
+                                  u32 mips, u32 faces, u32 remap, u32 rsx_fmt)
+ {
+     (void)user;
+@@ -3307,6 +3446,12 @@
+     return 0;
+ }
+
++static u32 vk_eng_texture_create(void* user,rsx_be_format fmt,u32 w,u32 h,u32 mips,u32 faces,u32 remap,u32 rsx_fmt) {
++    const uint64_t start=vk_stall_start();
++    const u32 result=vk_eng_texture_create_impl(user,fmt,w,h,mips,faces,remap,rsx_fmt);
++    vk_stall_end(ST_TEXTURE_CREATE,start,0);return result;
++}
++
+ static void vk_eng_texture_upload_impl(void* user, u32 texture, u32 face, u32 mip, u32 w, u32 h,
+                                        const void* src, u32 row_bytes, u32 rows)
+ {
+@@ -3320,10 +3465,12 @@
+         const size_t pitch = (size_t)pw * 4u;
+         u8* rgba = (u8*)malloc(pitch * bh * 4u);
+         if (!rgba) return;
++        const uint64_t decode_start=vk_stall_start();
+         for (u32 by = 0; by < bh; by++)
+             for (u32 bx = 0; bx < bw; bx++)
+                 vk_bc_decode_block(o->decode, (const u8*)src + (size_t)by * row_bytes + (size_t)bx * o->block,
+                                    rgba + (size_t)by * 4u * pitch + (size_t)bx * 16u, pitch);
++        vk_stall_end(ST_DECODE,decode_start,pitch*bh*4u);
+         u32 out_rows = bh * 4u < h ? bh * 4u : h;
+         vk_eng_upload_rows(o->im.img, face, mip, w, out_rows, (size_t)w * 4u, out_rows, rgba, (u32)pitch);
+         free(rgba);
+@@ -3666,7 +3813,7 @@
+     for (const unsigned char* c = (const unsigned char*)hlsl; *c; c++, n++) { h ^= *c; h *= 1099511628211ull; }
+     snprintf(out, cap, "%s/%016llx-%zx-%d.spv", vk_shader_cache_dir(), (unsigned long long)h, n, stage);
+ }
+-static int vk_shader_cache_load(const char* hlsl, int stage, u32* words)
++static int vk_shader_cache_load_impl(const char* hlsl, int stage, u32* words)
+ {
+     if (!vk_shader_cache_dir()) return 0;
+     char path[600];
+@@ -3679,7 +3826,12 @@
+     *words = (u32)got;
+     return 1;
+ }
+-static void vk_shader_cache_store(const char* hlsl, int stage, u32 words)
++static int vk_shader_cache_load(const char* hlsl,int stage,u32* words) {
++    const uint64_t start=vk_stall_start();
++    const int hit=vk_shader_cache_load_impl(hlsl,stage,words);
++    vk_stall_end(ST_SHADER_READ,start,hit?(uint64_t)*words*4:0);vk_stall_cache_result(hit);return hit;
++}
++static void vk_shader_cache_store_impl(const char* hlsl, int stage, u32 words)
+ {
+     if (!vk_shader_cache_dir()) return;
+     char path[600], tmp[640];
+@@ -3692,6 +3844,10 @@
+     if (ok) rename(tmp, path); else remove(tmp);
+ }
+
++static void vk_shader_cache_store(const char* hlsl,int stage,u32 words) {
++    const uint64_t start=vk_stall_start();vk_shader_cache_store_impl(hlsl,stage,words);
++    vk_stall_end(ST_SHADER_WRITE,start,(uint64_t)words*4);
++}
+ static int vk_eng_translate(const char* hlsl, int stage, VkShaderModule* out)
+ {
+     u32 words = 0;
+@@ -3708,7 +3864,10 @@
+     }
+     VkShaderModuleCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO,
+                                     .codeSize = (size_t)words * 4u, .pCode = s_g.spv };
+-    return pvkCreateShaderModule(s_vk.device, &ci, NULL, out) == VK_SUCCESS ? 0 : -1;
++    const uint64_t module_start=vk_stall_start();
++    const VkResult result=pvkCreateShaderModule(s_vk.device,&ci,NULL,out);
++    vk_stall_end(ST_MODULE,module_start,(uint64_t)words*4);
++    return result==VK_SUCCESS?0:-1;
+ }
+
+ /* A pixel program with a cube unit declares all sixteen units one by one
+--- a/libs/video/rsx_vulkan_backend.h
++++ b/libs/video/rsx_vulkan_backend.h
+@@ -68,6 +68,14 @@
+ /* Unregister and destroy every Vulkan object, then unload the library. */
+ void rsx_vulkan_backend_shutdown(void);
+
++/* Opt-in bounded diagnostics; phase bits: menu=1, AI=2, player available=4.
++ * All times in milliseconds. fifo/cpu exclude nested host presentation;
++ * other categories can overlap. cpu=-1 means unavailable; frame_ms<0 skips
++ * an initial/resume sample. This never reads GPU timestamps or adds waits. */
++void rsx_vulkan_backend_stall_frame(uint32_t frame,uint32_t flip,uint32_t draws,
++    double frame_ms,double fifo,double cpu,double present,double pacing,double guest,
++    uint32_t phase,uint32_t resume);
++
+ /* Headless: always 0. Windowed: drains SDL's event queue; -1 once the
+  * window has been closed or Esc pressed. */
+ int  rsx_vulkan_backend_pump_messages(void);
+--- /dev/null
++++ b/libs/video/rsx_stall_trace.h
+@@ -0,0 +1,50 @@
++#ifndef RSX_STALL_TRACE_H
++#define RSX_STALL_TRACE_H
++#include <stdint.h>
++#include <string.h>
++/* Caller serializes access. No allocation, I/O, clock queries or GPU waits. */
++enum { RSX_STALL_KINDS=20, RSX_STALL_EVENTS=32, RSX_STALL_FRAMES=4 };
++enum rsx_stall_kind { ST_BUFFER, ST_SHADER_READ, ST_SHADER_WRITE, ST_TRANSLATE,
++    ST_PIPELINE, ST_CACHE_SAVE, ST_STAGING, ST_COPY, ST_UPLOAD, ST_DECODE,
++    ST_SET_WAIT, ST_ACQUIRE, ST_PRESENT, ST_CACHE_SERIALIZE, ST_CACHE_WRITE, ST_MODULE, ST_CACHE_READ, ST_CACHE_INIT, ST_TEXTURE_TOTAL, ST_TEXTURE_CREATE };
++typedef struct rsx_stall_op { uint64_t calls,ticks,maximum,bytes; } rsx_stall_op;
++typedef struct rsx_stall_event { uint64_t start,end,thread; uint32_t flip,kind; } rsx_stall_event;
++typedef struct rsx_stall_frame {
++    uint64_t tick; uint32_t frame,flip,draws,phase,resume;
++    double ms,fifo,cpu,present,pace,guest;
++} rsx_stall_frame;
++typedef struct rsx_stall_phase {uint64_t tick;uint32_t frame,flip,bits,resume;} rsx_stall_phase;
++typedef struct rsx_stall_trace {
++    rsx_stall_op ops[RSX_STALL_KINDS];
++    rsx_stall_event events[RSX_STALL_EVENTS];
++    rsx_stall_frame worst[RSX_STALL_FRAMES];
++    rsx_stall_phase phases[8];uint64_t phase_count;
++    uint64_t event_count,frames,shader_hits,shader_misses,over50,over100,over250;
++    uint64_t begin;
++    double total_ms,max_ms; uint64_t draws; uint32_t max_draws;
++} rsx_stall_trace;
++static inline void rsx_stall_record(rsx_stall_trace*t,unsigned kind,uint64_t start,
++    uint64_t end,uint64_t thread,uint32_t flip,uint64_t bytes,uint64_t threshold) {
++    if(kind>=RSX_STALL_KINDS || end<start) return;
++    if(!t->begin || start<t->begin)t->begin=start;
++    const uint64_t elapsed=end-start;
++    rsx_stall_op*o=&t->ops[kind];o->calls++;o->ticks+=elapsed;o->bytes+=bytes;
++    if(elapsed>o->maximum)o->maximum=elapsed;
++    if(elapsed>=threshold) {
++        rsx_stall_event*e=&t->events[t->event_count++%RSX_STALL_EVENTS];
++        *e=(rsx_stall_event){start,end,thread,flip,kind};
++    }
++}
++static inline void rsx_stall_frame_add(rsx_stall_trace*t,rsx_stall_frame f) {
++    if(f.ms<0)return;
++    if(!t->begin)t->begin=f.tick;
++    t->frames++;t->total_ms+=f.ms;t->draws+=f.draws;
++    t->over50+=f.ms>50.;t->over100+=f.ms>100.;t->over250+=f.ms>250.;
++    if(f.ms>t->max_ms)t->max_ms=f.ms;
++    if(f.draws>t->max_draws)t->max_draws=f.draws;
++    if(f.ms<40.)return;
++    unsigned smallest=0;
++    for(unsigned i=1;i<RSX_STALL_FRAMES;i++)if(t->worst[i].ms<t->worst[smallest].ms)smallest=i;
++    if(f.ms>t->worst[smallest].ms)t->worst[smallest]=f;
++}
++#endif
+--- a/libs/audio/cellAudio.c
++++ b/libs/audio/cellAudio.c
+@@ -14,6 +14,7 @@
+ 
+ #include "../../runtime/memory/vm.h"   /* vm_commit */
+ #include "cellAudio.h"
++#include "audio_queue_budget.h"
+ #include "../../runtime/ppu/ppu_memory.h"   /* vm_base, vm_read64, vm_write32 */
+ #include <stdio.h>
+ #include <string.h>
+@@ -23,6 +24,7 @@
+ #include <time.h>
+ #if defined(__APPLE__)
+ #include <mach/mach_time.h>
++#include <TargetConditionals.h>
+ #endif
+ 
+ /* Event-queue push/lookup (runtime/syscalls/sys_event.c). Forward-declared
+@@ -212,6 +214,41 @@
+ 
+ static SDL_AudioDeviceID s_sdl_audio_dev = 0;
+ static unsigned s_sdl_have_samples = 0;
++static SDL_atomic_t s_sdl_probe_device,s_sdl_probe_seen;
++static unsigned long long s_sdl_underfill_frames;
++/* Called under SDL's mixer lock: never acquire an app lock or log here. */
++void fp_audio_sdl_underfill(unsigned device,unsigned bytes) {
++    if(device!=(unsigned)SDL_AtomicGet(&s_sdl_probe_device))return;
++    SDL_AtomicSet(&s_sdl_probe_seen,1);
++    if(bytes)__atomic_fetch_add(&s_sdl_underfill_frames,bytes/(2*sizeof(float)),__ATOMIC_RELAXED);
++}
++
++#ifdef _WIN32
++static unsigned s_sdl_queue_cap=CELL_AUDIO_BLOCK_SAMPLES*6;
++#else
++static unsigned s_sdl_queue_cap=CELL_AUDIO_BLOCK_SAMPLES*4;
++#endif
++#if defined(__APPLE__) && TARGET_OS_IOS
++extern int fp_ios_audio_output_info(unsigned*,unsigned*) __attribute__((weak_import));
++#endif
++static void audio_backend_update_budget(const SDL_AudioSpec*have) {
++    SDL_AtomicSet(&s_sdl_probe_device,(int)s_sdl_audio_dev);SDL_AtomicSet(&s_sdl_probe_seen,0);
++    unsigned rate=have->freq,frames=have->samples;int physical=0;
++#if defined(__APPLE__) && TARGET_OS_IOS
++    if(fp_ios_audio_output_info)physical=fp_ios_audio_output_info(&rate,&frames);
++#endif
++#ifdef _WIN32
++    const unsigned minimum_blocks=6;
++#else
++    const unsigned minimum_blocks=4;
++#endif
++    s_sdl_queue_cap=fp_audio_queue_budget(CELL_AUDIO_SAMPLE_RATE,rate,frames,have->samples,
++                                         CELL_AUDIO_BLOCK_SAMPLES,minimum_blocks);
++    fprintf(stderr,"[audio-queue] source_hz=%u device_hz=%u io_frames=%u callback_frames=%u cap_frames=%u cap_ms=%.3f physical_known=%d\n",
++        CELL_AUDIO_SAMPLE_RATE,rate,frames,(unsigned)have->samples,s_sdl_queue_cap,
++        s_sdl_queue_cap*1000.0/CELL_AUDIO_SAMPLE_RATE,physical);
++}
++
+ #ifndef _WIN32
+ /* Pull model: the device callback mixes the block it is about to play, so the device clock paces the mixer
+  * and nothing sits in a queue. FP_AUDIO_PUSH=1 goes back to the paced mixer thread plus SDL_QueueAudio. */
+@@ -296,6 +333,7 @@
+         return -1;
+     }
+     s_sdl_have_samples = have.samples;
++    audio_backend_update_budget(&have);
+ #ifndef _WIN32
+     s_want = want; s_buf_blocks = s_buf_blocks_wanted = buf_blocks;
+     { const char* drv = SDL_GetCurrentAudioDriver(); const char* ad = getenv("FP_AUDIO_ADAPT");
+@@ -345,7 +383,7 @@
+ {
+     if (!s_sdl_audio_dev) return -1;
+     return SDL_GetQueuedAudioSize(s_sdl_audio_dev) / (2 * sizeof(float)) <
+-           CELL_AUDIO_BLOCK_SAMPLES * 6 ? CELL_AUDIO_BLOCK_SAMPLES : 0;
++           s_sdl_queue_cap ? CELL_AUDIO_BLOCK_SAMPLES : 0;
+ }
+ 
+ static void audio_backend_wait(void) { SDL_Delay(1); }
+@@ -965,6 +1003,7 @@
+             continue;
+         }
+         s_sdl_audio_dev = dev; s_sdl_have_samples = have.samples;
++        audio_backend_update_budget(&have);
+         SDL_PauseAudioDevice(dev, 0);
+         fprintf(stderr, "[audio-adapt] callbacks arrived late, device buffer now %d block(s) = %.1f ms\n", s_buf_blocks,
+                 have.samples * 1000.0 / CELL_AUDIO_SAMPLE_RATE);
+@@ -1226,6 +1265,7 @@
+     if(!dev) return 0;
+     if(__atomic_load_n(&s_audio_interrupted,__ATOMIC_ACQUIRE)) {SDL_CloseAudioDevice(dev);return 0;}
+     s_sdl_audio_dev=dev;s_sdl_have_samples=have.samples;s_want=want;
++    audio_backend_update_budget(&have);
+     memset(s_limiter_pending,0,sizeof s_limiter_pending);s_limiter_peak=0;s_limiter_gain=1;
+     SDL_PauseAudioDevice(dev,0);
+     fprintf(stderr,"[audio-recover] push output reopened %d Hz, %u frames; stale output cleared\n",have.freq,(unsigned)have.samples);
+@@ -1303,7 +1343,7 @@
+             if (late > wake_late_max) wake_late_max = late;
+             continue;
+         }
+-        if (audio_backend_queued_samples() > CELL_AUDIO_BLOCK_SAMPLES * 3) {
++        if (audio_backend_queued_samples() > s_sdl_queue_cap-CELL_AUDIO_BLOCK_SAMPLES) {
+             /* A device may consume several blocks in one callback. Wait for
+              * space without repeatedly shifting all future mixer deadlines. */
+             queue_waits++;
+@@ -1350,10 +1390,11 @@
+                         n ? qsum * 1000.0 / CELL_AUDIO_SAMPLE_RATE / n : 0.0, qmax * 1000.0 / CELL_AUDIO_SAMPLE_RATE,
+                         AUDIO_DEV_BUF_MS, wake_count ? wake_late_sum / (double)wake_count / 1000000.0 : 0.0,
+                         wake_late_max / 1000000.0, queue_waits);
+-                fprintf(stderr, "[audio-quality] lookahead_ms=5.333 mix_us_avg=%.2f mix_us_max=%.2f limited_blocks=%llu clipped_samples=%llu nan_samples=%llu\n",
++                fprintf(stderr, "[audio-quality] lookahead_ms=5.333 mix_us_avg=%.2f mix_us_max=%.2f limited_blocks=%llu clipped_samples=%llu nan_samples=%llu sdl_underfill_frames=%llu sdl_probe=%d\n",
+                         mix_count ? mix_ns_sum / (double)mix_count / 1000.0 : 0.0, mix_ns_max / 1000.0,
+                         g_audio_limited_blocks - limited_before, g_audio_clipped_samples - clipped_before,
+-                        g_audio_nan_samples - nan_before);
++                        g_audio_nan_samples - nan_before,
++                    __atomic_load_n(&s_sdl_underfill_frames,__ATOMIC_RELAXED),SDL_AtomicGet(&s_sdl_probe_seen));
+                 clipped_before = g_audio_clipped_samples; limited_before = g_audio_limited_blocks;
+                 nan_before = g_audio_nan_samples; mix_count = mix_ns_sum = mix_ns_max = 0;
+                 wake_count = queue_waits = 0; wake_late_sum = wake_late_max = 0;
+--- a/libs/audio/audio_queue_budget.h
++++ b/libs/audio/audio_queue_budget.h
+@@ -0,0 +1,22 @@
++#ifndef FP_AUDIO_QUEUE_BUDGET_H
++#define FP_AUDIO_QUEUE_BUDGET_H
++#include <stdint.h>
++/* SDL CoreAudio drains whole source callbacks while filling an I/O burst.
++ * Reserve complete callbacks, rather than rounding a resampling ratio down.
++ * The device/application callback sample counts match in SDL2 CoreAudio. */
++static inline unsigned fp_audio_queue_budget(unsigned source_hz,unsigned device_hz,
++    unsigned io_frames,unsigned callback_frames,unsigned block,unsigned minimum_blocks) {
++    if(!block || block>4096 || !minimum_blocks || minimum_blocks>64)return 0;
++    const unsigned minimum=block*minimum_blocks,maximum=block*64;
++    if(!source_hz || device_hz<8000 || device_hz>192000 || !io_frames ||
++       io_frames>device_hz/4 || !callback_frames || callback_frames>maximum)return minimum;
++    const uint64_t burst=io_frames>callback_frames?io_frames:callback_frames;
++    const uint64_t denominator=(uint64_t)device_hz*callback_frames;
++    const uint64_t chunks=(burst*source_hz+denominator-1)/denominator;
++    uint64_t frames=chunks*callback_frames;
++    frames=((frames+block-1)/block)*block;
++    if(frames<minimum)frames=minimum;
++    if(frames>maximum)frames=maximum;
++    return (unsigned)frames;
++}
++#endif
+--- a/runtime/syscalls/sys_ppu_thread.c
++++ b/runtime/syscalls/sys_ppu_thread.c
+@@ -40,6 +40,13 @@
+                         * returns 0 on those threads). */
+ #endif
+ 
++#if defined(__APPLE__)
++#include <TargetConditionals.h>
++#if TARGET_OS_IOS
++extern void fp_ios_stall_register_thread(unsigned,const char*) __attribute__((weak_import));
++#endif
++#endif
++
+ /* ---------------------------------------------------------------------------
+  * Globals
+  * -----------------------------------------------------------------------*/
+@@ -106,6 +113,10 @@
+ #endif
+ {
+     ppu_thread_info* info = (ppu_thread_info*)param;
++#if defined(__APPLE__) && TARGET_OS_IOS
++    if(fp_ios_stall_register_thread)fp_ios_stall_register_thread((unsigned)info->ctx.thread_id,info->name);
++#endif
++
+ 
+ #ifdef _WIN32
+     /* Reserve stack for the STACK_OVERFLOW handler, same as main() does for the
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -727,6 +727,10 @@
+         cellGcm_flip_request_count(),bytes,SDL_GetPerformanceFrequency()/125);
+     SDL_AtomicUnlock(&s_stall_lock);
+ }
++void rsx_vulkan_backend_stall_host_op(unsigned kind,uint64_t start) {
++    static const unsigned kinds[5]={ST_HOST_PUMP,ST_HOST_POLL,ST_HOST_TICK,ST_HOST_PENDING,ST_HOST_INTERP};
++    if(kind<5)vk_stall_end(kinds[kind],start,0);
++}
+ static void vk_stall_cache_result(int hit) {
+     if(!vk_stall_enabled())return;
+     if(!SDL_AtomicTryLock(&s_stall_lock)){SDL_AtomicAdd(&s_stall_dropped,1);return;}
+@@ -764,7 +768,7 @@
+     vk_stall_log log={0};
+     static const char* names[]={"buffer_grow","shader_read","shader_write","translate",
+         "pipeline_create","cache_save","staging_alloc","upload_copy","upload_submit","bc_decode",
+-        "set_fence","swap_acquire","queue_present","cache_serialize","cache_write","shader_module","driver_cache_read","driver_cache_create","texture_total","texture_create"};
++        "set_fence","swap_acquire","queue_present","cache_serialize","cache_write","shader_module","driver_cache_read","driver_cache_create","texture_total","texture_create","host_event_pump","host_poll_wait","host_vblank","host_pending_present","host_interp_service"};
+     _Static_assert(sizeof names/sizeof names[0]==RSX_STALL_KINDS,"stall kind names");
+     vk_stall_append(&log,"[stall-window] ts_us=%.0f frame=%u flip=%u window_ms=%.2f frames=%llu frame_avg=%.2f frame_max=%.2f draws_mean=%.1f draws_max=%u shader_hits=%llu shader_misses=%llu events=%llu overwritten=%llu dropped=%d over50=%llu over100=%llu over250=%llu inclusive_ops=1 gpu_timing=0\n",
+         us,frame,flip,1000.0*(double)(now-window)/freq,(unsigned long long)snapshot.frames,
+@@ -781,7 +785,7 @@
+     }
+     for(unsigned i=0;i<RSX_STALL_FRAMES;i++) {
+         const rsx_stall_frame*f=&snapshot.worst[i];if(!f->tick)continue;
+-        vk_stall_append(&log,"[stall-frame] ts_us=%.0f frame=%u flip=%u bits=%u resume=%u ms=%.2f draws=%u fifo_work=%.2f fifo_cpu=%.2f present=%.2f pacing=%.2f guest_release_to_queue=%.2f\n",
++        vk_stall_append(&log,"[stall-frame] ts_us=%.0f frame=%u flip=%u bits=%u resume=%u ms=%.2f draws=%u fifo_work=%.2f fifo_cpu=%.2f present=%.2f pacing=%.2f guest_latest_tick_to_queue=%.2f\n",
+             1000000.0*(double)f->tick/freq,f->frame,f->flip,f->phase,f->resume,f->ms,f->draws,f->fifo,f->cpu,f->present,f->pace,f->guest);
+     }
+     /* Summarize every category, rather than printing each operation. */
+--- a/libs/video/rsx_vulkan_backend.h
++++ b/libs/video/rsx_vulkan_backend.h
+@@ -76,6 +76,9 @@
+     double frame_ms,double fifo,double cpu,double present,double pacing,double guest,
+     uint32_t phase,uint32_t resume);
+ 
++/* Host interval kinds: event pump=0, poll wait=1, vblank=2, pending present=3, interpolation=4. */
++void rsx_vulkan_backend_stall_host_op(unsigned kind,uint64_t start);
++
+ /* Headless: always 0. Windowed: drains SDL's event queue; -1 once the
+  * window has been closed or Esc pressed. */
+ int  rsx_vulkan_backend_pump_messages(void);
+--- a/libs/video/rsx_stall_trace.h
++++ b/libs/video/rsx_stall_trace.h
+@@ -3,10 +3,10 @@
+ #include <stdint.h>
+ #include <string.h>
+ /* Caller serializes access. No allocation, I/O, clock queries or GPU waits. */
+-enum { RSX_STALL_KINDS=20, RSX_STALL_EVENTS=32, RSX_STALL_FRAMES=4 };
++enum { RSX_STALL_KINDS=25, RSX_STALL_EVENTS=32, RSX_STALL_FRAMES=4 };
+ enum rsx_stall_kind { ST_BUFFER, ST_SHADER_READ, ST_SHADER_WRITE, ST_TRANSLATE,
+     ST_PIPELINE, ST_CACHE_SAVE, ST_STAGING, ST_COPY, ST_UPLOAD, ST_DECODE,
+-    ST_SET_WAIT, ST_ACQUIRE, ST_PRESENT, ST_CACHE_SERIALIZE, ST_CACHE_WRITE, ST_MODULE, ST_CACHE_READ, ST_CACHE_INIT, ST_TEXTURE_TOTAL, ST_TEXTURE_CREATE };
++    ST_SET_WAIT, ST_ACQUIRE, ST_PRESENT, ST_CACHE_SERIALIZE, ST_CACHE_WRITE, ST_MODULE, ST_CACHE_READ, ST_CACHE_INIT, ST_TEXTURE_TOTAL, ST_TEXTURE_CREATE, ST_HOST_PUMP, ST_HOST_POLL, ST_HOST_TICK, ST_HOST_PENDING, ST_HOST_INTERP };
+ typedef struct rsx_stall_op { uint64_t calls,ticks,maximum,bytes; } rsx_stall_op;
+ typedef struct rsx_stall_event { uint64_t start,end,thread; uint32_t flip,kind; } rsx_stall_event;
+ typedef struct rsx_stall_frame {
+--- a/runtime/spu/spu_channels.c
++++ b/runtime/spu/spu_channels.c
+@@ -20,7 +20,7 @@
+ #include <stdint.h>
+ #include <stdio.h>
+ #include <stdlib.h>
+-#include <setjmp.h>
++#include "spu_jump.h"
+ #if defined(__SSE__) || defined(_M_X64)
+ #include <xmmintrin.h>
+ #endif
+@@ -120,7 +120,7 @@
+ void spu_restart_dispatch(spu_context* ctx)
+ {
+     g_spu_trampoline_fn = 0;
+-    if (s_spu_halt_armed) longjmp(s_spu_halt_env, 2);
++    if (s_spu_halt_armed) SPU_JOB_LONGJMP(s_spu_halt_env, 2);
+     fprintf(stderr, "[spu] non-local return outside execution driver at 0x%05X\n", ctx->pc);
+     ctx->status = SPU_STATUS_STOPPED_BY_HALT;
+ }
+@@ -158,7 +158,7 @@
+                 ctx->gpr[80]._u32[0], ctx->gpr[85]._u32[0]);
+         fflush(stderr);
+       } }
+-    if (s_spu_halt_armed) { s_spu_halt_armed = 0; longjmp(s_spu_halt_env, 1); }
++    if (s_spu_halt_armed) { s_spu_halt_armed = 0; SPU_JOB_LONGJMP(s_spu_halt_env, 1); }
+ }
+ 
+ /* Diagnostic: dump the taskset-policy scheduler's working tables (LS 0x2700..)
+@@ -265,7 +265,7 @@
+         g_spu_rz = 1;
+     }
+ #endif
+-    switch (setjmp(s_spu_halt_env)) {
++    switch (SPU_JOB_SETJMP(s_spu_halt_env)) {
+     case 1:
+         halted = 1;
+         g_spu_trampoline_fn = 0;
+@@ -1612,7 +1612,7 @@
+         if (ctx->pc == s_stack_reset[i].entry &&
+             fn == spu_lookup(ctx->pc, s_stack_reset[i].image_id)) {
+             g_spu_trampoline_fn = 0;
+-            longjmp(s_spu_halt_env, 2);
++            SPU_JOB_LONGJMP(s_spu_halt_env, 2);
+         }
+ }
+ 
+@@ -2323,7 +2323,7 @@
+              * Resume at depth zero so SPU_RET follows the restored guest link. */
+             ctx->resident_task = ti;
+             g_spu_trampoline_fn = 0;
+-            longjmp(s_spu_halt_env, 2);
++            SPU_JOB_LONGJMP(s_spu_halt_env, 2);
+         }
+         if (!ti && !ctx->resident_task) ti = spu_taskset_task_image(ctx->pc);
+         if (ti) ctx->resident_task = ti;
+--- a/runtime/spu/spu_jump.h
++++ b/runtime/spu/spu_jump.h
+@@ -0,0 +1,15 @@
++#ifndef PS3RECOMP_SPU_JUMP_H
++#define PS3RECOMP_SPU_JUMP_H
++#include <setjmp.h>
++/* These landing pads transfer between synchronous SPU job frames, never out
++ * of a signal handler. Apple setjmp/longjmp save/restore the signal mask;
++ * that adds a kernel call on every job restart. Use the matching register-
++ * and-stack-only pair there. The buffer and nested-save ABI stay jmp_buf. */
++#if (defined(__APPLE__) && !defined(FP_SPU_SAVE_SIGNAL_MASK)) || defined(FP_SPU_NO_SIGNAL_MASK)
++#define SPU_JOB_SETJMP _setjmp
++#define SPU_JOB_LONGJMP _longjmp
++#else
++#define SPU_JOB_SETJMP setjmp
++#define SPU_JOB_LONGJMP longjmp
++#endif
++#endif
+--- a/runtime/ppu/ppu_loader.cpp
++++ b/runtime/ppu/ppu_loader.cpp
+@@ -3193,7 +3193,12 @@
+ /* In-flight lv2 syscall per guest thread; 0 = not in a syscall. See the guard
+  * in lv2_syscall() below. */
+ #define PS3_SC_INFLIGHT_MAX 64
+-extern "C" uint32_t g_sc_inflight[PS3_SC_INFLIGHT_MAX] = { 0 };
++/* Keep frequently written syscall slots off the cache line containing the
++ * VM limits/diagnostic flags read by every guest memory access. 128 bytes
++ * covers the Apple ARM64 cache line and the smaller desktop cache lines. */
++extern "C" {
++alignas(128) uint32_t g_sc_inflight[PS3_SC_INFLIGHT_MAX] = { 0 };
++}
+ 
+ extern "C" void lv2_syscall(ppu_context* ctx)
+ {
+--- a/runtime/spu/tests/test_spu_interpreter_handoff.c
++++ b/runtime/spu/tests/test_spu_interpreter_handoff.c
+@@ -9,6 +9,11 @@
+ #include <stdlib.h>
+ #include <string.h>
+ 
++#if defined(__APPLE__)
++/* The fixture has no device audio thread or QoS policy. Keep only this
++ * platform scheduling hint inert; real dispatch/jump/guest state still run. */
++void fp_audio_boost_this_thread(const char* what) { (void)what; }
++#endif
+ uint8_t* vm_base;
+ uint32_t ppu_vm_size;
+ extern void spu_begin_image(int);
+--- a/tools/test_spu_interpreter_handoff.py
++++ b/tools/test_spu_interpreter_handoff.py
+@@ -1,6 +1,7 @@
+ #!/usr/bin/env python3
+ """Exercise real SPU interpretation/drain boundaries without game binaries."""
+ import os
++import shlex
+ import subprocess
+ import tempfile
+ from pathlib import Path
+@@ -15,7 +16,8 @@
+            'spu_vm_pagemap.c', 'spurs_policy_blob_weak.c', 'spu_interp.c']
+ with tempfile.TemporaryDirectory(prefix='spu-interp-handoff-') as tmp:
+     binary = Path(tmp) / 'test'
+-    subprocess.run([os.environ.get('CC', 'cc'), '-std=gnu17', '-O1', '-UNDEBUG',
++    subprocess.run([os.environ.get('CC', 'cc'), '-std=gnu17', '-O1', '-UNDEBUG', '-D_GNU_SOURCE',
++                    *shlex.split(os.environ.get('CFLAGS', '')),
+                     '-I'+str(root/'include'), '-I'+str(spu),
+                     '-I'+str(root/'runtime/platform'),
+                     str(spu/'tests/test_spu_interpreter_handoff.c'),
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -587,10 +587,15 @@
+ 
+ static int vk_create_host_buffer(vk_buffer* b, VkDeviceSize size, VkBufferUsageFlags usage)
+ {
++    // Callers supply a fresh buffer; all partial ownership is local to this call.
++    memset(b,0,sizeof *b);
++    VkResult result;
++    const char* stage;
+     VkBufferCreateInfo bci = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+                                .size = size, .usage = usage,
+                                .sharingMode = VK_SHARING_MODE_EXCLUSIVE };
+-    VK_CHECK(pvkCreateBuffer(s_vk.device, &bci, NULL, &b->buf), "vkCreateBuffer");
++    stage="vkCreateBuffer"; result=pvkCreateBuffer(s_vk.device, &bci, NULL, &b->buf);
++    if(result!=VK_SUCCESS)goto failed;
+     VkMemoryRequirements req;
+     pvkGetBufferMemoryRequirements(s_vk.device, b->buf, &req);
+     u32 type;
+@@ -607,14 +612,26 @@
+     else if (readback && vk_find_memory_type(req.memoryTypeBits, cached, &type) == 0) b->coherent = 0;
+     else if (vk_find_memory_type(req.memoryTypeBits, coh, &type) == 0) b->coherent = 1;
+     else if (vk_find_memory_type(req.memoryTypeBits, vis, &type) == 0) b->coherent = 0;
+-    else { VK_LOG("no host-visible memory for a buffer\n"); return -1; }
++    else { stage="host-visible memory type";result=VK_ERROR_FEATURE_NOT_PRESENT;goto failed; }
+     VkMemoryAllocateInfo mai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+                                  .allocationSize = req.size, .memoryTypeIndex = type };
+-    VK_CHECK(pvkAllocateMemory(s_vk.device, &mai, NULL, &b->mem), "vkAllocateMemory(buffer)");
+-    VK_CHECK(pvkBindBufferMemory(s_vk.device, b->buf, b->mem, 0), "vkBindBufferMemory");
+-    VK_CHECK(pvkMapMemory(s_vk.device, b->mem, 0, VK_WHOLE_SIZE, 0, &b->ptr), "vkMapMemory");
++    stage="vkAllocateMemory(buffer)"; result=pvkAllocateMemory(s_vk.device, &mai, NULL, &b->mem);
++    if(result!=VK_SUCCESS)goto failed;
++    stage="vkBindBufferMemory"; result=pvkBindBufferMemory(s_vk.device, b->buf, b->mem, 0);
++    if(result!=VK_SUCCESS)goto failed;
++    stage="vkMapMemory"; result=pvkMapMemory(s_vk.device, b->mem, 0, VK_WHOLE_SIZE, 0, &b->ptr);
++    if(result!=VK_SUCCESS)goto failed;
+     b->size = size;
+     return 0;
++failed:
++    VK_LOG("%s failed (VkResult %d)\n",stage,(int)result);
++    // This fresh buffer was never submitted; release partial ownership without
++    // flushing unrelated in-flight GPU work. Never leave stale handles on retry.
++    if(b->ptr)pvkUnmapMemory(s_vk.device,b->mem);
++    if(b->buf)pvkDestroyBuffer(s_vk.device,b->buf,NULL);
++    if(b->mem)pvkFreeMemory(s_vk.device,b->mem,NULL);
++    memset(b,0,sizeof *b);
++    return -1;
+ }
+ 
+ static void vk_destroy_buffer(vk_buffer* b)
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -585,6 +585,9 @@
+     memset(im, 0, sizeof *im);
+ }
+ 
++static VkDeviceSize s_buffer_live_bytes,s_buffer_peak_bytes;
++static unsigned s_buffer_live_count;
++static void vk_buffer_memory_report(const char* reason);
+ static int vk_create_host_buffer(vk_buffer* b, VkDeviceSize size, VkBufferUsageFlags usage)
+ {
+     // Callers supply a fresh buffer; all partial ownership is local to this call.
+@@ -622,6 +625,8 @@
+     stage="vkMapMemory"; result=pvkMapMemory(s_vk.device, b->mem, 0, VK_WHOLE_SIZE, 0, &b->ptr);
+     if(result!=VK_SUCCESS)goto failed;
+     b->size = size;
++    s_buffer_live_bytes+=size;++s_buffer_live_count;
++    if(s_buffer_live_bytes>s_buffer_peak_bytes)s_buffer_peak_bytes=s_buffer_live_bytes;
+     return 0;
+ failed:
+     VK_LOG("%s failed (VkResult %d)\n",stage,(int)result);
+@@ -631,6 +636,7 @@
+     if(b->buf)pvkDestroyBuffer(s_vk.device,b->buf,NULL);
+     if(b->mem)pvkFreeMemory(s_vk.device,b->mem,NULL);
+     memset(b,0,sizeof *b);
++    vk_buffer_memory_report("allocation_failed");
+     return -1;
+ }
+ 
+@@ -640,6 +646,7 @@
+     if (b->ptr) pvkUnmapMemory(s_vk.device, b->mem);
+     if (b->buf) pvkDestroyBuffer(s_vk.device, b->buf, NULL);
+     if (b->mem) pvkFreeMemory(s_vk.device, b->mem, NULL);
++    if(b->size){s_buffer_live_bytes-=b->size;--s_buffer_live_count;}
+     memset(b, 0, sizeof *b);
+ }
+ 
+@@ -914,6 +921,7 @@
+ static double vk_ms_since(uint64_t start) {
+     return 1000.0 * (double)(SDL_GetPerformanceCounter() - start) / SDL_GetPerformanceFrequency();
+ }
++static void vk_retired_complete_set(unsigned set);
+ /* Wait for one set's fence, if it is still in flight. */
+ static int vk_set_wait(unsigned set, const char* reason)
+ {
+@@ -921,6 +929,7 @@
+     const uint64_t start = SDL_GetPerformanceCounter();
+     VK_CHECK(pvkWaitForFences(s_vk.device, 1, &s_set_fence[set], VK_TRUE, UINT64_MAX), "vkWaitForFences");
+     s_set_inflight[set] = 0;
++    vk_retired_complete_set(set);
+     const double ms = vk_ms_since(start);
+     vk_stall_end(ST_SET_WAIT,vk_stall_enabled()?start:0,0);
+     vk_trace_submit(reason, 0, ms);
+@@ -1897,31 +1906,49 @@
+  * would flush and drain every in-flight set in the middle of recording a draw (a stall, and the draw's
+  * slot would belong to a set that has already been submitted). With async submit the old buffer is parked
+  * and freed once every set has been waited on (vk_async_drain). */
+-static vk_buffer* s_retired;
++typedef struct { vk_buffer buffer; unsigned pending_sets; } vk_retired_buffer;
++static vk_retired_buffer* s_retired;
+ static unsigned s_retired_count, s_retired_cap;
+ static void vk_destroy_buffer_now(vk_buffer* b)
+ {
+     if (b->ptr) pvkUnmapMemory(s_vk.device, b->mem);
+     if (b->buf) pvkDestroyBuffer(s_vk.device, b->buf, NULL);
+     if (b->mem) pvkFreeMemory(s_vk.device, b->mem, NULL);
++    if(b->size){s_buffer_live_bytes-=b->size;--s_buffer_live_count;}
+     memset(b, 0, sizeof *b);
+ }
+ static void vk_retire_buffer(vk_buffer* b)
+ {
+     if (!b->buf) { memset(b, 0, sizeof *b); return; }
+     if (!vk_async_enabled()) { vk_destroy_buffer(b); return; }
++    // Existing fences, including the batch still being recorded, delimit the
++    // last possible use. Do not retain every replaced buffer until a global drain.
++    unsigned pending=0;
++    for(unsigned i=0;i<VK_ASYNC_SETS;i++)if(s_set_inflight[i])pending|=1u<<i;
++    if(s_batch_recording)pending|=1u<<s_cur_set;
++    if(!pending){vk_destroy_buffer_now(b);return;}
+     if (s_retired_count == s_retired_cap) {
+         const unsigned cap = s_retired_cap ? s_retired_cap * 2 : 16;
+-        vk_buffer* grown = (vk_buffer*)realloc(s_retired, cap * sizeof *grown);
++        vk_retired_buffer* grown = (vk_retired_buffer*)realloc(s_retired, cap * sizeof *grown);
+         if (!grown) { vk_destroy_buffer(b); return; }
+         s_retired = grown; s_retired_cap = cap;
+     }
+-    s_retired[s_retired_count++] = *b;
++    s_retired[s_retired_count++] = (vk_retired_buffer){*b,pending};
+     memset(b, 0, sizeof *b);
+ }
++static void vk_retired_complete_set(unsigned set)
++{
++    unsigned kept=0;
++    for(unsigned i=0;i<s_retired_count;i++){
++        s_retired[i].pending_sets&=~(1u<<set);
++        if(!s_retired[i].pending_sets)vk_destroy_buffer_now(&s_retired[i].buffer);
++        else s_retired[kept++]=s_retired[i];
++    }
++    s_retired_count=kept;
++}
+ static void vk_free_retired_buffers(void)
+ {
+-    for (unsigned i = 0; i < s_retired_count; i++) vk_destroy_buffer_now(&s_retired[i]);
++    for (unsigned i = 0; i < s_retired_count; i++) vk_destroy_buffer_now(&s_retired[i].buffer);
+     s_retired_count = 0;
+ }
+ static int vk_ensure_buffer(vk_buffer* b, VkDeviceSize bytes, VkBufferUsageFlags usage)
+@@ -1958,6 +1985,18 @@
+ typedef struct { u32 off, frame; } vk_pool_pending;
+ static vk_pool_pending* s_vpool_pend; static u32 s_vpool_npend, s_vpool_cappend;
+ static u32 s_present_serial;
++static void vk_buffer_memory_report(const char* reason)
++{
++    static uint64_t last;
++    const uint64_t now=SDL_GetPerformanceCounter(),frequency=SDL_GetPerformanceFrequency();
++    if(last && now-last<frequency*5)return;
++    last=now;
++    VkDeviceSize retired=0;
++    for(unsigned i=0;i<s_retired_count;i++)retired+=s_retired[i].buffer.size;
++    VK_LOG("[vk-buffer-memory] reason=%s live_mb=%.2f peak_mb=%.2f count=%u retired_mb=%.2f retired_count=%u pool_mb=%.2f logical_sizes=1\n",
++        reason,s_buffer_live_bytes/1048576.,s_buffer_peak_bytes/1048576.,s_buffer_live_count,
++        retired/1048576.,s_retired_count,s_vpool.size/1048576.);
++}
+ static int vk_pool_in(const void* p) { return s_vpool_state == 1 && p && (const u8*)p >= (const u8*)s_vpool.ptr &&
+                                               (const u8*)p < (const u8*)s_vpool.ptr + s_vpool.size; }
+ static void vk_pool_push_free(u32 cls, u32 off)
+@@ -2737,6 +2776,7 @@
+ {
+     (void)ud; (void)buffer_id;
+     s_present_serial++;   /* frees in the converted-vertex pool age by presents */
++    vk_buffer_memory_report("present");
+     if (!s_vk.device) return;
+ 
+     if (!vk_readback_due()) {
+@@ -4354,10 +4394,10 @@
+ {
+     if(!slot->constants.buf || slot->constants.size<s_g.ubo.size)
+         slot->descriptors.valid=0;  /* buffer recreation may recycle the handle */
+-    if (vk_ensure_buffer(&slot->vertices, vb, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT) ||
++    if ((vb && vk_ensure_buffer(&slot->vertices, vb, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT)) ||
+         (ib && vk_ensure_buffer(&slot->indices, ib, VK_BUFFER_USAGE_INDEX_BUFFER_BIT)) ||
+         vk_ensure_buffer(&slot->constants, s_g.ubo.size, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT)) return -1;
+-    if (!slot->vertices.coherent || !slot->constants.coherent || (ib && !slot->indices.coherent)) return -1;
++    if ((vb && !slot->vertices.coherent) || !slot->constants.coherent || (ib && !slot->indices.coherent)) return -1;
+     if (!slot->pool) {
+         slot->descriptors.valid=0;
+         VkDescriptorPoolSize sizes[] = {
+@@ -4554,6 +4594,9 @@
+ 
+     const VkDeviceSize vbytes = (VkDeviceSize)vertex_count * stride;
+     const VkDeviceSize ibytes = indices ? (VkDeviceSize)index_count * 4u : 0;
++    // Pooled geometry is bound in place below. It must not also grow a private
++    // copy in every command set's draw slot, even though no memcpy uses it.
++    const int v_pooled = vk_pool_in(vertices), i_pooled = ibytes && vk_pool_in(indices);
+     struct vk_draw_slot* slot = NULL;
+     unsigned slot_index = 0;
+     if (vk_batch_enabled()) {
+@@ -4564,19 +4607,18 @@
+         if (!s_batch_recording && vk_async_enabled() && vk_set_wait(s_cur_set, "set_acquire")) return;
+         slot_index = s_batch_count;
+         slot = &s_draw_slot[s_cur_set * VK_DRAW_BATCH_SIZE + slot_index];
+-        if (vk_draw_slot_prepare(slot, vbytes, ibytes)) return;
++        if (vk_draw_slot_prepare(slot, v_pooled?0:vbytes, i_pooled?0:ibytes)) return;
+         if (!s_batch_constants) return;
+         vk_eng_copy_vs_constants((u8*)slot->constants.ptr, s_batch_constants, s_e2.vs_bytes);
+         memcpy((u8*)slot->constants.ptr + s_g.ps_off,
+                s_batch_constants + s_g.ps_off, s_e2.ps_bytes);
+     } else {
+-        if (vk_ensure_vertex_buffer(vbytes)) return;
+-        if (ibytes && vk_eng_ensure_indices(ibytes)) return;
++        if (!v_pooled && vk_ensure_vertex_buffer(vbytes)) return;
++        if (ibytes && !i_pooled && vk_eng_ensure_indices(ibytes)) return;
+     }
+     vk_buffer* vertex_buffer = slot ? &slot->vertices : &s_vk.vertices;
+     vk_buffer* index_buffer = slot ? &slot->indices : &s_e2.indices;
+     /* Data that already lives in the converted-vertex pool is bound in place. */
+-    const int v_pooled = vk_pool_in(vertices), i_pooled = ibytes && vk_pool_in(indices);
+     if (!v_pooled) memcpy(vertex_buffer->ptr, vertices, (size_t)vbytes);
+     if (ibytes && !i_pooled) memcpy(index_buffer->ptr, indices, (size_t)ibytes);
+     const VkDescriptorSet set = vk_eng_write_descriptors(P, slot);

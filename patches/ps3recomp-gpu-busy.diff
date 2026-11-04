@@ -1,0 +1,81 @@
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -107,7 +107,7 @@
+     X(vkInvalidateMappedMemoryRanges) \
+     X(vkCreateCommandPool) X(vkDestroyCommandPool) X(vkAllocateCommandBuffers) \
+     X(vkBeginCommandBuffer) X(vkEndCommandBuffer) X(vkResetCommandBuffer) \
+-    X(vkCreateFence) X(vkDestroyFence) X(vkWaitForFences) X(vkResetFences) X(vkQueueSubmit) \
++    X(vkCreateFence) X(vkDestroyFence) X(vkWaitForFences) X(vkGetFenceStatus) X(vkResetFences) X(vkQueueSubmit) \
+     X(vkCreateRenderPass) X(vkDestroyRenderPass) X(vkCreateFramebuffer) X(vkDestroyFramebuffer) \
+     X(vkCreateShaderModule) X(vkDestroyShaderModule) \
+     X(vkCreateDescriptorSetLayout) X(vkDestroyDescriptorSetLayout) \
+@@ -541,6 +541,44 @@
+ static VkCommandBuffer s_set_cmd[VK_ASYNC_SETS];
+ static VkFence s_set_fence[VK_ASYNC_SETS];
+ static int s_set_inflight[VK_ASYNC_SETS];
++/* GPU busy time: the GPU is working whenever a submitted set has not completed. Completion is seen by polling the fences at each
++ * submit and by every wait, so the figure is an upper bound with a resolution of one submit (~4 ms). Logged every 5 s. */
++static uint64_t s_set_submit_t[VK_ASYNC_SETS];
++static int s_set_counted[VK_ASYNC_SETS];
++static int s_gpu_outstanding;
++static uint64_t s_gpu_busy_start, s_gpu_win_start;
++static double s_gpu_busy_ms, s_gpu_lat_sum, s_gpu_lat_max;
++static unsigned s_gpu_submits, s_gpu_lat_n;
++static void vk_gpu_done(unsigned set)
++{
++    if (!s_set_counted[set]) return;
++    s_set_counted[set] = 0;
++    const uint64_t now = SDL_GetPerformanceCounter(), f = SDL_GetPerformanceFrequency();
++    const double lat = 1000.0 * (double)(now - s_set_submit_t[set]) / (double)f;
++    s_gpu_lat_sum += lat; s_gpu_lat_n++; if (lat > s_gpu_lat_max) s_gpu_lat_max = lat;
++    if (--s_gpu_outstanding <= 0) {
++        s_gpu_outstanding = 0;
++        s_gpu_busy_ms += 1000.0 * (double)(now - s_gpu_busy_start) / (double)f;
++    }
++}
++static void vk_gpu_submitted(unsigned set)
++{
++    const uint64_t now = SDL_GetPerformanceCounter(), f = SDL_GetPerformanceFrequency();
++    for (unsigned i = 0; i < VK_ASYNC_SETS; i++)
++        if (i != set && s_set_counted[i] && pvkGetFenceStatus(s_vk.device, s_set_fence[i]) == VK_SUCCESS) vk_gpu_done(i);
++    if (s_set_counted[set]) vk_gpu_done(set);
++    if (s_gpu_outstanding == 0) s_gpu_busy_start = now;
++    s_gpu_outstanding++; s_set_counted[set] = 1; s_set_submit_t[set] = now; s_gpu_submits++;
++    if (!s_gpu_win_start) s_gpu_win_start = now;
++    const double win = 1000.0 * (double)(now - s_gpu_win_start) / (double)f;
++    if (win >= 5000.0) {
++        double busy = s_gpu_busy_ms;
++        if (s_gpu_outstanding > 0) { busy += 1000.0 * (double)(now - s_gpu_busy_start) / (double)f; s_gpu_busy_start = now; }
++        fprintf(stderr, "[gpu-busy] window_ms=%.0f busy_ms=%.0f busy_pct=%.1f submits=%u set_lat_avg_ms=%.2f set_lat_max_ms=%.2f\n",
++                win, busy, 100.0 * busy / win, s_gpu_submits, s_gpu_lat_n ? s_gpu_lat_sum / s_gpu_lat_n : 0.0, s_gpu_lat_max);
++        s_gpu_busy_ms = 0; s_gpu_lat_sum = s_gpu_lat_max = 0; s_gpu_lat_n = 0; s_gpu_submits = 0; s_gpu_win_start = now;
++    }
++}
+ static unsigned s_cur_set;
+ static int s_async_enabled = -1, s_async_wanted = -1;
+ static int vk_async_enabled(void) {
+@@ -932,6 +970,7 @@
+     const uint64_t start = SDL_GetPerformanceCounter();
+     VK_CHECK(pvkWaitForFences(s_vk.device, 1, &s_set_fence[set], VK_TRUE, UINT64_MAX), "vkWaitForFences");
+     s_set_inflight[set] = 0;
++    vk_gpu_done(set);
+     vk_retired_complete_set(set);
+     const double ms = vk_ms_since(start);
+     vk_stall_end(ST_SET_WAIT,vk_stall_enabled()?start:0,0);
+@@ -970,6 +1009,7 @@
+         VK_CHECK(pvkResetFences(s_vk.device, 1, &s_set_fence[set]), "vkResetFences");
+         VK_CHECK(pvkQueueSubmit(s_vk.queue, 1, &si, s_set_fence[set]), "vkQueueSubmit");
+         s_set_inflight[set] = 1;
++        vk_gpu_submitted(set);
+         ++s_debug_stats.submissions;
+         vk_trace_submit(s_submit_reason, s_batch_count, 0.0);
+         s_cur_set = (set + 1) % VK_ASYNC_SETS;
+@@ -1017,6 +1057,7 @@
+     VK_CHECK(pvkResetFences(s_vk.device, 1, &s_set_fence[set]), "vkResetFences");
+     VK_CHECK(pvkQueueSubmit(s_vk.queue, 1, &si, s_set_fence[set]), "vkQueueSubmit");
+     s_set_inflight[set] = 1;
++    vk_gpu_submitted(set);
+     ++s_debug_stats.submissions;
+     vk_trace_submit(reason, 0, 0.0);
+     s_cur_set = (set + 1) % VK_ASYNC_SETS;

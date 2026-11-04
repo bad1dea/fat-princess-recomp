@@ -1,0 +1,28 @@
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -557,6 +557,16 @@
+ static int s_ts_state[VK_ASYNC_SETS];   /* 0 none, 1 start written, 2 both written */
+ static double s_ts_sum, s_ts_max;
+ static unsigned s_ts_n, s_ts_over25, s_ts_over100;
++static void vk_log_limits(void)
++{
++    VkPhysicalDeviceProperties dp;
++    pvkGetPhysicalDeviceProperties(s_vk.phys, &dp);
++    const VkPhysicalDeviceLimits* l = &dp.limits;
++    VK_LOG("limits: perStage samplers %u sampledImages %u uniformBuffers %u resources %u; set samplers %u sampledImages %u; samplerAllocations %u; boundSets %u; vertexBindings %u\n",
++           l->maxPerStageDescriptorSamplers, l->maxPerStageDescriptorSampledImages, l->maxPerStageDescriptorUniformBuffers,
++           l->maxPerStageResources, l->maxDescriptorSetSamplers, l->maxDescriptorSetSampledImages, l->maxSamplerAllocationCount,
++           l->maxBoundDescriptorSets, l->maxVertexInputBindings);
++}
+ static void vk_ts_init(void)
+ {
+     const char* e = getenv("FP_GPU_TS");
+@@ -5121,6 +5131,7 @@
+     for (unsigned i = 0; i < VK_ASYNC_SETS; i++)
+         VK_CHECK(pvkCreateFence(s_vk.device, &fci, NULL, &s_set_fence[i]), "vkCreateFence(set)");
+     s_cur_set = 0;
++    vk_log_limits();
+     vk_ts_init();
+ 
+     if (vk_pick_depth_format()) return -1;

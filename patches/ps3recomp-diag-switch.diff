@@ -1,0 +1,140 @@
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -484,6 +484,12 @@
+     s_submit_reason = reason;
+     return vk_batch_flush_ex(0);
+ }
++/* Counters and timers that only feed the diagnostic log. FP_DIAGNOSTICS is defined for dev builds; a release build keeps none of them. */
++#ifdef FP_DIAGNOSTICS
++#define FP_COUNT(c) ((c)++)
++#else
++#define FP_COUNT(c) ((void)0)
++#endif
+ static uint64_t s_state_issued,s_state_skipped;
+ static uint64_t s_descriptor_epoch=1;
+ static uint64_t s_descriptor_calls,s_descriptor_skipped,s_descriptor_written,s_descriptor_reused;
+@@ -599,6 +605,9 @@
+ }
+ static void vk_dt_init(void)
+ {
++#ifndef FP_DIAGNOSTICS
++    return;   /* the extension is not enabled without diagnostics */
++#endif
+     const char* e = getenv("FP_PRESENT_CADENCE");
+     if (e && e[0] == '0') return;
+     if (!s_vk.windowed || !s_vk.swapchain) return;
+@@ -623,6 +632,9 @@
+ }
+ static void vk_ts_init(void)
+ {
++#ifndef FP_DIAGNOSTICS
++    return;   /* GPU timestamp queries only feed [gpu-time]; a release build records none */
++#endif
+     const char* e = getenv("FP_GPU_TS");
+     if (e && e[0] == '0') return;
+     u32 n = 0;
+@@ -667,6 +679,10 @@
+ }
+ static void vk_gpu_done(unsigned set)
+ {
++#ifndef FP_DIAGNOSTICS
++    (void)set;
++    return;   /* busy-time accounting only feeds [gpu-busy] */
++#endif
+     if (!s_set_counted[set]) return;
+     s_set_counted[set] = 0;
+     vk_ts_collect(set);
+@@ -680,6 +696,10 @@
+ }
+ static void vk_gpu_submitted(unsigned set)
+ {
++#ifndef FP_DIAGNOSTICS
++    (void)set;
++    return;
++#endif
+     const uint64_t now = SDL_GetPerformanceCounter(), f = SDL_GetPerformanceFrequency();
+     for (unsigned i = 0; i < VK_ASYNC_SETS; i++)
+         if (i != set && s_set_counted[i] && pvkGetFenceStatus(s_vk.device, s_set_fence[i]) == VK_SUCCESS) vk_gpu_done(i);
+@@ -2999,6 +3019,9 @@
+  * every Nth present and whenever a dump is due; 1 is every frame as before. */
+ static int vk_readback_due(void)
+ {
++#ifndef FP_DIAGNOSTICS
++    return 0;   /* the full-frame readback only feeds the frame statistics and dumps; a release build never waits for it */
++#endif
+     static int every = -1;
+     if (every < 0) { const char* e = getenv("PS3RECOMP_VK_READBACK_EVERY"); every = e && atoi(e) > 0 ? atoi(e) : 30; }
+     const int dump_due = s_vk.dump_path && ((s_vk.presented + 1) % s_vk.dump_every) == 0;
+@@ -4932,19 +4955,19 @@
+     if(enabled<0) {const char* e=getenv("RSX_DRAW_STATE_CACHE");enabled=e && !strcmp(e,"1");}
+     const int keep=enabled && s_batch_renderpass;
+     const int valid=keep && s_draw_state.valid;
+-    if(!valid || s_draw_state.pipeline!=pipe) {pvkCmdBindPipeline(s_vk.cmd,VK_PIPELINE_BIND_POINT_GRAPHICS,pipe);s_state_issued++;}
+-    else s_state_skipped++;
+-    if(!valid || memcmp(&s_draw_state.viewport,vp,sizeof *vp)) {pvkCmdSetViewport(s_vk.cmd,0,1,vp);s_state_issued++;}
+-    else s_state_skipped++;
+-    if(!valid || memcmp(&s_draw_state.scissor,sc,sizeof *sc)) {pvkCmdSetScissor(s_vk.cmd,0,1,sc);s_state_issued++;}
+-    else s_state_skipped++;
+-    if(!valid || s_draw_state.stencil!=stencil) {pvkCmdSetStencilReference(s_vk.cmd,VK_STENCIL_FACE_FRONT_AND_BACK,stencil);s_state_issued++;}
+-    else s_state_skipped++;
+-    if(!valid || s_draw_state.line_width!=line_width) {pvkCmdSetLineWidth(s_vk.cmd,line_width);s_state_issued++;}
+-    else s_state_skipped++;
++    if(!valid || s_draw_state.pipeline!=pipe) {pvkCmdBindPipeline(s_vk.cmd,VK_PIPELINE_BIND_POINT_GRAPHICS,pipe);FP_COUNT(s_state_issued);}
++    else FP_COUNT(s_state_skipped);
++    if(!valid || memcmp(&s_draw_state.viewport,vp,sizeof *vp)) {pvkCmdSetViewport(s_vk.cmd,0,1,vp);FP_COUNT(s_state_issued);}
++    else FP_COUNT(s_state_skipped);
++    if(!valid || memcmp(&s_draw_state.scissor,sc,sizeof *sc)) {pvkCmdSetScissor(s_vk.cmd,0,1,sc);FP_COUNT(s_state_issued);}
++    else FP_COUNT(s_state_skipped);
++    if(!valid || s_draw_state.stencil!=stencil) {pvkCmdSetStencilReference(s_vk.cmd,VK_STENCIL_FACE_FRONT_AND_BACK,stencil);FP_COUNT(s_state_issued);}
++    else FP_COUNT(s_state_skipped);
++    if(!valid || s_draw_state.line_width!=line_width) {pvkCmdSetLineWidth(s_vk.cmd,line_width);FP_COUNT(s_state_issued);}
++    else FP_COUNT(s_state_skipped);
+     if(s_vk.depth_bounds_ok) {
+-        if(!valid || s_draw_state.depth_min!=depth_min || s_draw_state.depth_max!=depth_max) {pvkCmdSetDepthBounds(s_vk.cmd,depth_min,depth_max);s_state_issued++;}
+-        else s_state_skipped++;
++        if(!valid || s_draw_state.depth_min!=depth_min || s_draw_state.depth_max!=depth_max) {pvkCmdSetDepthBounds(s_vk.cmd,depth_min,depth_max);FP_COUNT(s_state_issued);}
++        else FP_COUNT(s_state_skipped);
+     }
+     s_draw_state.valid=keep;s_draw_state.pipeline=pipe;s_draw_state.viewport=*vp;s_draw_state.scissor=*sc;
+     s_draw_state.stencil=stencil;s_draw_state.line_width=line_width;s_draw_state.depth_min=depth_min;s_draw_state.depth_max=depth_max;
+@@ -5324,7 +5347,9 @@
+     const char* dev_exts_all[4];
+     u32 dev_ext_n = (u32)(sizeof dev_exts / sizeof dev_exts[0]);
+     for (u32 i = 0; i < dev_ext_n; i++) dev_exts_all[i] = dev_exts[i];
++#ifdef FP_DIAGNOSTICS   /* present timing only feeds [present-cadence] */
+     if (s_vk.windowed && vk_has_device_extension(s_vk.phys, "VK_GOOGLE_display_timing")) dev_exts_all[dev_ext_n++] = "VK_GOOGLE_display_timing";
++#endif
+     VkDeviceCreateInfo dci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+                                .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci,
+                                .enabledExtensionCount = s_vk.windowed ? dev_ext_n : 0u,
+diff --git a/runtime/spu/spu_coherency.c b/runtime/spu/spu_coherency.c
+--- a/runtime/spu/spu_coherency.c
++++ b/runtime/spu/spu_coherency.c
+@@ -84,9 +84,13 @@
+ void spu_lockline_lock(void)
+ {
+     unsigned spins = 0;
++#ifdef FP_DIAGNOSTICS
+     __atomic_fetch_add(&g_coh_lock_acq, 1, __ATOMIC_RELAXED);
++#endif
+     if (!atomic_exchange_explicit(&g_lockline, 1, memory_order_acquire)) return;
++#ifdef FP_DIAGNOSTICS
+     const unsigned long long t0 = spu__now_ns();
++#endif
+     do {
+         do {
+ #if defined(__aarch64__)
+@@ -97,10 +101,12 @@
+             if (++spins >= 4096) { spins = 0; sched_yield(); }
+         } while (atomic_load_explicit(&g_lockline, memory_order_relaxed));
+     } while (atomic_exchange_explicit(&g_lockline, 1, memory_order_acquire));
++#ifdef FP_DIAGNOSTICS
+     const unsigned long long w = spu__now_ns() - t0;
+     __atomic_fetch_add(&g_coh_lock_contended, 1, __ATOMIC_RELAXED);
+     __atomic_fetch_add(&g_coh_lock_wait_ns, w, __ATOMIC_RELAXED);
+     if (w > g_coh_lock_wait_max_ns) g_coh_lock_wait_max_ns = w;
++#endif
+ }
+ void spu_lockline_unlock(void) { atomic_store_explicit(&g_lockline, 0, memory_order_release); }
+ #endif

@@ -1,0 +1,46 @@
+diff --git a/runtime/ppu/ppu_loader.cpp b/runtime/ppu/ppu_loader.cpp
+index 26ff891..acdd5cd 100644
+--- a/runtime/ppu/ppu_loader.cpp
++++ b/runtime/ppu/ppu_loader.cpp
+@@ -1939,18 +1939,6 @@ extern "C" void ppu_ww_note_atomic(uint32_t ea, uint32_t val, int width, void* r
+ {
+     barrier_watch_hit(ea, val, width, ra);
+ }
+-void vm_write8 (uint64_t a, uint8_t  v) { barrier_watch_hit((uint32_t)a, v, 1, __builtin_return_address(0)); if (vm_oob((uint32_t)a,1) || vm_null_store((uint32_t)a, v, 1, __builtin_return_address(0))) return;
+-#ifdef _WIN32
+-    /* PT detector: does this byte-write turn its word into the hunted truncated value? */
+-    { if(g_pt_val==-2){const char*e=getenv("PT"); g_pt_val=e?(int64_t)strtoul(e,0,16):-1;}
+-      if(g_pt_val>=0){ uint32_t wa=((uint32_t)a)&~3u; uint32_t cur; memcpy(&cur,vm_base+wa,4); cur=__builtin_bswap32(cur);
+-        uint32_t shift=(3-((uint32_t)a & 3))*8; uint32_t nw=(cur & ~(0xFFu<<shift))|((uint32_t)v<<shift);
+-        if(nw==(uint32_t)g_pt_val && cur!=(uint32_t)g_pt_val) pt_record(wa);
+-        else if(((uint32_t)a&3)==0 && v!=0) pt_restore(wa); /* MSB byte set non-zero = restored */ } }
+-#endif
+-    VM_WRITE_COH(a, &v, 1); }
+-void vm_write16(uint64_t a, uint16_t v) { barrier_watch_hit((uint32_t)a, v, 2, __builtin_return_address(0)); if (vm_oob((uint32_t)a,2) || vm_null_store((uint32_t)a, v, 2, __builtin_return_address(0))) return;
+-    v = __builtin_bswap16(v); VM_WRITE_COH(a, &v, 2); }
+ /* Stores that need none of the checks below: no store diagnostic armed, an ordinary mapped address
+  * (not the null page, not a raw-SPU window), no null-sweep in progress, and no SPU reservation on the
+  * line. Same conditions as vm_st_ok in ppu_recomp.h, kept out of line so the lifted code stays small. */
+@@ -1961,6 +1949,22 @@ static inline __attribute__((always_inline)) int vm_store_plain(uint32_t ea, uin
+            __builtin_expect(!g_barrier_sync_watch && !g_null_sweep_hi, 1) &&
+            !(s_coh_armed && ((s_coh_bitmap[ea >> 10] >> ((ea >> 7) & 7)) & 1u));
+ }
++void vm_write8 (uint64_t a, uint8_t  v) {
++    if (vm_store_plain((uint32_t)a, 1)) { *(uint8_t*)(vm_base + (uint32_t)a) = v; return; }
++    barrier_watch_hit((uint32_t)a, v, 1, __builtin_return_address(0)); if (vm_oob((uint32_t)a,1) || vm_null_store((uint32_t)a, v, 1, __builtin_return_address(0))) return;
++#ifdef _WIN32
++    /* PT detector: does this byte-write turn its word into the hunted truncated value? */
++    { if(g_pt_val==-2){const char*e=getenv("PT"); g_pt_val=e?(int64_t)strtoul(e,0,16):-1;}
++      if(g_pt_val>=0){ uint32_t wa=((uint32_t)a)&~3u; uint32_t cur; memcpy(&cur,vm_base+wa,4); cur=__builtin_bswap32(cur);
++        uint32_t shift=(3-((uint32_t)a & 3))*8; uint32_t nw=(cur & ~(0xFFu<<shift))|((uint32_t)v<<shift);
++        if(nw==(uint32_t)g_pt_val && cur!=(uint32_t)g_pt_val) pt_record(wa);
++        else if(((uint32_t)a&3)==0 && v!=0) pt_restore(wa); /* MSB byte set non-zero = restored */ } }
++#endif
++    VM_WRITE_COH(a, &v, 1); }
++void vm_write16(uint64_t a, uint16_t v) {
++    if (vm_store_plain((uint32_t)a, 2)) { const uint16_t b = __builtin_bswap16(v); if (!((uint32_t)a & 1u)) __atomic_store_n((uint16_t*)(vm_base + (uint32_t)a), b, __ATOMIC_RELAXED); else memcpy(vm_base + (uint32_t)a, &b, 2); return; }
++    barrier_watch_hit((uint32_t)a, v, 2, __builtin_return_address(0)); if (vm_oob((uint32_t)a,2) || vm_null_store((uint32_t)a, v, 2, __builtin_return_address(0))) return;
++    v = __builtin_bswap16(v); VM_WRITE_COH(a, &v, 2); }
+ void vm_write32(uint64_t a, uint32_t v) {
+     if (vm_store_plain((uint32_t)a, 4)) {
+         const uint32_t b = __builtin_bswap32(v);

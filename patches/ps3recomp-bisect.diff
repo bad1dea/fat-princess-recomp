@@ -1,0 +1,89 @@
+--- a/libs/video/rsx_vulkan_backend.c	2026-11-02 21:42:07.744677768 -0500
++++ b/libs/video/rsx_vulkan_backend.c	2026-11-02 21:42:07.744584177 -0500
+@@ -4737,6 +4737,25 @@
+     }
+ }
+ 
++/* RSX_BISECT (diagnostic, default 0): 1 copy pooled geometry into the slot
++ * buffers, 2 one sampler for every unit, 4 wait for the GPU after each draw,
++ * 8 dummy texture on every unit, 16 magenta instead of 2D lookups (decompiler). */
++static int vk_bisect(void)
++{
++    static int v=-1;
++    if(v<0) {const char* e=getenv("RSX_BISECT");v=e?atoi(e):0;if(v) VK_LOG("RSX_BISECT=%d\n",v);}
++    return v;
++}
++
++/* RSX_BISECT bit 8: every 2D unit samples the dummy texture. RSX_BISECT_TEX=N: only units 0..N-1 keep their texture. */
++static int vk_bisect_dummy(u32 unit)
++{
++    static int n=-1;
++    if(n<0){const char* e=getenv("RSX_BISECT_TEX");n=e?atoi(e):0;}
++    if(vk_bisect()&8) return 1;
++    return n>0 && unit>=(u32)n;
++}
++
+ /* Fill the set the bound pipeline uses: the shared one (sixteen textures in
+  * one binding), or for a pipeline with cube units the split one (one binding
+  * per unit). Returns the set, or VK_NULL_HANDLE. */
+@@ -4768,7 +4787,8 @@
+         const int cube = (P->cube_mask >> u) & 1u;
+         VkImageView v = ((s_e2.tex_mask >> u) & 1u) ? vk_eng_sample_view(s_e2.tex[u], cube)
+                                                      : VK_NULL_HANDLE;
+-        VkSampler smp = v ? vk_eng_sampler(&s_e2.samp[u]) : s_vk.sampler;
++        if (v && !cube && vk_bisect_dummy(u)) v = VK_NULL_HANDLE;
++        VkSampler smp = (v && !(vk_bisect()&2)) ? vk_eng_sampler(&s_e2.samp[u]) : s_vk.sampler;
+         ii[u] = (VkDescriptorImageInfo){ VK_NULL_HANDLE,
+                                          v ? v : (cube ? dummy_cube : s_vk.dummy.view),
+                                          VK_IMAGE_LAYOUT_GENERAL };
+@@ -4857,7 +4877,8 @@
+     const VkDeviceSize ibytes = indices ? (VkDeviceSize)index_count * 4u : 0;
+     // Pooled geometry is bound in place below. It must not also grow a private
+     // copy in every command set's draw slot, even though no memcpy uses it.
+-    const int v_pooled = vk_pool_in(vertices), i_pooled = ibytes && vk_pool_in(indices);
++    const int bisect = vk_bisect();
++    const int v_pooled = !(bisect&1) && vk_pool_in(vertices), i_pooled = !(bisect&1) && ibytes && vk_pool_in(indices);
+     struct vk_draw_slot* slot = NULL;
+     unsigned slot_index = 0;
+     if (vk_batch_enabled()) {
+@@ -4956,6 +4977,7 @@
+     (s_submit_reason="vk_eng_draw", vk_submit_and_wait());
+     s_batch_draw = 0;
+     if (slot) s_batch_count = slot_index + 1;
++    if((bisect&4) && vk_flush_at("bisect")) return;
+ }
+ 
+ static const rsx_draw_backend s_vk_engine_backend = {
+--- a/libs/video/rsx_fp_decompiler.c	2026-11-02 21:42:07.747086619 -0500
++++ b/libs/video/rsx_fp_decompiler.c	2026-11-02 21:42:07.746925612 -0500
+@@ -132,6 +132,14 @@
+     return 0;
+ }
+ 
++/* RSX_BISECT bit 16 (diagnostic): every plain 2D texture lookup returns magenta. */
++static void fp_bisect_const(char* rhs, size_t n)
++{
++    static int on=-1;
++    if(on<0){const char* e=getenv("RSX_BISECT");on=e&&(atoi(e)&16);}
++    if(on) snprintf(rhs,n,"float4(1.0,0.0,1.0,1.0)");
++}
++
+ static int fp_instruction_has_constant(u32 w1, u32 w2, u32 w3)
+ {
+     return
+@@ -855,6 +863,7 @@
+             else
+                 snprintf(rhs, sizeof(rhs),
+                          "rsx_tex[%u].Sample(rsx_samp[%u], (%s).xy)", tex_unit, tex_unit, a);
++            fp_bisect_const(rhs, sizeof rhs);
+             break;
+         case OP_TXP:
+             if (shadow && shadow[tex_unit].enabled) {
+@@ -874,6 +883,7 @@
+                 snprintf(rhs, sizeof(rhs),
+                          "rsx_tex[%u].Sample(rsx_samp[%u], (%s).xy / (%s).w)",
+                          tex_unit, tex_unit, a, a);
++            fp_bisect_const(rhs, sizeof rhs);
+             break;
+         case OP_TXB: case OP_TXL: {
+             /* Biased / explicit-LOD sample; bias or LOD is src1.x (RPCS3

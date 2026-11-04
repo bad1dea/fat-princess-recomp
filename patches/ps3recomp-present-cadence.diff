@@ -1,0 +1,101 @@
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -557,6 +557,60 @@
+ static int s_ts_state[VK_ASYNC_SETS];   /* 0 none, 1 start written, 2 both written */
+ static double s_ts_sum, s_ts_max;
+ static unsigned s_ts_n, s_ts_over25, s_ts_over100;
++/* How the frames really reached the screen (VK_GOOGLE_display_timing, where the driver has it): the gap between consecutive
++ * presents in display refreshes, 1, 2, 3 or more. A game at 30 FPS on a 60 Hz screen should be a steady 2; 3s are judder.
++ * FP_PRESENT_CADENCE=0 turns it off. */
++static PFN_vkGetPastPresentationTimingGOOGLE pvkGetPastPresentationTimingGOOGLE;
++static PFN_vkGetRefreshCycleDurationGOOGLE pvkGetRefreshCycleDurationGOOGLE;
++static int s_dt_on, s_dt_checked;
++static uint32_t s_dt_id;
++static double s_dt_refresh_ns;
++static uint64_t s_dt_last_actual;
++static unsigned s_dt_hist[5];       /* gaps of 1, 2, 3, 4, 5+ refreshes */
++static double s_dt_margin_sum, s_dt_gap_sq, s_dt_gap_sum;
++static unsigned s_dt_n;
++static uint64_t s_dt_win_start;
++static void vk_dt_poll(void)
++{
++    if (!s_dt_on || !s_vk.swapchain) return;
++    VkPastPresentationTimingGOOGLE t[32];
++    u32 n = 32;
++    if (pvkGetPastPresentationTimingGOOGLE(s_vk.device, s_vk.swapchain, &n, t) < 0) return;
++    for (u32 i = 0; i < n; i++) {
++        if (s_dt_last_actual && t[i].actualPresentTime > s_dt_last_actual && s_dt_refresh_ns > 0.0) {
++            const double gap_ns = (double)(t[i].actualPresentTime - s_dt_last_actual);
++            const int cycles = (int)(gap_ns / s_dt_refresh_ns + 0.5);
++            s_dt_hist[cycles < 1 ? 0 : cycles > 5 ? 4 : cycles - 1]++;
++            const double ms = gap_ns / 1.0e6;
++            s_dt_gap_sum += ms; s_dt_gap_sq += ms * ms; s_dt_n++;
++            s_dt_margin_sum += (double)t[i].presentMargin / 1.0e6;
++        }
++        if (t[i].actualPresentTime) s_dt_last_actual = t[i].actualPresentTime;
++    }
++    const uint64_t now = SDL_GetPerformanceCounter(), f = SDL_GetPerformanceFrequency();
++    if (!s_dt_win_start) s_dt_win_start = now;
++    if ((double)(now - s_dt_win_start) / (double)f >= 5.0 && s_dt_n) {
++        const double mean = s_dt_gap_sum / s_dt_n, var = s_dt_gap_sq / s_dt_n - mean * mean;
++        fprintf(stderr, "[present-cadence] frames=%u refresh_ms=%.2f gaps(1,2,3,4,5+ refreshes)=%u,%u,%u,%u,%u gap_mean_ms=%.2f gap_sd_ms=%.2f margin_avg_ms=%.2f\n",
++                s_dt_n, s_dt_refresh_ns / 1.0e6, s_dt_hist[0], s_dt_hist[1], s_dt_hist[2], s_dt_hist[3], s_dt_hist[4],
++                mean, var > 0 ? sqrt(var) : 0.0, s_dt_margin_sum / s_dt_n);
++        memset(s_dt_hist, 0, sizeof s_dt_hist); s_dt_gap_sum = s_dt_gap_sq = s_dt_margin_sum = 0; s_dt_n = 0; s_dt_win_start = now;
++    }
++}
++static void vk_dt_init(void)
++{
++    const char* e = getenv("FP_PRESENT_CADENCE");
++    if (e && e[0] == '0') return;
++    if (!s_vk.windowed || !s_vk.swapchain) return;
++    pvkGetPastPresentationTimingGOOGLE = (PFN_vkGetPastPresentationTimingGOOGLE)pvkGetDeviceProcAddr(s_vk.device, "vkGetPastPresentationTimingGOOGLE");
++    pvkGetRefreshCycleDurationGOOGLE = (PFN_vkGetRefreshCycleDurationGOOGLE)pvkGetDeviceProcAddr(s_vk.device, "vkGetRefreshCycleDurationGOOGLE");
++    if (!pvkGetPastPresentationTimingGOOGLE || !pvkGetRefreshCycleDurationGOOGLE) return;
++    VkRefreshCycleDurationGOOGLE rc;
++    if (pvkGetRefreshCycleDurationGOOGLE(s_vk.device, s_vk.swapchain, &rc) != VK_SUCCESS || !rc.refreshDuration) return;
++    s_dt_refresh_ns = (double)rc.refreshDuration;
++    s_dt_on = 1;
++    VK_LOG("present cadence on (refresh %.3f ms)\n", s_dt_refresh_ns / 1.0e6);
++}
+ static void vk_log_limits(void)
+ {
+     VkPhysicalDeviceProperties dp;
+@@ -2845,14 +2899,19 @@
+     s_debug_stats.submit_wait_ms += 1000.0*(SDL_GetPerformanceCounter()-window_submit_start)/SDL_GetPerformanceFrequency();
+ 
+ queue_present:;
++    if (!s_dt_checked && s_vk.swapchain) { s_dt_checked = 1; vk_dt_init(); }
++    VkPresentTimeGOOGLE dt_time = { .presentID = ++s_dt_id, .desiredPresentTime = 0 };
++    VkPresentTimesInfoGOOGLE dt_info = { .sType = VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE, .swapchainCount = 1, .pTimes = &dt_time };
+     VkPresentInfoKHR pi = {
+         .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR,
++        .pNext = s_dt_on ? &dt_info : NULL,
+         .waitSemaphoreCount = 1, .pWaitSemaphores = &s_vk.sc_done[idx],
+         .swapchainCount = 1, .pSwapchains = &s_vk.swapchain, .pImageIndices = &idx,
+     };
+     const uint64_t queue_present_start=vk_stall_start();
+     r = pvkQueuePresentKHR(s_vk.queue, &pi);
+     vk_stall_end(ST_PRESENT,queue_present_start,0);
++    vk_dt_poll();
+     ++s_win_presents;
+     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) { ++s_win_ood; vk_swapchain_lost(); }
+     else if (r != VK_SUCCESS) {
+@@ -5102,10 +5161,14 @@
+         pvkGetPhysicalDeviceProperties(s_vk.phys, &pp);
+         s_vk.line_width_max = pp.limits.lineWidthRange[1] > 1.0f ? pp.limits.lineWidthRange[1] : 1.0f;
+     }
++    const char* dev_exts_all[4];
++    u32 dev_ext_n = (u32)(sizeof dev_exts / sizeof dev_exts[0]);
++    for (u32 i = 0; i < dev_ext_n; i++) dev_exts_all[i] = dev_exts[i];
++    if (s_vk.windowed && vk_has_device_extension(s_vk.phys, "VK_GOOGLE_display_timing")) dev_exts_all[dev_ext_n++] = "VK_GOOGLE_display_timing";
+     VkDeviceCreateInfo dci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
+                                .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci,
+-                               .enabledExtensionCount = s_vk.windowed ? (u32)(sizeof dev_exts / sizeof dev_exts[0]) : 0u,
+-                               .ppEnabledExtensionNames = s_vk.windowed ? dev_exts : NULL,
++                               .enabledExtensionCount = s_vk.windowed ? dev_ext_n : 0u,
++                               .ppEnabledExtensionNames = s_vk.windowed ? dev_exts_all : NULL,
+                                .pEnabledFeatures = &want };
+     VK_CHECK(pvkCreateDevice(s_vk.phys, &dci, NULL, &s_vk.device), "vkCreateDevice");
+     if (vk_load_device_functions()) return -1;

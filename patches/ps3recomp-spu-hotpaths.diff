@@ -1,0 +1,98 @@
+diff --git a/libs/spurs/cellSpurs.c b/libs/spurs/cellSpurs.c
+--- a/libs/spurs/cellSpurs.c
++++ b/libs/spurs/cellSpurs.c
+@@ -95,6 +95,7 @@
+     pthread_cond_t      cond;
+ #endif
+     int                 initialized;
++    volatile int        last_events;   /* events word at the last wake, -1 = none yet */
+ } EventFlagSync;
+ 
+ static EventFlagSync s_ef_sync[MAX_EVENT_FLAGS];
+@@ -118,6 +119,12 @@
+     for (int i = 0; i < MAX_EVENT_FLAGS; i++) {
+         EventFlagSync* s = &s_ef_sync[i];
+         if (!s->initialized || (s->ea & ~127u) != line) continue;
++        /* The flag shares its 128-byte line with data the SPU tasks commit to constantly; waking the waiters for
++         * every such commit cost a third of the SPU thread. A waiter's condition is the events word, so wake only
++         * when it differs from what the last wake saw (a waiter's own 2 ms poll covers a change that reverts). */
++        const int events = (int)vm_read16(s->ea + 0x00u /* EF_EVENTS */);
++        if (events == s->last_events) continue;
++        s->last_events = events;
+         /* Take the waiter's lock so the wake cannot fall between its check of
+          * the flag and its sleep. Caller holds no lock-line lock. */
+ #ifdef _WIN32
+@@ -142,6 +149,7 @@
+     for (int i = 0; i < MAX_EVENT_FLAGS; i++) {
+         if (!s_ef_sync[i].initialized) {
+             s_ef_sync[i].ea = ea;
++            s_ef_sync[i].last_events = -1;
+             { extern void (*g_spu_line_commit_hook)(uint32_t);
+               g_spu_line_commit_hook = ef_line_committed; }
+ #ifdef _WIN32
+diff --git a/runtime/spu/spu_channels.c b/runtime/spu/spu_channels.c
+--- a/runtime/spu/spu_channels.c
++++ b/runtime/spu/spu_channels.c
+@@ -373,19 +373,25 @@
+ 
+ static mfc_engine* mfc_for(spu_context* ctx)
+ {
++    /* Per-thread cache of four contexts (one thread runs several SPU contexts in turn; a single entry missed on
++     * every switch and took the registry's read lock). On unless SPU_MFC_LOOKUP_CACHE=0. */
++    enum { WAYS=4 };
+     static SPU_TLS int enabled=-1;
+-    static SPU_TLS spu_context* last_ctx;
+-    static SPU_TLS mfc_engine* last_engine;
+-    static SPU_TLS uint64_t last_generation;
++    static SPU_TLS spu_context* way_ctx[WAYS];
++    static SPU_TLS mfc_engine* way_engine[WAYS];
++    static SPU_TLS uint64_t way_generation[WAYS];
++    static SPU_TLS unsigned next_way;
+     if(enabled<0) {
+         const char* option=getenv("SPU_MFC_LOOKUP_CACHE");
+-        enabled=option && strcmp(option,"0");
++        enabled=!(option && !strcmp(option,"0"));
+     }
+     if(!enabled) return mfc_for_uncached(ctx);
+     const uint64_t generation=mfc_generation();
+-    if(last_ctx==ctx && last_engine && last_generation==generation) return last_engine;
++    for(int i=0;i<WAYS;i++)
++        if(way_ctx[i]==ctx && way_engine[i] && way_generation[i]==generation) return way_engine[i];
+     mfc_engine* engine=mfc_for_uncached(ctx);
+-    last_ctx=ctx;last_engine=engine;last_generation=generation;
++    const unsigned w=next_way++%WAYS;
++    way_ctx[w]=ctx;way_engine[w]=engine;way_generation[w]=generation;
+     return engine;
+ }
+ 
+diff --git a/runtime/syscalls/sys_ppu_thread.c b/runtime/syscalls/sys_ppu_thread.c
+--- a/runtime/syscalls/sys_ppu_thread.c
++++ b/runtime/syscalls/sys_ppu_thread.c
+@@ -27,6 +27,7 @@
+ #include <stdlib.h>   /* getenv (else return value truncated to int on x64) */
+ #ifndef _WIN32
+ #include <errno.h>
++#include <time.h>
+ #endif
+ 
+ /* Host stack reserved per guest thread, for pthread_attr_setstacksize. The
+@@ -1121,7 +1122,18 @@
+ #ifdef _WIN32
+     SwitchToThread();
+ #else
+-    sched_yield();
++    /* A guest worker that yields in a loop to wait for work (PhysX's) kept a core spinning in sched_yield, which
++     * returns at once on Darwin. After a run of back-to-back yields, sleep a few microseconds between them. */
++    {
++        static __thread unsigned long long last_ns;
++        static __thread unsigned run;
++        struct timespec now; clock_gettime(CLOCK_MONOTONIC, &now);
++        const unsigned long long t = (unsigned long long)now.tv_sec * 1000000000ull + (unsigned long long)now.tv_nsec;
++        run = (t - last_ns < 100000ull) ? run + 1 : 0;
++        last_ns = t;
++        if (run > 32) { struct timespec nap = {0, 40000}; nanosleep(&nap, NULL); }
++        else sched_yield();
++    }
+ #endif
+     return CELL_OK;
+ }

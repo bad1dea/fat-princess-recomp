@@ -1,0 +1,191 @@
+name: iOS build
+
+# iPad/iPhone app: the game built for iOS arm64 with the Vulkan renderer on
+# MoltenVK. Produces an ad-hoc signed IPA for sideloading. Game files are not
+# included; copy game/, elf/ and data/ into the app's Documents (Files app).
+on:
+  workflow_dispatch:
+    inputs:
+      dev:
+        description: "Dev build: with the DEBUG tab, identifies to the server as a dev build (d-), for our own phones only"
+        type: boolean
+        default: false
+      mvk:
+        description: "MoltenVK release tag to bundle (default the pinned one), for A/B tests"
+        type: string
+        default: ""
+      mvk_src:
+        description: "Build MoltenVK from source at this git ref (for example main) instead of the release tarball"
+        type: string
+        default: ""
+      mvk_debug:
+        description: "With mvk_src: build the debug MoltenVK (shader dump and extra logging)"
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    paths: ["src/**", "CMakeLists.txt", "patches/**", "encrypted/**", "ios/**", ".github/**"]
+
+env:
+  SDL_TAG: release-2.32.10
+  SRC_TAG: 0.2.2
+  GLSLANG_TAG: 16.6.0
+  MVK_TAG: ${{ inputs.mvk != '' && inputs.mvk || 'v1.4.2' }}
+  MVK_SRC: ${{ inputs.mvk_src }}
+  MVK_DEBUG: ${{ inputs.mvk_debug }}
+  IOS_MIN: "16.0"
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@v5
+      - name: Select Xcode
+        run: |
+          xc="$(ls -d /Applications/Xcode_*.app 2>/dev/null | sort -V | tail -1)"
+          sudo xcode-select -switch "${xc:-/Applications/Xcode.app}"
+          xcodebuild -version
+      - name: Host tools
+        run: |
+          brew install ninja zstd openssl@3 vulkan-headers
+          echo "$(brew --prefix openssl@3)/bin" >> "$GITHUB_PATH"
+          echo "DEPS=$RUNNER_TEMP/deps-ios" >> "$GITHUB_ENV"
+      - name: Verify Apple capture interfaces
+        run: |
+          c++ -std=c++17 -Werror=format -fsyntax-only src/ios_stall_profile.cpp
+          sdk=$(xcrun --sdk iphoneos --show-sdk-path)
+          xcrun --sdk iphoneos clang++ -std=c++17 -fobjc-arc -x objective-c++ -fsyntax-only -Werror=format -isysroot "$sdk" -target arm64-apple-ios${IOS_MIN} src/ios_lifecycle.mm
+      - name: Verify SPU compile flags
+        run: python3 tests/spu_compile_flags.py
+      - name: Resolve MoltenVK source commit
+        id: mvksrc
+        run: |
+          if [ -n "$MVK_SRC" ]; then
+            sha=$(git ls-remote https://github.com/KhronosGroup/MoltenVK "$MVK_SRC" "refs/heads/$MVK_SRC" "refs/tags/$MVK_SRC" | head -1 | cut -f1)
+            [ -n "$sha" ] || sha="$MVK_SRC"
+            echo "sha=src-$sha" >> "$GITHUB_OUTPUT"
+          else
+            echo "sha=release" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Cache iOS dependencies
+        id: deps
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/deps-ios
+          key: ios-deps-${{ env.SDL_TAG }}-${{ env.GLSLANG_TAG }}-${{ env.MVK_TAG }}-${{ env.IOS_MIN }}-src${{ env.SRC_TAG }}-burst-v1-${{ steps.mvksrc.outputs.sha }}-dbg${{ inputs.mvk_debug }}
+      - name: Build SDL2, glslang and fetch MoltenVK for iOS
+        if: steps.deps.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          ios=(-G Ninja -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_ARCHITECTURES=arm64 -DCMAKE_OSX_DEPLOYMENT_TARGET=$IOS_MIN -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=$DEPS)
+          bash tools/build_ios_audio_deps.sh "$DEPS" "$IOS_MIN"
+          git clone -q --depth 1 -b $GLSLANG_TAG https://github.com/KhronosGroup/glslang.git "$RUNNER_TEMP/glslang"
+          cmake -S "$RUNNER_TEMP/glslang" -B "$RUNNER_TEMP/glslang/b" "${ios[@]}" -DENABLE_OPT=OFF -DGLSLANG_TESTS=OFF \
+            -DENABLE_GLSLANG_BINARIES=OFF -DBUILD_SHARED_LIBS=OFF -DGLSLANG_ENABLE_INSTALL=ON
+          cmake --build "$RUNNER_TEMP/glslang/b" && cmake --install "$RUNNER_TEMP/glslang/b"
+          if [ -n "$MVK_SRC" ]; then
+            git clone -q https://github.com/KhronosGroup/MoltenVK.git "$RUNNER_TEMP/mvk"
+            git -C "$RUNNER_TEMP/mvk" checkout -q "$MVK_SRC"
+            git -C "$RUNNER_TEMP/mvk" log -1 --oneline
+            (cd "$RUNNER_TEMP/mvk" && ./fetchDependencies --ios && if [ "$MVK_DEBUG" = "true" ]; then make ios-debug; else make ios; fi)
+          else
+            curl -sSL -o "$RUNNER_TEMP/mvk.tar" https://github.com/KhronosGroup/MoltenVK/releases/download/$MVK_TAG/MoltenVK-ios.tar
+            mkdir -p "$RUNNER_TEMP/mvk" && tar -xf "$RUNNER_TEMP/mvk.tar" -C "$RUNNER_TEMP/mvk"
+          fi
+          fw=$(find "$RUNNER_TEMP/mvk" -path "*dynamic*" -path "*ios-arm64/*" -name MoltenVK.framework -type d | grep -v simulator | head -1)
+          [ -n "$fw" ] || { find "$RUNNER_TEMP/mvk" -maxdepth 6 | head -60; exit 1; }
+          mkdir -p "$DEPS/Frameworks" && cp -R "$fw" "$DEPS/Frameworks/"
+          ls "$DEPS" "$DEPS/lib" "$DEPS/Frameworks"
+      - uses: ./.github/actions/prepare
+        with:
+          inline-stores: 'true'
+          lift-key: ${{ secrets.FP_LIFT_KEY }}
+          lift-deploy-key: ${{ secrets.FP_LIFT_DEPLOY_KEY }}
+      - name: Verify SPU extended-range arithmetic
+        run: |
+          rt=third_party/ps3recomp/runtime
+          cc -O2 -frounding-math -ffp-contract=off -Ithird_party/ps3recomp/include -I"$rt" "$rt/spu/tests/test_spu_extended_fast.c" -lm -o "$RUNNER_TEMP/spu-extended"
+          "$RUNNER_TEMP/spu-extended"
+          cc -O2 -frounding-math -ffp-contract=off -Ithird_party/ps3recomp/include -I"$rt" "$rt/spu/tests/test_spu_float_neon.c" -lm -o "$RUNNER_TEMP/spu-native"
+          "$RUNNER_TEMP/spu-native"
+      - name: Verify Apple SPU job transfers
+        run: |
+          cc -std=gnu17 -O2 -DFP_SPU_SAVE_SIGNAL_MASK=1 tests/spu_jump.c -o "$RUNNER_TEMP/spu-jump-reference"
+          "$RUNNER_TEMP/spu-jump-reference"
+          cc -std=gnu17 -O2 tests/spu_jump.c -o "$RUNNER_TEMP/spu-jump"
+          "$RUNNER_TEMP/spu-jump"
+          python3 third_party/ps3recomp/tools/test_spu_interpreter_handoff.py
+      - name: Verify Bluetooth burst clock
+        run: |
+          cc -O2 tests/audio_queue_budget.c -o "$RUNNER_TEMP/audio-budget"
+          "$RUNNER_TEMP/audio-budget"
+          cmake -S tests/audio_burst -B "$RUNNER_TEMP/audio-burst" -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="$DEPS/host-audio"
+          cmake --build "$RUNNER_TEMP/audio-burst"
+          "$RUNNER_TEMP/audio-burst/audio_burst_model"
+      - name: Verify bounded stall capture
+        run: |
+          c++ -std=c++17 -O2 tests/stall_trace.cpp -o "$RUNNER_TEMP/stall-trace"
+          "$RUNNER_TEMP/stall-trace"
+      - name: Verify Vulkan descriptor reuse
+        run: |
+          export CPPFLAGS="-I$(brew --prefix vulkan-headers)/include"
+          python3 tests/vulkan_descriptor_cache.py
+          python3 tests/vulkan_buffer_failure.py
+          python3 tests/vulkan_buffer_ownership.py
+      - name: Configure
+        run: |
+          cmake -S . -B build/ios -G Ninja -DCMAKE_SYSTEM_NAME=iOS -DCMAKE_OSX_ARCHITECTURES=arm64 \
+            -DCMAKE_OSX_DEPLOYMENT_TARGET=$IOS_MIN -DCMAKE_BUILD_TYPE=Release -DCMAKE_MACOSX_BUNDLE=OFF -DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DFP_BUILD_GAME=ON -DFP_X86_V3=OFF \
+            -DFP_DEFAULT_SERVER="${{ secrets.FP_SERVER }}" -DFP_DEFAULT_JOIN_URL="${{ secrets.FP_JOIN_URL }}" -DFP_DEBUG_MENU=${{ inputs.dev && 'ON' || 'OFF' }} -DFP_RELEASE_SECRET="${{ inputs.dev && '' || secrets.FP_BUILD_SECRET }}" -DFP_DEV_SECRET="${{ inputs.dev && secrets.FP_DEV_SECRET || '' }}" -DFP_FILES_URL="${{ secrets.FP_FILES_URL }}" -DFP_REPORT_URL="${{ secrets.FP_REPORT_URL }}" \
+            -DSampleRate_DIR="$DEPS/lib/cmake/SampleRate" -DCMAKE_PREFIX_PATH="$DEPS" -DCMAKE_FIND_ROOT_PATH="$DEPS" -DCMAKE_FIND_ROOT_PATH_MODE_PACKAGE=BOTH \
+            -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=BOTH -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=BOTH \
+            -DPS3RECOMP_VULKAN_INCLUDE_DIR="$(brew --prefix vulkan-headers)/include" \
+            -DSPU_DIR="$PWD/private/lift/spu" -DFP_OVERLAY_DIR="$PWD/private/lift/overlays"
+          grep -c fp_ios_prepare build/ios/fp_boot_main.cpp
+          grep -c fp_ios_entry build/ios/fp_boot_main.cpp
+      - name: Verify iOS host loop compilation
+        run: |
+          python3 - <<'PYTEST'
+          import json,shlex,subprocess
+          entries=json.load(open('build/ios/compile_commands.json'))
+          entry=next(e for e in entries if e['file'].endswith('/src/host.cpp'))
+          args=shlex.split(entry['command'])
+          assert '-xobjective-c++' in args and '-fobjc-arc' in args
+          index=args.index('-o');del args[index:index+2]
+          args.remove('-c');args+=['-fsyntax-only','-Werror=format']
+          subprocess.run(args,cwd=entry['directory'],check=True)
+          PYTEST
+      - name: Build
+        run: |
+          set -o pipefail
+          cmake --build build/ios --target MyGameRecomp -j "$(sysctl -n hw.ncpu)" -- -k 0 2>&1 | tee build.log | grep -E "error:|FAILED|Linking" || true
+          find build/ios -name fp_native -type f | grep -q .
+      - name: Error summary
+        if: failure()
+        run: |
+          grep -hE "error:" build.log | sed -E 's#^.*/(third_party|src|private)/#\1/#' | sort | uniq -c | sort -rn | head -80 || true
+          echo "--- linker ---"
+          grep -E "Undefined symbols|referenced from|undefined reference|ld: |duplicate symbol|  \"_" build.log | sort -u | head -150 || true
+      - name: Package IPA
+        run: |
+          set -euo pipefail
+          app="Payload/Fat Princess.app"
+          mkdir -p "$app/Frameworks"
+          cp "$(find build/ios -name fp_native -type f | head -1)" "$app/fp_native"
+          strip -S "$app/fp_native"
+          mkdir -p "$app/licenses"
+          cp "$DEPS/licenses/libsamplerate.txt" "$app/licenses/"
+          cp ios/Info.plist "$app/Info.plist"
+          plutil -replace CFBundleVersion -string "${{ github.run_number }}" "$app/Info.plist"
+          cp -R "$DEPS/Frameworks/MoltenVK.framework" "$app/Frameworks/"
+          codesign --force -s - "$app/Frameworks/MoltenVK.framework"
+          codesign --force -s - --entitlements ios/entitlements.plist "$app"
+          codesign -dv --entitlements - "$app" 2>&1 | tail -6 || true
+          zip -qry FatPrincess.ipa Payload
+          ls -la FatPrincess.ipa
+      - uses: ./.github/actions/seal
+        with:
+          name: fat-princess-ios-ipa
+          path: FatPrincess.ipa
+          key: ${{ secrets.FP_ART_KEY }}

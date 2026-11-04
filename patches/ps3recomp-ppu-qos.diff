@@ -1,0 +1,16 @@
+diff --git a/runtime/syscalls/sys_ppu_thread.c b/runtime/syscalls/sys_ppu_thread.c
+--- a/runtime/syscalls/sys_ppu_thread.c
++++ b/runtime/syscalls/sys_ppu_thread.c
+@@ -506,7 +506,11 @@
+         pthread_attr_init(&attr);
+ #if defined(__APPLE__)
+         /* iOS schedules a thread without a QoS class like background work, often on an efficiency core. */
+-        pthread_attr_set_qos_class_np(&attr, QOS_CLASS_USER_INITIATED, 0);
++        /* Guest game threads get the top class, like the audio threads: when the audio task gets heavy it took a
++         * performance core and the guest tick ran on an efficiency one (tick-to-queue spikes of 25-37 ms in big
++         * fights). FP_PPU_QOS=initiated restores the old class. */
++        { const char* q = getenv("FP_PPU_QOS");
++          pthread_attr_set_qos_class_np(&attr, (q && q[0] == 'i') ? QOS_CLASS_USER_INITIATED : QOS_CLASS_USER_INTERACTIVE, 0); }
+ #endif
+         if (pthread_attr_setstacksize(&attr, PPU_HOST_STACK_BYTES) == 0) {
+             rc = pthread_create(&t->host_thread, &attr, ppu_host_thread_proc, t);

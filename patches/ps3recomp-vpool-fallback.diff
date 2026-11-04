@@ -1,0 +1,26 @@
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -2018,10 +2018,18 @@
+     if (s_vpool_state == 0) {
+         s_vpool_state = -1;
+         const char* e = getenv("RSX_VCACHE_POOL");
+-        if (!(e && *e == '0') &&
+-            !vk_create_host_buffer(&s_vpool, VK_POOL_BYTES, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT) &&
+-            s_vpool.coherent && (s_vpool_class = (u8*)calloc((size_t)(VK_POOL_BYTES >> 8), 1))) s_vpool_state = 1;
+-        VK_LOG("converted-vertex pool: %s\n", s_vpool_state == 1 ? "512 MB host-visible" : "unavailable, using malloc");
++        if (!(e && *e == '0')) {
++            /* A phone may refuse 512 MB in one block (it did: VK_ERROR_OUT_OF_DEVICE_MEMORY, so every draw copied its
++             * vertices). Halve the request until one is granted; draws that miss the pool still fall back to malloc. */
++            for (unsigned long long sz = VK_POOL_BYTES; sz >= (32ull << 20) && s_vpool_state != 1; sz >>= 1) {
++                memset(&s_vpool, 0, sizeof s_vpool);
++                if (vk_create_host_buffer(&s_vpool, sz, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT)) continue;
++                if (s_vpool.coherent && (s_vpool_class = (u8*)calloc((size_t)(sz >> 8), 1))) s_vpool_state = 1;
++                else vk_retire_buffer(&s_vpool);
++            }
++        }
++        VK_LOG("converted-vertex pool: %s (%.0f MB)\n", s_vpool_state == 1 ? "host-visible" : "unavailable, using malloc",
++               s_vpool_state == 1 ? s_vpool.size / 1048576. : 0.);
+     }
+     if (s_vpool_state != 1 || !bytes) return NULL;
+     u32 w = 0;   /* reclaim blocks old enough */

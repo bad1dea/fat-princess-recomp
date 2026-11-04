@@ -1,0 +1,42 @@
+--- a/libs/video/rsx_draw_engine.c	2026-11-03 00:07:56.287750559 -0500
++++ b/libs/video/rsx_draw_engine.c	2026-11-03 00:07:56.278559569 -0500
+@@ -917,7 +917,7 @@
+ 
+ /* Decode a guest texture out of guest memory and hand every face and level to
+  * the backend. Returns the backend handle, or 0. */
+-static u32 eng_texture_upload(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
++static u32 eng_texture_upload_once(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
+                               u32 levels, u32 pitch, int cube, u32 remap)
+ {
+     rsx_tex_level lv[RSX_MAX_TEXTURE_LEVELS];
+@@ -951,6 +951,30 @@
+     }
+     return handle;
+ }
++
++/* RSX_BISECT 65536 (diagnostic): the guest's own threads can write a texture while it is being read. Hash the bytes
++ * before and after the copy and decode again when they changed underneath it (up to three tries). */
++static u32 eng_texture_upload(u32 location, u32 offset, u32 fmt, u32 w, u32 h,
++                              u32 levels, u32 pitch, int cube, u32 remap)
++{
++    static int verify = -1;
++    if (verify < 0) { const char* e = getenv("RSX_BISECT"); verify = e && (atoi(e) & 65536); }
++    if (!verify) return eng_texture_upload_once(location, offset, fmt, w, h, levels, pitch, cube, remap);
++    const u32 span = eng_texture_span(fmt, w, h, levels, pitch, cube);
++    u32 handle = 0;
++    for (int attempt = 0; attempt < 3; attempt++) {
++        int readable = 0, readable2 = 0;
++        const u64 before = eng_texture_content_hash(location, offset, span, &readable);
++        handle = eng_texture_upload_once(location, offset, fmt, w, h, levels, pitch, cube, remap);
++        if (!handle || !readable) return handle;
++        const u64 after = eng_texture_content_hash(location, offset, span, &readable2);
++        if (after == before) return handle;
++        static unsigned torn;
++        if (++torn <= 20 || (torn % 100) == 0) fprintf(stderr, "[tex-torn] %u texture 0x%x+0x%x %ux%u changed during upload (try %d)\n", torn, location, offset, w, h, attempt + 1);
++        if (attempt < 2) { g.be->texture_release(g.be->user, handle); handle = 0; }
++    }
++    return handle;
++}
+ 
+ /* The cache slot for a texture unit's bytes, keyed on where they are and what
+  * the registers say they are. An already-cached entry is re-hashed at most

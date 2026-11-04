@@ -1,0 +1,64 @@
+diff --git a/runtime/spu/spu_helpers.h b/runtime/spu/spu_helpers.h
+--- a/runtime/spu/spu_helpers.h
++++ b/runtime/spu/spu_helpers.h
+@@ -648,6 +648,15 @@
+ SPU__SF_V3(spu__fma_s,  spu__fma_any(x, y, z, 0, 0))
+ SPU__SF_V3(spu__fms_s,  spu__fma_any(x, y, z, 0, 0x80000000u))
+ SPU__SF_V3(spu__fnms_s, spu__fma_any(x, y, z, 0x80000000u, 0))
++/* SPU_FORCE_RZ (the game's lifted images): lifted code only ever runs with the native round-toward-zero mode on, so the
++ * per-op test of g_spu_rz is a constant and the exact-double path drops out of every float op. */
++#ifndef SPU__RZ
++#ifdef SPU_FORCE_RZ
++#define SPU__RZ 1
++#else
++#define SPU__RZ g_spu_rz
++#endif
++#endif
+ #if defined(__ARM_NEON) && !defined(SPU_SCALAR_HELPERS)
+ /* The same fast path four lanes at a time, as two f64x2 halves: widen (exact), operate, clear
+  * the 29 low significand bits, narrow (exact: the value now fits a single). Each lane is judged
+@@ -895,15 +904,15 @@
+     if (__builtin_expect(!spu__nv_all4(ok), 0)) r = spu__fma_fix(r, ok, xa, y, zc, negp, negc);
+     return spu__nv_u128(r);
+ }
+-SPU__NV_INLINE u128 spu_fa(u128 a, u128 b) { return g_spu_rz ? spu__nv_rz_fa(a, b, 0) : spu__nv_fa(a, b, 0); }
+-SPU__NV_INLINE u128 spu_fs(u128 a, u128 b) { return g_spu_rz ? spu__nv_rz_fa(a, b, 0x80000000u) : spu__nv_fa(a, b, 0x80000000u); }
+-SPU__NV_INLINE u128 spu_fm(u128 a, u128 b) { return g_spu_rz ? spu__nv_rz_fm(a, b) : spu__nv_fm(a, b); }
++SPU__NV_INLINE u128 spu_fa(u128 a, u128 b) { return SPU__RZ ? spu__nv_rz_fa(a, b, 0) : spu__nv_fa(a, b, 0); }
++SPU__NV_INLINE u128 spu_fs(u128 a, u128 b) { return SPU__RZ ? spu__nv_rz_fa(a, b, 0x80000000u) : spu__nv_fa(a, b, 0x80000000u); }
++SPU__NV_INLINE u128 spu_fm(u128 a, u128 b) { return SPU__RZ ? spu__nv_rz_fm(a, b) : spu__nv_fm(a, b); }
+ SPU__NV_INLINE u128 spu_fma(u128 a, u128 b, u128 c)  {                                                  /* a*b + c */
+-    return g_spu_rz ? spu__nv_rz_fma(a, b, c, 0, 0) : spu__nv_fma(a, b, c, 0, 0); }
++    return SPU__RZ ? spu__nv_rz_fma(a, b, c, 0, 0) : spu__nv_fma(a, b, c, 0, 0); }
+ SPU__NV_INLINE u128 spu_fms(u128 a, u128 b, u128 c)  {                                                  /* a*b - c */
+-    return g_spu_rz ? spu__nv_rz_fma(a, b, c, 0, 0x80000000u) : spu__nv_fma(a, b, c, 0, 0x80000000u); }
++    return SPU__RZ ? spu__nv_rz_fma(a, b, c, 0, 0x80000000u) : spu__nv_fma(a, b, c, 0, 0x80000000u); }
+ SPU__NV_INLINE u128 spu_fnms(u128 a, u128 b, u128 c) {                                                  /* c - a*b */
+-    return g_spu_rz ? spu__nv_rz_fma(a, b, c, 0x80000000u, 0) : spu__nv_fma(a, b, c, 0x80000000u, 0); }
++    return SPU__RZ ? spu__nv_rz_fma(a, b, c, 0x80000000u, 0) : spu__nv_fma(a, b, c, 0x80000000u, 0); }
+ #elif defined(__AVX2__) && defined(__FMA__) && !defined(SPU_SCALAR_HELPERS)
+ /* x86 form of the NEON fast path above: four lanes widened to f64x4 (exact), operated on, the 29
+  * low significand bits cleared (truncation toward zero) and narrowed back (exact). A lane that is
+@@ -1024,7 +1033,7 @@
+ SPU__X_INLINE u128 spu__x_native_fix(__m128i r, int* ok) {
+     const __m128i e = _mm_and_si128(_mm_srli_epi32(r, 23), _mm_set1_epi32(0xFF));
+     const __m128i big = _mm_cmpgt_epi32(e, _mm_set1_epi32(253));
+-    *ok = _mm_testz_si128(big, big) & g_spu_rz;
++    *ok = _mm_testz_si128(big, big) & SPU__RZ;
+     return spu__x_st(_mm_andnot_si128(_mm_cmpeq_epi32(e, _mm_setzero_si128()), r));
+ }
+ static __attribute__((noinline, cold)) u128 spu__x_fa_slow(u128 a, u128 b, uint32_t negb) { return spu__x_fa(a, b, negb); }
+diff --git a/runtime/spu/spu_channels.c b/runtime/spu/spu_channels.c
+--- a/runtime/spu/spu_channels.c
++++ b/runtime/spu/spu_channels.c
+@@ -255,8 +255,8 @@
+ #elif defined(__aarch64__) && defined(__ARM_NEON) && !defined(SPU_SCALAR_HELPERS)
+     /* The same mode on ARM: FPCR RMode = round toward zero (bits 23:22 = 3), FZ (bit 24). FP_SPU_NATIVE_FLOAT=0
+      * keeps the exact double-precision path instead. */
+-    static int native = -1;
+-    if (native < 0) { const char* e = getenv("FP_SPU_NATIVE_FLOAT"); native = !(e && e[0] == '0'); }
++    /* The lifted images are built with SPU_FORCE_RZ (spu_helpers.h): the native mode is not optional any more. */
++    static int native = 1;
+     uint64_t outer_fpcr;
+     __asm__ volatile("mrs %0, fpcr" : "=r"(outer_fpcr));
+     const int outer_rz = g_spu_rz;

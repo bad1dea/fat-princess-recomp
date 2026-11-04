@@ -1,0 +1,25 @@
+--- a/libs/video/rsx_vulkan_backend.c	2026-11-02 23:49:50.694287712 -0500
++++ b/libs/video/rsx_vulkan_backend.c	2026-11-02 23:49:50.684479073 -0500
+@@ -3686,6 +3686,13 @@
+     /* UNDEFINED -> GENERAL for every level and face before the uploads arrive. */
+     if ((s_begin_reason="vk_eng_texture_create", vk_begin())) goto fail;
+     vk_barrier_image(o->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_UNDEFINED);
++    /* RSX_BISECT 32768: zero every new texture (levels and faces) so unwritten texels cannot show old memory. */
++    if ((vk_bisect() & 32768) && (decode || !bc)) {
++        VkClearColorValue zero = {{0, 0, 0, 0}};
++        VkImageSubresourceRange all = { VK_IMAGE_ASPECT_COLOR_BIT, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS };
++        pvkCmdClearColorImage(s_vk.cmd, o->im.img, VK_IMAGE_LAYOUT_GENERAL, &zero, 1, &all);
++        vk_barrier_image(o->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
++    }
+     if ((s_submit_reason="vk_eng_texture_create", vk_submit_and_wait())) goto fail;
+     return hd;
+ fail:
+@@ -4784,7 +4791,7 @@
+ /* RSX_BISECT (diagnostic, default 0): 1 copy pooled geometry into the slot
+  * buffers, 2 one sampler for every unit, 4 wait for the GPU after each draw,
+  * 8 dummy texture on every unit, 16 magenta instead of 2D lookups (decompiler),
+- * 16384 one texture binding per unit (the cube layout) for 2D programs, 8192 identity view swizzle, 256 barrier the sampled render targets and all memory before each pass; 32 no border wrap, 64 no LOD range, 128 nearest mip filter (sampler creation). */
++ * 32768 zero new textures, 16384 one texture binding per unit (the cube layout) for 2D programs, 8192 identity view swizzle, 256 barrier the sampled render targets and all memory before each pass; 32 no border wrap, 64 no LOD range, 128 nearest mip filter (sampler creation). */
+ static int vk_bisect(void)
+ {
+     static int v=-1;

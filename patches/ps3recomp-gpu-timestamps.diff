@@ -1,0 +1,120 @@
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -549,10 +549,63 @@
+ static uint64_t s_gpu_busy_start, s_gpu_win_start;
+ static double s_gpu_busy_ms, s_gpu_lat_sum, s_gpu_lat_max;
+ static unsigned s_gpu_submits, s_gpu_lat_n;
++/* True GPU time per set: a timestamp as the set's command buffer starts and one as it ends (FP_GPU_TS=0 turns it off). The
++ * submit-to-fence figure above also counts the time the host took to notice the fence, so it cannot tell a slow GPU from a
++ * slow host thread; these can. */
++static VkQueryPool s_ts_pool;
++static double s_ts_ms;            /* milliseconds per timestamp tick */
++static int s_ts_state[VK_ASYNC_SETS];   /* 0 none, 1 start written, 2 both written */
++static double s_ts_sum, s_ts_max;
++static unsigned s_ts_n, s_ts_over25, s_ts_over100;
++static void vk_ts_init(void)
++{
++    const char* e = getenv("FP_GPU_TS");
++    if (e && e[0] == '0') return;
++    u32 n = 0;
++    pvkGetPhysicalDeviceQueueFamilyProperties(s_vk.phys, &n, NULL);
++    if (n == 0 || n > 64 || s_vk.queue_family >= n) return;
++    VkQueueFamilyProperties props[64];
++    pvkGetPhysicalDeviceQueueFamilyProperties(s_vk.phys, &n, props);
++    if (props[s_vk.queue_family].timestampValidBits == 0) { VK_LOG("gpu timestamps: not supported by the queue\n"); return; }
++    VkPhysicalDeviceProperties dp;
++    pvkGetPhysicalDeviceProperties(s_vk.phys, &dp);
++    VkQueryPoolCreateInfo qi = { .sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO,
++                                 .queryType = VK_QUERY_TYPE_TIMESTAMP, .queryCount = 2 * VK_ASYNC_SETS };
++    if (pvkCreateQueryPool(s_vk.device, &qi, NULL, &s_ts_pool) != VK_SUCCESS) { s_ts_pool = VK_NULL_HANDLE; return; }
++    s_ts_ms = (double)dp.limits.timestampPeriod / 1.0e6;
++    VK_LOG("gpu timestamps on (period %.3f ns)\n", (double)dp.limits.timestampPeriod);
++}
++static void vk_ts_begin(unsigned set)
++{
++    if (!s_ts_pool) return;
++    pvkCmdResetQueryPool(s_vk.cmd, s_ts_pool, set * 2, 2);
++    pvkCmdWriteTimestamp(s_vk.cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, s_ts_pool, set * 2);
++    s_ts_state[set] = 1;
++}
++static void vk_ts_end(unsigned set)
++{
++    if (!s_ts_pool || s_ts_state[set] != 1) return;
++    pvkCmdWriteTimestamp(s_vk.cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, s_ts_pool, set * 2 + 1);
++    s_ts_state[set] = 2;
++}
++static void vk_ts_collect(unsigned set)
++{
++    if (!s_ts_pool || s_ts_state[set] != 2) return;
++    s_ts_state[set] = 0;
++    uint64_t t[2];
++    if (pvkGetQueryPoolResults(s_vk.device, s_ts_pool, set * 2, 2, sizeof t, t, sizeof t[0],
++                               VK_QUERY_RESULT_64_BIT) != VK_SUCCESS || t[1] < t[0]) return;
++    const double ms = (double)(t[1] - t[0]) * s_ts_ms;
++    s_ts_sum += ms; s_ts_n++;
++    if (ms > s_ts_max) s_ts_max = ms;
++    if (ms > 25.0) s_ts_over25++;
++    if (ms > 100.0) s_ts_over100++;
++}
+ static void vk_gpu_done(unsigned set)
+ {
+     if (!s_set_counted[set]) return;
+     s_set_counted[set] = 0;
++    vk_ts_collect(set);
+     const uint64_t now = SDL_GetPerformanceCounter(), f = SDL_GetPerformanceFrequency();
+     const double lat = 1000.0 * (double)(now - s_set_submit_t[set]) / (double)f;
+     s_gpu_lat_sum += lat; s_gpu_lat_n++; if (lat > s_gpu_lat_max) s_gpu_lat_max = lat;
+@@ -574,8 +627,11 @@
+     if (win >= 5000.0) {
+         double busy = s_gpu_busy_ms;
+         if (s_gpu_outstanding > 0) { busy += 1000.0 * (double)(now - s_gpu_busy_start) / (double)f; s_gpu_busy_start = now; }
+-        fprintf(stderr, "[gpu-busy] window_ms=%.0f busy_ms=%.0f busy_pct=%.1f submits=%u set_lat_avg_ms=%.2f set_lat_max_ms=%.2f\n",
+-                win, busy, 100.0 * busy / win, s_gpu_submits, s_gpu_lat_n ? s_gpu_lat_sum / s_gpu_lat_n : 0.0, s_gpu_lat_max);
++        fprintf(stderr, "[gpu-busy] window_ms=%.0f busy_ms=%.0f busy_pct=%.1f submits=%u set_lat_avg_ms=%.2f set_lat_max_ms=%.2f"
++                " [gpu-time] sets=%u gpu_ms=%.1f gpu_pct=%.1f set_avg_ms=%.2f set_max_ms=%.2f over25=%u over100=%u\n",
++                win, busy, 100.0 * busy / win, s_gpu_submits, s_gpu_lat_n ? s_gpu_lat_sum / s_gpu_lat_n : 0.0, s_gpu_lat_max,
++                s_ts_n, s_ts_sum, 100.0 * s_ts_sum / win, s_ts_n ? s_ts_sum / s_ts_n : 0.0, s_ts_max, s_ts_over25, s_ts_over100);
++        s_ts_sum = s_ts_max = 0; s_ts_n = s_ts_over25 = s_ts_over100 = 0;
+         s_gpu_busy_ms = 0; s_gpu_lat_sum = s_gpu_lat_max = 0; s_gpu_lat_n = 0; s_gpu_submits = 0; s_gpu_win_start = now;
+     }
+ }
+@@ -718,6 +774,7 @@
+                                .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT };
+         pvkCmdPipelineBarrier(s_vk.cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                               VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
++        vk_ts_begin(s_cur_set);
+     }
+     return 0;
+ }
+@@ -1003,6 +1060,7 @@
+         vk_batch_end_pass();
+         s_batch_recording = 0;
+         const unsigned set = s_cur_set;
++        vk_ts_end(set);
+         VK_CHECK(pvkEndCommandBuffer(s_vk.cmd), "vkEndCommandBuffer");
+         VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+                             .commandBufferCount = 1, .pCommandBuffers = &s_vk.cmd };
+@@ -1044,12 +1102,14 @@
+                            .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT };
+     pvkCmdPipelineBarrier(s_vk.cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
+                           VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
++    vk_ts_begin(s_cur_set);
+     return 0;
+ }
+ /* `si` carries the semaphores (or is NULL); the command buffer and the set's fence are filled in here. */
+ static int vk_submit_async(const VkSubmitInfo* si_in, const char* reason)
+ {
+     const unsigned set = s_cur_set;
++    vk_ts_end(set);
+     VK_CHECK(pvkEndCommandBuffer(s_vk.cmd), "vkEndCommandBuffer");
+     VkSubmitInfo si = { .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO };
+     if (si_in) si = *si_in;
+@@ -5058,6 +5118,7 @@
+     for (unsigned i = 0; i < VK_ASYNC_SETS; i++)
+         VK_CHECK(pvkCreateFence(s_vk.device, &fci, NULL, &s_set_fence[i]), "vkCreateFence(set)");
+     s_cur_set = 0;
++    vk_ts_init();
+ 
+     if (vk_pick_depth_format()) return -1;
+     if (vk_create_image(&s_vk.color, VK_FORMAT_R8G8B8A8_UNORM, s_vk.width, s_vk.height,

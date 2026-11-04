@@ -1,0 +1,44 @@
+diff --git a/libs/video/rsx_stall_trace.h b/libs/video/rsx_stall_trace.h
+index 86820aa..ed2e737 100644
+--- a/libs/video/rsx_stall_trace.h
++++ b/libs/video/rsx_stall_trace.h
+@@ -22,6 +22,7 @@ typedef struct rsx_stall_trace {
+     uint64_t event_count,frames,shader_hits,shader_misses,over50,over100,over250;
+     uint64_t begin;
+     double total_ms,max_ms; uint64_t draws; uint32_t max_draws;
++    double work_sum,work_max,fifo_sum,pace_sum; uint32_t work_hist[16];
+ } rsx_stall_trace;
+ static inline void rsx_stall_record(rsx_stall_trace*t,unsigned kind,uint64_t start,
+     uint64_t end,uint64_t thread,uint32_t flip,uint64_t bytes,uint64_t threshold) {
+@@ -42,9 +43,17 @@ static inline void rsx_stall_frame_add(rsx_stall_trace*t,rsx_stall_frame f) {
+     t->over50+=f.ms>50.;t->over100+=f.ms>100.;t->over250+=f.ms>250.;
+     if(f.ms>t->max_ms)t->max_ms=f.ms;
+     if(f.draws>t->max_draws)t->max_draws=f.draws;
++    if(f.guest>=0){t->work_sum+=f.guest;if(f.guest>t->work_max)t->work_max=f.guest;
++        unsigned b=(unsigned)(f.guest/4.);if(b>15)b=15;t->work_hist[b]++;}
++    if(f.fifo>0)t->fifo_sum+=f.fifo;if(f.pace>0)t->pace_sum+=f.pace;
+     if(f.ms<40.)return;
+     unsigned smallest=0;
+     for(unsigned i=1;i<RSX_STALL_FRAMES;i++)if(t->worst[i].ms<t->worst[smallest].ms)smallest=i;
+     if(f.ms>t->worst[smallest].ms)t->worst[smallest]=f;
+ }
++static inline double rsx_stall_work_p95(const rsx_stall_trace*t){
++    uint64_t n=0;for(int i=0;i<16;i++)n+=t->work_hist[i];if(!n)return 0;
++    uint64_t need=(n*95+99)/100,c=0;for(int i=0;i<16;i++){c+=t->work_hist[i];if(c>=need)return (i+1)*4.;}
++    return 64.;
++}
+ #endif
+diff --git a/libs/video/rsx_vulkan_backend.c b/libs/video/rsx_vulkan_backend.c
+index e2bc24f..80f53e5 100644
+--- a/libs/video/rsx_vulkan_backend.c
++++ b/libs/video/rsx_vulkan_backend.c
+@@ -801,6 +801,9 @@ void rsx_vulkan_backend_stall_frame(uint32_t frame,uint32_t flip,uint32_t draws,
+         (unsigned long long)snapshot.shader_hits,(unsigned long long)snapshot.shader_misses,
+         (unsigned long long)snapshot.event_count,(unsigned long long)(snapshot.event_count>RSX_STALL_EVENTS?snapshot.event_count-RSX_STALL_EVENTS:0),
+         SDL_AtomicSet(&s_stall_dropped,0),(unsigned long long)snapshot.over50,(unsigned long long)snapshot.over100,(unsigned long long)snapshot.over250);
++    if(snapshot.frames){const double n=(double)snapshot.frames,wa=snapshot.work_sum/n;
++        vk_stall_append(&log,"[stall-headroom] work_avg=%.2f work_p95_le=%.0f work_max=%.2f fifo_avg=%.2f pace_avg=%.2f headroom_x30=%.2f (work=guest tick-to-queue ms; headroom=33.3/work_avg)\n",
++            wa,rsx_stall_work_p95(&snapshot),snapshot.work_max,snapshot.fifo_sum/n,snapshot.pace_sum/n,wa>0.01?33.3/wa:0.0);}
+     const uint64_t first_phase=snapshot.phase_count>8?snapshot.phase_count-8:0;
+     for(uint64_t i=first_phase;i<snapshot.phase_count;i++) {
+         const rsx_stall_phase*p=&snapshot.phases[i%8];

@@ -1,0 +1,44 @@
+--- a/libs/video/rsx_vulkan_backend.c	2026-11-02 22:15:38.674081598 -0500
++++ b/libs/video/rsx_vulkan_backend.c	2026-11-02 22:15:38.663839280 -0500
+@@ -4751,7 +4751,7 @@
+ /* RSX_BISECT (diagnostic, default 0): 1 copy pooled geometry into the slot
+  * buffers, 2 one sampler for every unit, 4 wait for the GPU after each draw,
+  * 8 dummy texture on every unit, 16 magenta instead of 2D lookups (decompiler),
+- * 32 no border wrap, 64 no LOD range, 128 nearest mip filter (sampler creation). */
++ * 256 barrier the sampled render targets and all memory before each pass; 32 no border wrap, 64 no LOD range, 128 nearest mip filter (sampler creation). */
+ static int vk_bisect(void)
+ {
+     static int v=-1;
+@@ -4931,6 +4931,19 @@
+      * snapshot, flush, destruction or framebuffer change ends the pass. */
+     if(!keep_pass || !s_batch_renderpass || s_batch_framebuffer!=fb) {
+         vk_batch_end_pass();
++    if (bisect & 256) {
++        /* RSX_BISECT 256: also order earlier passes' writes before this pass samples them. */
++        for (u32 u = 0; u < RSX_MAX_TEXTURES; u++) {
++            if (!((s_e2.tex_mask >> u) & 1u)) continue;
++            const vk_eng_obj* so = vk_eng_get(s_e2.tex[u], VK_ENG_COLOR);
++            if (so && so->im.img) vk_barrier_image(so->im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
++        }
++        VkMemoryBarrier mb = { .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER,
++            .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT,
++            .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT };
++        pvkCmdPipelineBarrier(s_vk.cmd, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
++                              VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
++    }
+     /* Order earlier draws and transfers before attachment reads/writes. */
+     for (u32 i = 0; i < n; i++)
+         vk_barrier_image(s_eobj[s_eng_bound.rt[i]].im.img, VK_IMAGE_ASPECT_COLOR_BIT, VK_IMAGE_LAYOUT_GENERAL);
+@@ -4990,6 +5003,12 @@
+     s_batch_draw = 0;
+     if (slot) s_batch_count = slot_index + 1;
+     if((bisect&4) && vk_flush_at("bisect")) return;
++    if(bisect&512) {   /* RSX_BISECT 512: wait for the GPU only after draws that sample a render target */
++        int rt=0;
++        for (u32 u = 0; u < RSX_MAX_TEXTURES; u++)
++            if (((s_e2.tex_mask >> u) & 1u) && vk_eng_get(s_e2.tex[u], VK_ENG_COLOR)) rt=1;
++        if (rt && vk_flush_at("bisect-rt")) return;
++    }
+ }
+ 
+ static const rsx_draw_backend s_vk_engine_backend = {
