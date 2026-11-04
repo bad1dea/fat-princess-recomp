@@ -58,6 +58,7 @@ extern "C" int g_audio_limiter;
 extern "C" int g_voice_enabled, g_voice_volume, g_voice_mic_gain, g_voice_ptt;
 extern "C" volatile int g_fp_pad_blocked;
 
+extern "C" uint8_t* vm_base;   // the guest arena
 namespace {
 enum class Kind { Toggle, Choice, Text, Secret, Key, Action, Command, Submenu, Runtime };
 
@@ -506,8 +507,38 @@ std::string startup_name;        // the online name this run started with
 long long restart_at_ms = 0;     // when to restart; 0: not planned
 long long steady_ms() { return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch()).count(); }
 bool test_run() { if (std::getenv("FP_RESTART_TEST")) return false; return std::getenv("FP_ACCOUNT_AUTO") || std::getenv("FP_CMD_FILE") || std::getenv("FP_SET_FILE"); }   // test tools keep their own process
+
+// The game keeps the player name once, as big-endian 16-bit text in its own memory (found with FP_FIND_WIDE=be). Rewriting it
+// there changes the name everywhere the game shows or sends it; the network identity is changed separately.
+size_t rename_in_guest(const std::string& from, const std::string& to) {
+    if (!vm_base || from.empty() || to.empty() || to.size() > 16 || from.size() > 16) return 0;
+    std::string pattern;
+    for (char c : from) { pattern += '\0'; pattern += c; }
+    const size_t span = 0x50000000ull, n = pattern.size();
+    size_t hits = 0;
+    for (size_t at = 1; at + n < span;) {
+        const void* found = std::memchr(vm_base + at, from[0], span - at - n);
+        if (!found) break;
+        const size_t pos = static_cast<const uint8_t*>(found) - vm_base - 1;   // the zero byte before the first letter
+        at = pos + 2;
+        if (std::memcmp(vm_base + pos, pattern.data(), n) != 0) continue;
+        if (vm_base[pos + n] != 0 || vm_base[pos + n + 1] != 0) continue;      // a whole string: wide terminator follows
+        const size_t room = std::max(from.size(), to.size()) + 1;               // characters, with the terminator
+        for (size_t i = 0; i < room; ++i) { vm_base[pos + 2 * i] = 0; vm_base[pos + 2 * i + 1] = i < to.size() ? (uint8_t)to[i] : 0; }
+        ++hits;
+    }
+    return hits;
+}
+
 void restart_if_name_changed(const std::string& new_name) {
     if (startup_name.empty() || new_name == startup_name || test_run() || restart_at_ms) return;
+    if (rename_in_guest(startup_name, new_name) > 0) {   // changed in place: nothing to restart
+        std::printf("[fp-name] %s -> %s changed in the game's memory\n", startup_name.c_str(), new_name.c_str());
+        startup_name = new_name;
+        notice = "NAME CHANGED";
+        dirty = true;
+        return;
+    }
     restart_at_ms = steady_ms() + 3500;
 #if defined(__APPLE__) && TARGET_OS_IOS
     notice = "CLOSING. OPEN THE GAME AGAIN";   // an iPhone app cannot start itself again
@@ -1781,6 +1812,19 @@ void settings_stats_set(bool value) {
 extern "C" void fp_restart_game(void);
 bool settings_menu_frame(std::string& panel) {
     if (restart_at_ms && steady_ms() >= restart_at_ms) { save(); fp_restart_game(); restart_at_ms = 0; }
+#ifdef FP_DEBUG_MENU
+    {   // tests: FP_TEST_RENAME=name with FP_TEST_RENAME_AT_S=n rewrites the game's player name n seconds in
+        static const char* to = std::getenv("FP_TEST_RENAME");
+        static const double at = std::getenv("FP_TEST_RENAME_AT_S") ? std::atof(std::getenv("FP_TEST_RENAME_AT_S")) : 100.;
+        static const long long t0 = steady_ms();
+        static bool done = false;
+        if (to && !done && steady_ms() - t0 >= at * 1000) {
+            done = true;
+            const size_t hits = rename_in_guest(startup_name, to);
+            std::printf("[fp-name] test rename %s -> %s: %zu place(s)\n", startup_name.c_str(), to, hits);
+        }
+    }
+#endif
     network_poll();
     static bool open_from_env = std::getenv("FP_SETTINGS_OPEN") != nullptr;
     if (open_from_env) { open_from_env = false; if (!is_open) settings_menu_toggle(); }
