@@ -628,12 +628,22 @@ extern "C" void fp_backend_present(void) {
         static const double at=std::getenv("FP_FIND_AT_S") ? std::atof(std::getenv("FP_FIND_AT_S")) : 60.;
         static const auto t0=Clock::now();static bool done=false;
         if(find && !done && std::chrono::duration<double>(Clock::now()-t0).count()>=at) {
-            done=true;extern uint8_t* vm_base;const size_t n=std::strlen(find);unsigned hits=0;
-            for(uint64_t a=0;a<0x50000000ull && hits<40;a+=1) {
-                if(std::memcmp(vm_base+a,find,n)==0 && (!std::getenv("FP_FIND_EXACT") || (a>0 && vm_base[a-1]==0 && vm_base[a+n]==0))) {
-                    ++hits;std::fprintf(stderr,"[fp-find] \"%s\" at 0x%08llX  ctx: ",find,(unsigned long long)a);
-                    for(int k=-8;k<24;++k){unsigned char c=vm_base[a+k];std::fputc(c>=32&&c<127?c:'.',stderr);}
-                    std::fputc('\n',stderr);
+            done=true;extern uint8_t* vm_base;
+            // FP_FIND_WIDE=be|le also looks for the text as 16-bit characters (the PS3 convention is big endian).
+            std::vector<std::string> patterns{find};
+            if(const char* w=std::getenv("FP_FIND_WIDE")) {
+                std::string wide;for(const char* c=find;*c;++c){if(!std::strcmp(w,"le")){wide+=*c;wide+='\0';}else{wide+='\0';wide+=*c;}}
+                patterns.push_back(wide);
+            }
+            unsigned hits=0;
+            for(const auto& pattern:patterns) {
+                const size_t n=pattern.size();
+                for(uint64_t a=0;a<0x50000000ull && hits<80;a+=1) {
+                    if(std::memcmp(vm_base+a,pattern.data(),n)==0 && (!std::getenv("FP_FIND_EXACT") || (a>0 && vm_base[a-1]==0 && vm_base[a+n]==0))) {
+                        ++hits;std::fprintf(stderr,"[fp-find] %s \"%s\" at 0x%08llX  ctx: ",&pattern==&patterns[0]?"ascii":"wide",find,(unsigned long long)a);
+                        for(int k=-8;k<40;++k){unsigned char c=vm_base[a+k];std::fputc(c>=32&&c<127?c:'.',stderr);}
+                        std::fputc('\n',stderr);
+                    }
                 }
             }
             std::fprintf(stderr,"[fp-find] %u hits\n",hits);
