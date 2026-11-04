@@ -755,7 +755,17 @@ enum Nav { UP, DOWN, LEFT, RIGHT, OK, BACK, TAB_PREV, TAB_NEXT, NAV_COUNT };
 
 struct Edge {
     bool prev[SDL_NUM_SCANCODES] = {false};
+    std::atomic<int> injected[SDL_NUM_SCANCODES] = {};
+    // The phone's keyboard sends Delete and Return as a press that is released in the same event batch, so the key state
+    // never shows them down. Those two come from the event stream instead (see text_event).
+    void inject(SDL_Scancode s) { injected[s].store(1); }
     bool down(SDL_Scancode s, const Uint8* keys) {
+#if defined(__APPLE__) && TARGET_OS_IOS
+        if (s == SDL_SCANCODE_BACKSPACE || s == SDL_SCANCODE_RETURN || s == SDL_SCANCODE_KP_ENTER) {
+            prev[s] = keys[s] != 0;
+            return injected[s].exchange(0) != 0;
+        }
+#endif
         const bool now = keys[s] != 0;
         const bool pressed = now && !prev[s];
         prev[s] = now;
@@ -1055,6 +1065,12 @@ void activate(Item* it) {
 std::mutex text_mutex;
 std::string pending_text;
 int text_event(void*, SDL_Event* event) {
+#if defined(__APPLE__) && TARGET_OS_IOS
+    if(event->type==SDL_KEYDOWN) {
+        const SDL_Scancode sc=event->key.keysym.scancode;
+        if(sc==SDL_SCANCODE_BACKSPACE || sc==SDL_SCANCODE_RETURN || sc==SDL_SCANCODE_KP_ENTER) keyedge.inject(sc);
+    }
+#endif
     if(event->type==SDL_TEXTINPUT) {
         std::lock_guard<std::mutex> lock(text_mutex);
         if(pending_text.size()<512) pending_text+=event->text.text;
@@ -1377,7 +1393,9 @@ bool osk_frame(std::string& panel, const Uint8* keys, bool focused) {
     if (osk.cx >= now_cols) osk.cx = now_cols - 1;
     if (edge[2]) { osk.cx = (osk.cx + now_cols - 1) % now_cols; dirty = true; }
     if (edge[3]) { osk.cx = (osk.cx + 1) % now_cols; dirty = true; }
-    if (edge[4]) osk_press();
+#if !(defined(__APPLE__) && TARGET_OS_IOS)
+    if (edge[4]) osk_press();   // on the phone the system keyboard types; there is no key grid to press
+#endif
     if (edge[7]) osk_backspace();
     if (triangle_edge) { osk.upper = !osk.upper; dirty = true; }
     if (edge[6]) { osk_finish(false); return true; }
@@ -1928,6 +1946,9 @@ KeyboardView settings_keyboard_view() {
     view.row=osk.cy;view.column=osk.cx;view.upper=osk.upper;view.symbols=osk.symbols;
     auto prompt=osk.prompt;for(char& c:prompt)c=char(std::toupper(static_cast<unsigned char>(c)));
     view.secret=prompt.find("PASSWORD")!=std::string::npos;
+#if defined(__APPLE__) && TARGET_OS_IOS
+    view.compact=true;   // the system keyboard is up: show only the prompt and the text
+#endif
     view.controls=controller_hints ? format_prompts("CROSS SELECT   CIRCLE DELETE   TRIANGLE SHIFT   START DONE",true)
                                  : "ARROWS MOVE   ENTER SELECT   BACKSPACE DELETE";
     view.hint=controller_hints ? format_prompts("L1/R1 SYMBOLS   CIRCLE DELETE/BACK",true)

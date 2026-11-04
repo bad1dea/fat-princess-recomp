@@ -858,7 +858,7 @@ extern "C" int fp_backend_pump_messages(void) {
             // the on-screen keyboard: larger glyphs, bottom centre, so the game's own text field stays visible
             const bool osk=fp::settings_osk_active(), trophies=fp::trophy_ui_active();
 #if defined(__APPLE__) && TARGET_OS_IOS
-            fp_set_overlay_anchor(osk ? 1 : 2);   // centre menus inside the safe area
+            fp_set_overlay_anchor(osk ? 0 : 2);   // centre menus inside the safe area; the text bar sits at the top, above the keyboard
 #else
             fp_set_overlay_anchor(osk?1:trophies?2:0);   // 2: centred (trophy screens)
 #endif

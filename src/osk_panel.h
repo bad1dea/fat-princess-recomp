@@ -13,6 +13,7 @@ struct KeyboardView {
     unsigned limit=4;
     int row=1, column=0;
     bool upper=true, symbols=false, secret=false;
+    bool compact=false;   // title and text only (the phone's own keyboard does the typing)
 };
 struct KeyboardKey { int x,y,w,h,row,column; std::string label; };
 inline std::array<std::string_view,4> keyboard_rows(bool symbols) {

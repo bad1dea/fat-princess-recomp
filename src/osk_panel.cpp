@@ -144,6 +144,11 @@ std::vector<uint8_t> keyboard_pixels(const KeyboardView& view,unsigned& width,un
         while(c.text_width(visible,28)>830 && !visible.empty())visible.erase(0,1);
         c.text(visible,48,108,28,ink);c.box(50+int(c.text_width(visible,28)),84,2,29,accent);
     }
+    if(view.compact) {
+        const unsigned rows=145;
+        c.rgba.resize(size_t(c.w)*rows*4);height=rows;
+        return std::move(c.rgba);
+    }
     const bool full=view.text.size()>=view.limit;
     for(const auto& key:keyboard_keys(view)) {
         const bool selected=key.row==view.row && key.column==view.column;
