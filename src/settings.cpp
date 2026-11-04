@@ -507,6 +507,7 @@ std::string status_text() {
 // The token replaces the password in the ini; the name becomes the online name from the next launch on.
 void signed_in(const std::string& name, const std::string& token) {
     find("account_user")->value = name;
+    find("name")->value = name;   // the player name follows the account (the game reads it at its next start)
     find("account_token")->value = token;
     find("tmp_pw")->value.clear();
     find("tmp_newpw")->value.clear();
@@ -687,7 +688,9 @@ void export_environment() {
     if (on("online")) {
         set("PS3_NET_ONLINE", "1");
         set("PSNR_SERVER", find("server")->value);
-        set("PS3_NP_ONLINE_ID", find("name")->value);
+        // A signed-in account's name is the online name; the server refuses a hello whose name is not the account's.
+        const bool account=!account_name().empty() && !find("account_token")->value.empty();
+        set("PS3_NP_ONLINE_ID", account ? account_name() : find("name")->value);
         set("PS3_NP_COMM_ID", "NPWR00737_00");   // the game asks for its friends before Matching2 starts
         set("PS3_NET_P2P_PORT", find("p2p_port")->value);
     }
