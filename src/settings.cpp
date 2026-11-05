@@ -721,7 +721,11 @@ void export_environment() {
     set("PS3_NP_BUILD_ID", FP_BUILD_ID);
     set("PS3_NP_BUILD_SECRET", FP_BUILD_SECRET);
 #endif
-    if (on("online") && !account_name().empty() && !find("account_token")->value.empty()) {
+    // Tests: FP_TEST_LATE_ACCOUNT=1 starts as if the saved account were not loaded yet (what the phone's log showed).
+    static bool first_export = true;
+    const bool late_account = first_export && std::getenv("FP_TEST_LATE_ACCOUNT") != nullptr;
+    first_export = false;
+    if (on("online") && !late_account && !account_name().empty() && !find("account_token")->value.empty()) {
         set("PS3_NP_ACCOUNT_TOKEN", find("account_token")->value);
         set("PS3_NP_ONLINE_ID", account_name());
     }
@@ -733,7 +737,7 @@ void export_environment() {
     }
     {   // The player name, online or not. A signed-in account's name is the online name: the server refuses a hello whose
         // name is not the account's.
-        const bool account=!account_name().empty() && !find("account_token")->value.empty();
+        const bool account=!late_account && !account_name().empty() && !find("account_token")->value.empty();
         set("PS3_NP_ONLINE_ID", account ? account_name() : find("name")->value);
         startup_name = account ? account_name() : find("name")->value;
     }
