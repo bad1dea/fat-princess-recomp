@@ -207,6 +207,7 @@ void fp_menu_echo(ppu_context* ctx) {
         const bool anon = std::getenv("FP_ALLOW_ANON") && std::getenv("FP_ALLOW_ANON")[0] == '1';
         const bool online = settings_get("online") == "ON";
         const bool need = online && !anon && settings_account().empty();
+        if (online && !need) settings_online_prepare();
         g_replies.push_back(std::string("sym set FpNeedLogin ") + (need ? "1" : "0"));
         std::printf("[fp-menu] gate: online=%d account=%s -> %s\n", online, settings_account().empty() ? "none" : "yes", need ? "sign-in page" : "connect");
     } else if (verb == "act" && t.size() >= 4) {

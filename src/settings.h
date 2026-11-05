@@ -30,6 +30,7 @@ bool settings_text_entry(const char* id);   // open the keyboard for a text item
 bool settings_text_active();
 bool settings_text_set(const char* id, const std::string& value);
 bool settings_command(const char* id);   // cmd_login, cmd_register, cmd_logout, as if chosen on the ACCOUNT page
+void settings_online_prepare();           // before connecting as the signed-in account: token, name and server in place, an earlier failed attempt forgotten
 bool settings_restart_planned();           // the game is about to restart to use a new name
 std::string settings_account();          // signed-in account name, empty when signed out
 std::string settings_notice();           // last result line of an account request

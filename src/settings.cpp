@@ -1771,6 +1771,19 @@ bool settings_command(const char* id) {
 }
 std::string settings_account() { init_items(); return account_name(); }
 bool settings_restart_planned() { return restart_planned(); }
+// Play With Others is about to connect with a signed-in account. The start-up connection may have gone out before the saved
+// account was in place (as "Player", without a token, and been refused), so line everything up again: server, token, name
+// (also inside the game, which read it at start) and forget that failed attempt.
+void settings_online_prepare() {
+    init_items();
+    if (account_name().empty() || find("account_token")->value.empty() || !on("online")) return;
+    apply_network();
+    set_env("PS3_NP_ACCOUNT_TOKEN", find("account_token")->value);
+    np_psnr_set_identity(account_name().c_str());
+    restart_if_name_changed(account_name());
+    np_psnr_reset();
+    std::printf("[fp-menu] online prepared for %s\n", account_name().c_str());
+}
 std::string settings_notice() { return notice; }
 bool settings_busy() { return network_busy(); }
 bool settings_open_url(const char* id, const std::string& query) {
