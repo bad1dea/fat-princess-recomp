@@ -11,7 +11,8 @@ R"FPM(set RenderCB_Text FpFatOptions
 R"FPM(set CommandPress "if !demo menuCmd FEOnlineStore"
 set CommandPress "if demo menuCmd FEOnlineStore"
 )FPM",
-R"FPM(set CommandPress "gameUI focusName DummyObject"
+R"FPM(set CommandPress "sym set FpHubReturn options"
+set CommandPress "gameUI focusName DummyObject"
 set CommandPress "addUIAnim $MenuBackgroundObject mas_BackBarLeft"
 set CommandPress "sym set MenuToHide MenuOptionsMaster"
 set CommandPress "sym set MenuToShow MenuFpHubMaster"
@@ -92,21 +93,182 @@ cmd "echo fp gate"
 cmd "pcmd 0.15 menuCmd FpOnlineCheck2"
 }
 )FPM"},
-    {"data/gamescripts/menufinal/menumain.txt",
-R"FPM(set CommandGetFocus "sym set InNetMenu false"
-set CommandCancel "gameUI focusName DummyObject"
-set CommandCancel "menuCmd MenuMainCancel"
-set CommandPress "gameUI focusName DummyObject"
-set CommandPress "menuCmd FEOnlineCheck"
+    {"data/gamescripts/menufinal/menuoptionsl2.txt",
+R"FPM(set Focus 273 FocusUp 272
 )FPM",
-R"FPM(set CommandGetFocus "sym set InNetMenu false"
-set CommandGetFocus "sym set FpNeedName 0"
-set CommandGetFocus "echo fp namecheck"
-set CommandGetFocus "pcmd 0.25 menuCmd FpNameMaybe"
+R"FPM(set Focus 273 FocusUp 272 FocusDown 9190
+)FPM"},
+    {"data/gamescripts/menufinal/menuoptionsl2.txt",
+R"FPM(add MenuObject
+set Name MenuOptionsL2Master
+set ContainerOnly 1
+set Coords "0 0 768 522"
+)FPM",
+R"FPM(add MenuObject
+set Name MenuFpL2FatOptions
+set AutoSizing mainBoxes
+set Texture menus\MenuTextBoxes
+set Coords "576 86 416 83" CoordsFocused "578 2 416 83"
+set Focus 9190 FocusUp 273
+set Layer 2
+set RenderCB _DrawUText
+set RenderCBExcludesDefaultRender 0
+set DrawWhenFocused MenuMainArrow DrawWhenFocusedOffset "-60 0 0"
+set RenderCB_DX 0 RenderCB_DY 0
+set RenderCB_FontName FatPrincessBold
+set RenderCB_RGBColor "1.00 0.89 0.46" RenderCB_RGBColorFocused "1 1 1"
+set RenderCB_FontScale 1.0
+set RenderCB_Offset "20 12" RenderCB_OffsetFocused "18 10"
+set RenderCB_Text FpFatOptions
+set RenderCB_FloatArg 2000.0
+set CommandPress "log Press_MenuFpL2FatOptions"
+set CommandCancel "log Cancel_MenuFpL2FatOptions"
+set CommandGetFocus "sym set MenuMemoryOptionsL2 MenuFpL2FatOptions"
+set CommandGetFocus "sym set MenuMemoryGlobal MenuFpL2FatOptions"
 set CommandCancel "gameUI focusName DummyObject"
-set CommandCancel "menuCmd MenuMainCancel"
+set CommandCancel "menuCmd MenuOptionsL2Cancel"
+set CommandLoseFocus "playSound MenuSelect"
+set CommandPress "sym set FpHubReturn l2"
 set CommandPress "gameUI focusName DummyObject"
-set CommandPress "menuCmd FEOnlineCheck"
+set CommandPress "addUIAnim $MenuBackgroundObject mas_BackBarLeft"
+set CommandPress "sym set MenuToHide MenuOptionsL2Master"
+set CommandPress "sym set MenuToShow MenuFpHubMaster"
+set CommandPress "menuCmd MenuBackgroundSize5"
+set CommandPress "addUIAnim $$MenuToHide mas_MenuLeft"
+set CommandPress "addUIAnim $$MenuToShow mas_MenuCenter"
+set CommandPress "pCmd 0.2 gameUI focusName MenuFpHubAccount"
+set CommandPress "playSound MenuChoose"
+add MenuObject
+set Name MenuOptionsL2Master
+set ContainerOnly 1
+set Coords "0 0 768 612"
+)FPM"},
+    {"data/gamescripts/menufinal/menuoptionsl2.txt",
+R"FPM(set Child "MenuOptionsL2Visual 0 370"
+)FPM",
+R"FPM(set Child "MenuOptionsL2Visual 0 370"
+set Child "MenuFpL2FatOptions 0 460"
+)FPM"},
+    {"data/gamescripts/menufinal/menuingame.txt",
+R"FPM(set CommandPress "menuCmd MenuBackgroundSize4"
+set CommandPress "sym set MenuToHide $MenuIngameCurrentMaster"
+set CommandPress "sym set MenuToShow MenuOptionsL2Master"
+)FPM",
+R"FPM(set CommandPress "menuCmd MenuBackgroundSize5"
+set CommandPress "sym set MenuToHide $MenuIngameCurrentMaster"
+set CommandPress "sym set MenuToShow MenuOptionsL2Master"
+)FPM"},
+    {"data/gamescripts/menufinal/menuoptions.txt",
+R"FPM(set CommandPress "sym set MenuToHide MenuOptionsMaster"
+set CommandPress "sym set MenuToShow MenuOptionsL2Master"
+)FPM",
+R"FPM(set CommandPress "sym set MenuToHide MenuOptionsMaster"
+set CommandPress "sym set MenuToShow MenuOptionsL2Master"
+set CommandPress "menuCmd MenuBackgroundSize5"
+)FPM"},
+    {"data/gamescripts/menucmds.txt",
+R"FPM(Script MenuControlsCancel {
+cmd "log MenuCmd: MenuControlsCancel"
+cmd "sym set MenuToHide MenuControlsMaster"
+cmd "sym set MenuToShow MenuOptionsL2Master"
+cmd "addUIAnim $$MenuToShow mas_MenuCenter"
+cmd "addUIAnim $$MenuToHide mas_MenuRight"
+cmd "menuCmd MenuBackgroundSize4"
+cmd "pcmd 0.2 gameUI focusName MenuOptionsL2Controls"
+cmd "menuCmd LocalSettingsSaveIfDirty"
+cmd "addUIAnim $MenuBackgroundObject mas_BackBarRight"
+}
+)FPM",
+R"FPM(Script MenuControlsCancel {
+cmd "log MenuCmd: MenuControlsCancel"
+cmd "sym set MenuToHide MenuControlsMaster"
+cmd "sym set MenuToShow MenuOptionsL2Master"
+cmd "addUIAnim $$MenuToShow mas_MenuCenter"
+cmd "addUIAnim $$MenuToHide mas_MenuRight"
+cmd "menuCmd MenuBackgroundSize5"
+cmd "pcmd 0.2 gameUI focusName MenuOptionsL2Controls"
+cmd "menuCmd LocalSettingsSaveIfDirty"
+cmd "addUIAnim $MenuBackgroundObject mas_BackBarRight"
+}
+)FPM"},
+    {"data/gamescripts/menucmds.txt",
+R"FPM(Script MenuAudioCancel {
+cmd "log MenuCmd: MenuAudioCancel"
+cmd "gameUI focusName DummyObject"
+cmd "menuCmd LocalSettingsSaveIfDirty"
+cmd "menuCmd MenuBackgroundSize4"
+cmd "sym set MenuToHide MenuAudioMaster"
+cmd "sym set MenuToShow MenuOptionsL2Master"
+cmd "addUIAnim $$MenuToShow mas_MenuCenter"
+cmd "addUIAnim $$MenuToHide mas_MenuRight"
+cmd "pcmd 0.2 gameUI focusName MenuOptionsL2Audio"
+cmd "addUIAnim $MenuBackgroundObject mas_BackBarRight"
+}
+)FPM",
+R"FPM(Script MenuAudioCancel {
+cmd "log MenuCmd: MenuAudioCancel"
+cmd "gameUI focusName DummyObject"
+cmd "menuCmd LocalSettingsSaveIfDirty"
+cmd "menuCmd MenuBackgroundSize5"
+cmd "sym set MenuToHide MenuAudioMaster"
+cmd "sym set MenuToShow MenuOptionsL2Master"
+cmd "addUIAnim $$MenuToShow mas_MenuCenter"
+cmd "addUIAnim $$MenuToHide mas_MenuRight"
+cmd "pcmd 0.2 gameUI focusName MenuOptionsL2Audio"
+cmd "addUIAnim $MenuBackgroundObject mas_BackBarRight"
+}
+)FPM"},
+    {"data/gamescripts/menucmds.txt",
+R"FPM(Script MenuVideoCancel {
+cmd "log MenuCmd: MenuVideoCancel"
+cmd "gameUI focusName DummyObject"
+cmd "menuCmd LocalSettingsSaveIfDirty"
+cmd "menuCmd MenuBackgroundSize4"
+cmd "sym set MenuToHide MenuVideoMaster"
+cmd "sym set MenuToShow MenuOptionsL2Master"
+cmd "addUIAnim $$MenuToShow mas_MenuCenter"
+cmd "addUIAnim $$MenuToHide mas_MenuRight"
+cmd "pcmd 0.2 gameUI focusName MenuOptionsL2Visual"
+cmd "addUIAnim $MenuBackgroundObject mas_BackBarRight"
+}
+)FPM",
+R"FPM(Script MenuVideoCancel {
+cmd "log MenuCmd: MenuVideoCancel"
+cmd "gameUI focusName DummyObject"
+cmd "menuCmd LocalSettingsSaveIfDirty"
+cmd "menuCmd MenuBackgroundSize5"
+cmd "sym set MenuToHide MenuVideoMaster"
+cmd "sym set MenuToShow MenuOptionsL2Master"
+cmd "addUIAnim $$MenuToShow mas_MenuCenter"
+cmd "addUIAnim $$MenuToHide mas_MenuRight"
+cmd "pcmd 0.2 gameUI focusName MenuOptionsL2Visual"
+cmd "addUIAnim $MenuBackgroundObject mas_BackBarRight"
+}
+)FPM"},
+    {"data/gamescripts/menucmds.txt",
+R"FPM(Script MenuSettingsCancel {
+cmd "log MenuCmd: MenuSettingsCancel"
+cmd "sym set MenuToHide MenuSettingsMaster"
+cmd "sym set MenuToShow MenuOptionsL2Master"
+cmd "addUIAnim $$MenuToShow mas_MenuCenter"
+cmd "addUIAnim $$MenuToHide mas_MenuRight"
+cmd "menuCmd LocalSettingsSaveIfDirty"
+cmd "menuCmd MenuBackgroundSize4"
+cmd "pcmd 0.2 gameUI focusName MenuOptionsL2Game"
+cmd "addUIAnim $MenuBackgroundObject mas_BackBarRight"
+}
+)FPM",
+R"FPM(Script MenuSettingsCancel {
+cmd "log MenuCmd: MenuSettingsCancel"
+cmd "sym set MenuToHide MenuSettingsMaster"
+cmd "sym set MenuToShow MenuOptionsL2Master"
+cmd "addUIAnim $$MenuToShow mas_MenuCenter"
+cmd "addUIAnim $$MenuToHide mas_MenuRight"
+cmd "menuCmd LocalSettingsSaveIfDirty"
+cmd "menuCmd MenuBackgroundSize5"
+cmd "pcmd 0.2 gameUI focusName MenuOptionsL2Game"
+cmd "addUIAnim $MenuBackgroundObject mas_BackBarRight"
+}
 )FPM"},
     {"data/menus/menumaster.txt",
 R"FPM(MO MenuSettingsMaster {
@@ -1592,21 +1754,6 @@ set CommandLoseFocus "playSound MenuSelect"
 set CommandPress "echo fp text name"
 set CommandPress "playSound MenuChoose"
 add MenuObject
-set Name MenuFpPnameNameValue
-set Texture menus\MenuTextBoxes
-set Coords "630 340 360 85" CoordsFocused "630 852 360 85"
-set Layer 2
-set RenderCB _DrawText
-set RenderCBExcludesDefaultRender 0
-set RenderCB_DX 0 RenderCB_DY 0
-set RenderCB_FontName FatPrincessBold
-set RenderCB_RGBColor "1.00 0.89 0.46" RenderCB_RGBColorFocused "1 1 1"
-set RenderCB_FontScale 1.0
-set RenderCB_Offset "20 12" RenderCB_OffsetFocused "18 10"
-set RenderCB_ConsoleSymbol FpV_pname
-set RenderCB_FloatArg 2000.0
-set DisabledAlpha 1.0
-add MenuObject
 set Name MenuFpPnameDone
 set AutoSizing mainBoxes
 set Texture menus\MenuTextBoxes
@@ -1653,7 +1800,6 @@ set ContainerOnly 1
 set Coords "0 0 768 432"
 set Child "MenuFpPnameLabel -30 10"
 set Child "MenuFpPnameName 0 100"
-set Child "MenuFpPnameNameValue 437 100"
 set Child "MenuFpPnameDone 0 190"
 set Child "MenuFpPnameNote 0 280"
 set Anchor Center
@@ -1693,8 +1839,7 @@ set Layer 2
 set RenderCB _DrawText
 set RenderCBExcludesDefaultRender 1
 set RenderCB_DX 0
-set Render)FPM"
-R"FPM(CB_DY 0
+set RenderCB_DY 0
 set RenderCB_FontName Boopee
 set RenderCB_RGBColor "0.35 0.23 0.07"
 set RenderCB_FontScale 0.62
@@ -1708,7 +1853,8 @@ set DrawWhenFocused MenuMainArrow DrawWhenFocusedOffset "-52 2 0"
 set RenderCB_RGBColorFocused "0.85 0.45 0.0"
 set CommandGetFocus "sym set MenuMemoryFpTrophy FpTrophyRow0"
 set CommandGetFocus "echo fp trophy focus 0"
-set CommandGetFocus "menuCmd FpTrophyIconShow"
+set CommandGetFocus "menuCmd FpTrophyIco)FPM"
+R"FPM(nShow"
 set CommandCancel "gameUI focusName DummyObject"
 set CommandCancel "menuCmd FpTrophyCancel"
 set CommandLoseFocus "playSound MenuSelect"
@@ -1861,8 +2007,7 @@ set CommandCancel "menuCmd FpTrophyCancel"
 set CommandLoseFocus "playSound MenuSelect"
 set CommandFocusRight "echo fp trophy page 1"
 set CommandFocusRight "menuCmd BookAnimPageNext"
-set CommandFocusRight "pcmd 0)FPM"
-R"FPM(.3 gameUI focusName FpTrophyRow0"
+set CommandFocusRight "pcmd 0.3 gameUI focusName FpTrophyRow0"
 set CommandFocusRight "playSound MenuPageTurn"
 set CommandFocusLeft "echo fp trophy page -1"
 set CommandFocusLeft "menuCmd BookAnimPageLast"
@@ -1879,7 +2024,8 @@ set RenderCB_DY 0
 set RenderCB_FontName Boopee
 set RenderCB_RGBColor "0.54 0.36 0.04"
 set RenderCB_FontScale 0.5
-set RenderCB_ConsoleSymbol FpT_s3
+set RenderCB_Conso)FPM"
+R"FPM(leSymbol FpT_s3
 set RenderCB_FloatArg 2000.0
 set RenderCB_BoolArg 0
 set RenderCB_TextJustify JustifyXRight
@@ -2036,8 +2182,7 @@ set Name FpTrophyRow7
 set Coords "0 0 260 44"
 set Layer 2
 set RenderCB _DrawText
-set RenderCBExcl)FPM"
-R"FPM(udesDefaultRender 1
+set RenderCBExcludesDefaultRender 1
 set RenderCB_DX 0
 set RenderCB_DY 0
 set RenderCB_FontName Boopee
@@ -2052,7 +2197,8 @@ set Focus 9307 FocusUp 9306
 set DrawWhenFocused MenuMainArrow DrawWhenFocusedOffset "-52 2 0"
 set RenderCB_RGBColorFocused "0.85 0.45 0.0"
 set CommandGetFocus "sym set MenuMemoryFpTrophy FpTrophyRow7"
-set CommandGetFocus "echo fp trophy focus 7"
+set CommandGetFocus "echo fp trophy foc)FPM"
+R"FPM(us 7"
 set CommandGetFocus "menuCmd FpTrophyIconShow"
 set CommandCancel "gameUI focusName DummyObject"
 set CommandCancel "menuCmd FpTrophyCancel"
@@ -2289,8 +2435,7 @@ set Layer 2
 set Disabled 1
 set DisabledAlpha 0.0
 set DisabledAlphaTimeIn 0.1
-set DisabledAlphaTimeOut 0.)FPM"
-R"FPM(05
+set DisabledAlphaTimeOut 0.05
 add MenuObject
 set Name FpTrophyIconG9
 set Texture menus\FpTrophyg09
@@ -2317,7 +2462,8 @@ add MenuObject
 set Name FpTrophyIconG10
 set Texture menus\FpTrophyg10
 set Coords "0 0 128 128"
-set ScaleX 0.75
+s)FPM"
+R"FPM(et ScaleX 0.75
 set ScaleY 0.75
 set Layer 2
 set Disabled 1
@@ -2574,8 +2720,7 @@ set ScaleX 0.75
 set ScaleY 0.75
 set Layer 2
 set Disabled 1
-set DisabledAlpha 0.)FPM"
-R"FPM(0
+set DisabledAlpha 0.0
 set DisabledAlphaTimeIn 0.1
 set DisabledAlphaTimeOut 0.05
 add MenuObject
@@ -2601,7 +2746,8 @@ set DisabledAlpha 0.0
 set DisabledAlphaTimeIn 0.1
 set DisabledAlphaTimeOut 0.05
 add MenuObject
-set Name FpTrophyIconG23
+set Name FpTrophyIconG2)FPM"
+R"FPM(3
 set Texture menus\FpTrophyg23
 set Coords "0 0 128 128"
 set ScaleX 0.75
@@ -2818,8 +2964,7 @@ set RenderCB_RGBColor "0.35 0.23 0.07"
 set RenderCB_FontScale 0.62
 set RenderCB_ConsoleSymbol FpT_dp
 set RenderCB_FloatArg 2000.0
-set RenderCB_Bo)FPM"
-R"FPM(olArg 0
+set RenderCB_BoolArg 0
 set RenderCB_TextJustify JustifyXCenter
 set RenderCB_TextJustifyVertical JustifyYCenter
 add MenuObject
@@ -2839,7 +2984,8 @@ set RenderCB_BoolArg 0
 set RenderCB_TextJustify JustifyXCenter
 set RenderCB_TextJustifyVertical JustifyYCenter
 add MenuObject
-set Name FpTrophyPage
+set Name FpTrophyP)FPM"
+R"FPM(age
 set Coords "0 0 350 36"
 set Layer 2
 set RenderCB _DrawText
@@ -2947,11 +3093,14 @@ static const char* const kFpMenuScripts =
 R"FPM(Script FpCancelHub {
 cmd "log MenuCmd: FpCancelHub"
 cmd "sym set MenuToHide MenuFpHubMaster"
-cmd "sym set MenuToShow MenuOptionsMaster"
+cmd "if sym FpHubReturn == l2 runNow sym set MenuToShow MenuOptionsL2Master"
+cmd "if sym FpHubReturn != l2 runNow sym set MenuToShow MenuOptionsMaster"
 cmd "addUIAnim $$MenuToShow mas_MenuCenter"
 cmd "addUIAnim $$MenuToHide mas_MenuRight"
-cmd "menuCmd MenuBackgroundSize4"
-cmd "pcmd 0.2 gameUI focusName MenuOptionsStore"
+cmd "if sym FpHubReturn == l2 menuCmd MenuBackgroundSize5"
+cmd "if sym FpHubReturn != l2 menuCmd MenuBackgroundSize4"
+cmd "if sym FpHubReturn == l2 pcmd 0.2 gameUI focusName MenuFpL2FatOptions"
+cmd "if sym FpHubReturn != l2 pcmd 0.2 gameUI focusName MenuOptionsStore"
 cmd "addUIAnim $MenuBackgroundObject mas_BackBarRight"
 }
 Script FpCancelGraphics {
@@ -3081,14 +3230,14 @@ cmd "log MenuCmd: FpGateContinue"
 cmd "sym set FpAcctGo 0"
 cmd "sym set FpAcctOpen 0"
 cmd "sym set MenuToHide $FpAcctCur"
-cmd "sym set MenuToShow MenuMainMaster"
+cmd ")FPM"
+R"FPM(sym set MenuToShow MenuMainMaster"
 cmd "addUIAnim $$MenuToShow mas_MenuCenter"
 cmd "addUIAnim $$MenuToHide mas_MenuRight"
 cmd "menuCmd MenuBackgroundSize4"
 cmd "addUIAnim $MenuBackgroundObject mas_BackBarRight"
 cmd "pcmd 0.2 gameUI focusName MenuMainOnline"
-cmd "pcmd 0.9 menuCmd FEOnlineCheck")FPM"
-R"FPM(
+cmd "pcmd 0.9 menuCmd FEOnlineCheck"
 }
 Script FpRegisterAsk {
 cmd "log MenuCmd: FpRegisterAsk"
@@ -3103,27 +3252,6 @@ Script FpRegisterGo {
 cmd "log MenuCmd: FpRegisterGo"
 cmd "echo fp url register"
 }
-Script FpNameMaybe {
-cmd "log MenuCmd: FpNameMaybe"
-cmd "if sym FpNeedName == 1 menuCmd FpNameOpen"
-}
-Script FpNameOpen {
-cmd "log MenuCmd: FpNameOpen"
-cmd "gameUI focusName DummyObject"
-cmd "sym set FpNeedName 0"
-cmd "sym set FpPnameReturn main"
-cmd "sym set FpPnameOpen 1"
-cmd "sym set MenuToHide MenuMainMaster"
-cmd "sym set MenuToShow MenuFpPnameMaster"
-cmd "addUIAnim $$MenuToHide mas_MenuLeft"
-cmd "addUIAnim $$MenuToShow mas_MenuCenter"
-cmd "addUIAnim $MenuBackgroundObject mas_BackBarLeft"
-cmd "menuCmd MenuBackgroundSize3"
-cmd "echo fp sync pname"
-cmd "pcmd 0.2 gameUI focusName MenuFpPnameName"
-cmd "pcmd 0.5 menuCmd FpPnamePoll"
-cmd "playSound MenuChoose"
-}
 Script FpPnamePoll {
 cmd "log MenuCmd: FpPnamePoll"
 cmd "echo fp sync pname"
@@ -3131,7 +3259,6 @@ cmd "if sym FpPnameOpen == 1 pcmd 0.5 menuCmd FpPnamePoll"
 }
 Script FpCancelPname {
 cmd "log MenuCmd: FpCancelPname"
-cmd "echo fp pname done"
 cmd "sym set FpPnameOpen 0"
 cmd "sym set MenuToHide MenuFpPnameMaster"
 cmd "if sym FpPnameReturn == main runNow sym set MenuToShow MenuMainMaster"
@@ -3306,6 +3433,6 @@ FpSkipIntro=Skip Intro
 FpSkipHowTo=Skip How To Play
 FpAiHazard=AI Hazard Avoidance
 FpPname=Player Name
-FpPnameName=Name
+FpPnameName=Player Name
 FpPnameDone=Done
 )FPM";

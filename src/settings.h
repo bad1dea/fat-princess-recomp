@@ -31,8 +31,6 @@ bool settings_text_active();
 bool settings_text_set(const char* id, const std::string& value);
 bool settings_command(const char* id);   // cmd_login, cmd_register, cmd_logout, as if chosen on the ACCOUNT page
 bool settings_restart_planned();           // the game is about to restart to use a new name
-bool settings_name_needed();             // signed out and the Player Name page has not been seen yet
-void settings_name_done();               // the player has seen it (or chose a name)
 std::string settings_account();          // signed-in account name, empty when signed out
 std::string settings_notice();           // last result line of an account request
 bool settings_busy();                    // an account or friends request is running

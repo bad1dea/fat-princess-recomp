@@ -8,8 +8,6 @@
 //
 //   echo fp sync <page>         queue the current value of every row of a page
 //   echo fp cycle <id> <+1|-1>  step a setting through its choices (settings_set does the real work and saves)
-//   echo fp namecheck           the main menu asks whether to offer the Player Name page (sets FpNeedName)
-//   echo fp pname done          the Player Name page was left
 //   echo fp act <id>            run an action row (opening the developer overlay)
 //   echo anything else          untouched (the cheat patch and the retail scripts use echo as a log line)
 #include <cctype>
@@ -105,19 +103,22 @@ std::string clean(std::string v) {   // text for a quoted sym value: no quotes, 
 
 void queue_text(const char* sym, const std::string& v) { g_replies.push_back(std::string("sym set ") + sym + " \"" + clean(v) + "\""); }
 
-// The Player Name page: the name, and a hint on the note line.
+// The Player Name page: its note line holds the current name (or the reason a typed one was refused).
 void queue_pname() {
     const std::string who = settings_account();
-    std::string name = who.empty() ? settings_get("name") : who;
-    for (char& c : name) c = (char)std::toupper((unsigned char)c);
-    queue_text("FpV_pname", name.empty() ? "TAP TO ENTER" : name);
-    std::string note = who.empty() ? settings_notice() : "YOUR NAME IS YOUR ACCOUNT NAME";
-    for (char& c : note) c = (char)std::toupper((unsigned char)c);
-    if (note.empty()) note = "TAP THE NAME TO CHANGE IT";
+    std::string note = settings_notice();
+    if (who.empty() && note.rfind("3-16", 0) != 0) {
+        std::string name = settings_get("name");
+        for (char& c : name) c = (char)std::toupper((unsigned char)c);
+        note = "YOUR NAME: " + name;
+    } else if (!who.empty()) {
+        std::string name = who;
+        for (char& c : name) c = (char)std::toupper((unsigned char)c);
+        note = "SIGNED IN AS " + name;
+    }
     if (note.size() > 40) note.resize(40);
     queue_text("FpV_acct_note", note);
 }
-bool g_name_prompted = false;   // the first-start name page is offered once per run
 
 int g_poll_signed = -1;   // account state last reported to the page: -1 unknown, 0 signed out, 1 signed in
 bool g_was_busy = false;
@@ -149,14 +150,7 @@ void fp_menu_echo(ppu_context* ctx) {
     const auto t = tokens((uint32_t)ctx->gpr[4]);
     if (t.size() < 3 || t[1] != "fp") return;
     const std::string& verb = t[2];
-    if (verb == "namecheck") {   // the main menu asks whether to offer the Player Name page
-        const bool offer = !g_name_prompted && settings_name_needed();
-        if (offer) g_name_prompted = true;
-        g_replies.push_back(std::string("sym set FpNeedName ") + (offer ? "1" : "0"));
-        std::printf("[fp-menu] namecheck: %s\n", offer ? "offer the name page" : "no");
-    } else if (verb == "pname" && t.size() >= 4 && t[3] == "done") {
-        settings_name_done();
-    } else if (verb == "sync" && t.size() >= 4 && t[3] == "pname") {
+    if (verb == "sync" && t.size() >= 4 && t[3] == "pname") {
         queue_pname();
     } else if (verb == "sync" && t.size() >= 4) {
         for (const Row& row : rows()) if (t[3] == row.page) queue_value(row);

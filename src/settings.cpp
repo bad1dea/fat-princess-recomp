@@ -128,17 +128,7 @@ void add(const char* tab_name, const char* id, const char* label, Kind kind, std
 
 // Online names must be unique per player: the login name plus a short hash of the machine name.
 std::string default_player_name() {
-    const char* user = std::getenv("USERNAME");
-    if (!user) user = std::getenv("USER");
-    const char* host = std::getenv("COMPUTERNAME");
-    if (!host) host = std::getenv("HOSTNAME");
-    std::string base = user && *user ? user : "Player";
-    unsigned h = 2166136261u;
-    for (const char* p = host ? host : ""; *p; ++p) h = (h ^ static_cast<unsigned char>(*p)) * 16777619u;
-    for (const char* p = user ? user : ""; *p; ++p) h = (h ^ static_cast<unsigned char>(*p)) * 16777619u;
-    char tail[8];
-    std::snprintf(tail, sizeof tail, "-%03x", h & 0xFFF);
-    return base.substr(0, 11) + tail;
+    return "Player";   // until the player signs in (the account name replaces it) or picks one on the Player Name page
 }
 
 // A friend request, a new friendship or a removal arrived from the server. This runs on the guest thread that pumps
@@ -194,7 +184,6 @@ void init_items() {
 #define FP_DEFAULT_JOIN_URL ""   // builds may set the sign-up page (-DFP_DEFAULT_JOIN_URL=https://...)
 #endif
     add("", "join_url", "", Kind::Text, FP_DEFAULT_JOIN_URL);   // where Register in the game menu sends the browser
-    add("", "name_chosen", "", Kind::Text, "");   // set once the player has seen the Player Name page
     add("", "account_user", "", Kind::Text, "");
     add("", "account_token", "", Kind::Text, "");
     add("ACCOUNT", "acct_status", "STATUS", Kind::Command, "");
@@ -1306,7 +1295,7 @@ void osk_finish(bool canceled) {
                 std::string n;
                 for (char c : osk.text) if (std::isalnum((unsigned char)c) || c == '-' || c == '_') n += c;
                 if (n.size() < 3 || n.size() > 16 || !std::isalpha((unsigned char)n[0])) notice = "3-16 LETTERS OR DIGITS, START WITH A LETTER";
-                else { item->value = n; find("name_chosen")->value = "1"; notice = "SAVED"; save(); restart_if_name_changed(n); }
+                else { item->value = n; notice = "SAVED"; save(); restart_if_name_changed(n); }
             } else item->value = osk.text;
         }
         osk.target.clear();
@@ -1782,8 +1771,6 @@ bool settings_command(const char* id) {
 }
 std::string settings_account() { init_items(); return account_name(); }
 bool settings_restart_planned() { return restart_planned(); }
-bool settings_name_needed() { init_items(); return account_name().empty() && find("name_chosen")->value.empty(); }
-void settings_name_done() { init_items(); if (find("name_chosen")->value.empty()) { find("name_chosen")->value = "1"; save(); } }
 std::string settings_notice() { return notice; }
 bool settings_busy() { return network_busy(); }
 bool settings_open_url(const char* id, const std::string& query) {
