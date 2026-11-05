@@ -739,12 +739,14 @@ void export_environment() {
     if (on("online")) {
         set("PS3_NET_ONLINE", "1");
         set("PSNR_SERVER", find("server")->value);
-        // A signed-in account's name is the online name; the server refuses a hello whose name is not the account's.
+        set("PS3_NP_COMM_ID", "NPWR00737_00");   // the game asks for its friends before Matching2 starts
+        set("PS3_NET_P2P_PORT", find("p2p_port")->value);
+    }
+    {   // The player name, online or not. A signed-in account's name is the online name: the server refuses a hello whose
+        // name is not the account's.
         const bool account=!account_name().empty() && !find("account_token")->value.empty();
         set("PS3_NP_ONLINE_ID", account ? account_name() : find("name")->value);
         startup_name = account ? account_name() : find("name")->value;
-        set("PS3_NP_COMM_ID", "NPWR00737_00");   // the game asks for its friends before Matching2 starts
-        set("PS3_NET_P2P_PORT", find("p2p_port")->value);
     }
     if (cheats_locked()) {   // online: no cheat combos, no console injection, whatever the environment or an env.txt says
         for (const char* name : {"FP_CHEATS", "FP_CMD_FILE", "FP_SET_FILE", "FP_GAME_SPEED"}) clear_env(name);
