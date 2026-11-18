@@ -27,6 +27,11 @@ jobs:
         with:
           lift-key: ${{ secrets.FP_LIFT_KEY }}
           lift-deploy-key: ${{ secrets.FP_LIFT_DEPLOY_KEY }}
+      - name: Verify SPU NEON float ops
+        run: |
+          rt=third_party/ps3recomp/runtime
+          cc -O2 -frounding-math -ffp-contract=off -Ithird_party/ps3recomp/include -I"$rt" "$rt/spu/tests/test_spu_float_neon.c" -lm -o "$RUNNER_TEMP/spu-native"
+          "$RUNNER_TEMP/spu-native"
       - name: Configure
         run: |
           cmake -S . -B build/mac -G Ninja -DCMAKE_BUILD_TYPE=Release -DFP_BUILD_GAME=ON -DFP_X86_V3=OFF -DCMAKE_PREFIX_PATH="$(brew --prefix)" \

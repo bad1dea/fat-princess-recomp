@@ -68,7 +68,8 @@ jobs:
           echo "DEPS=$RUNNER_TEMP/deps-ios" >> "$GITHUB_ENV"
       - name: Verify Apple capture interfaces
         run: |
-          c++ -std=c++17 -Werror=format -fsyntax-only src/ios_stall_profile.cpp
+          # -arch arm64: the file reads ARM thread state; the self-hosted Mac is x86_64.
+          c++ -arch arm64 -std=c++17 -Werror=format -fsyntax-only src/ios_stall_profile.cpp
           sdk=$(xcrun --sdk iphoneos --show-sdk-path)
           xcrun --sdk iphoneos clang++ -std=c++17 -fobjc-arc -x objective-c++ -fsyntax-only -Werror=format -isysroot "$sdk" -target arm64-apple-ios${IOS_MIN} src/ios_lifecycle.mm
       - name: Verify SPU compile flags
@@ -122,6 +123,8 @@ jobs:
           rt=third_party/ps3recomp/runtime
           cc -O2 -frounding-math -ffp-contract=off -Ithird_party/ps3recomp/include -I"$rt" "$rt/spu/tests/test_spu_extended_fast.c" -lm -o "$RUNNER_TEMP/spu-extended"
           "$RUNNER_TEMP/spu-extended"
+          # The NEON comparison needs an arm64 host; on x86_64 it only reports a skip. The
+          # macOS workflow (Apple silicon) runs it too.
           cc -O2 -frounding-math -ffp-contract=off -Ithird_party/ps3recomp/include -I"$rt" "$rt/spu/tests/test_spu_float_neon.c" -lm -o "$RUNNER_TEMP/spu-native"
           "$RUNNER_TEMP/spu-native"
       - name: Verify Apple SPU job transfers
