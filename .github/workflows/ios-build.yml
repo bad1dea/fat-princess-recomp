@@ -23,7 +23,7 @@ on:
         type: boolean
         default: false
       hosted:
-        description: "Build on GitHub's macos-26 instead of the self-hosted Mac (when it is offline)"
+        description: "Build on GitHub's xcode-27 image instead of the self-hosted Mac (offline, or an iOS 27 SDK build)"
         type: boolean
         default: false
   push:
@@ -43,7 +43,8 @@ jobs:
   build:
     # Self-hosted Mac: Xcode 26.6 like macos-26, no Homebrew. Its runner environment puts
     # cmake, ninja, zstd and python3 on PATH and sets VULKAN_HEADERS. Pushes always go there.
-    runs-on: ${{ inputs.hosted && 'macos-26' || fromJSON('["self-hosted","macOS","xcode"]') }}
+    # Apps linked against an SDK older than iOS 27.1 run letterboxed on the unfolded iPhone Duo.
+    runs-on: ${{ inputs.hosted && 'xcode-27' || fromJSON('["self-hosted","macOS","xcode"]') }}
     timeout-minutes: 300
     steps:
       - uses: actions/checkout@v5
