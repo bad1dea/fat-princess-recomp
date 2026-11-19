@@ -1,0 +1,327 @@
+diff --git a/src/video/uikit/SDL_uikitappdelegate.h b/src/video/uikit/SDL_uikitappdelegate.h
+index df3ff0f..f792df7 100644
+--- a/src/video/uikit/SDL_uikitappdelegate.h
++++ b/src/video/uikit/SDL_uikitappdelegate.h
+@@ -35,6 +35,8 @@
+ + (NSString *)getAppDelegateClassName;
+ 
+ - (void)hideLaunchScreen;
++- (void)sendDropFileForURL:(NSURL *)url;
++- (void)sceneDidConnect:(UIWindowScene *)scene API_AVAILABLE(ios(13.0), tvos(13.0));
+ 
+ /* This property is marked as optional, and is only intended to be used when
+  * the app's UI is storyboard-based. SDL is not storyboard-based, however
+@@ -44,4 +46,11 @@
+ 
+ @end
+ 
++/* Named by UISceneDelegateClassName in the app's UIApplicationSceneManifest.
++ * With a manifest, SDL_main starts once the first scene connects. */
++API_AVAILABLE(ios(13.0), tvos(13.0))
++@interface SDLUIKitSceneDelegate : UIResponder<UIWindowSceneDelegate>
++@property (nonatomic) UIWindow *window;
++@end
++
+ /* vi: set ts=4 sw=4 expandtab: */
+diff --git a/src/video/uikit/SDL_uikitappdelegate.m b/src/video/uikit/SDL_uikitappdelegate.m
+index 31b114a..79bca00 100644
+--- a/src/video/uikit/SDL_uikitappdelegate.m
++++ b/src/video/uikit/SDL_uikitappdelegate.m
+@@ -89,7 +89,7 @@ SDL_IdleTimerDisabledChanged(void *userdata, const char *name, const char *oldVa
+ /* Load a launch image using the old UILaunchImageFile-era naming rules. */
+ static UIImage *SDL_LoadLaunchImageNamed(NSString *name, int screenh)
+ {
+-    UIInterfaceOrientation curorient = [UIApplication sharedApplication].statusBarOrientation;
++    UIInterfaceOrientation curorient = UIKit_GetInterfaceOrientation();
+     UIUserInterfaceIdiom idiom = [UIDevice currentDevice].userInterfaceIdiom;
+     UIImage *image = nil;
+ 
+@@ -219,7 +219,7 @@ static UIImage *SDL_LoadLaunchImageNamed(NSString *name, int screenh)
+         int screenh = (int)([UIScreen mainScreen].bounds.size.height + 0.5);
+ 
+ #if !TARGET_OS_TV
+-        UIInterfaceOrientation curorient = [UIApplication sharedApplication].statusBarOrientation;
++        UIInterfaceOrientation curorient = UIKit_GetInterfaceOrientation();
+ 
+         /* We always want portrait-oriented size, to match UILaunchImageSize. */
+         if (screenw > screenh) {
+@@ -410,7 +410,12 @@ static UIImage *SDL_LoadLaunchImageNamed(NSString *name, int screenh)
+     /* exit(exit_status); */
+ }
+ 
+-- (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions
++static BOOL UIKit_UsesScenes(void)
++{
++    return [[NSBundle mainBundle] objectForInfoDictionaryKey:@"UIApplicationSceneManifest"] != nil;
++}
++
++- (void)showLaunchScreenInScene:(UIWindowScene *)scene
+ {
+     NSBundle *bundle = [NSBundle mainBundle];
+ 
+@@ -448,7 +453,15 @@ static UIImage *SDL_LoadLaunchImageNamed(NSString *name, int screenh)
+     }
+ 
+     if (vc.view) {
+-        launchWindow = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
++        launchWindow = nil;
++        if (@available(iOS 13.0, tvOS 13.0, *)) {
++            if (scene) {
++                launchWindow = [[UIWindow alloc] initWithWindowScene:scene];
++            }
++        }
++        if (!launchWindow) {
++            launchWindow = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
++        }
+ 
+         /* We don't want the launch window immediately hidden when a real SDL
+          * window is shown - we fade it out ourselves when we're ready. */
+@@ -461,6 +474,17 @@ static UIImage *SDL_LoadLaunchImageNamed(NSString *name, int screenh)
+         launchWindow.rootViewController = vc;
+     }
+ #endif
++}
++
++- (BOOL)application:(UIApplication *)application didFinishLaunchingWithOptions:(NSDictionary *)launchOptions
++{
++    NSBundle *bundle = [NSBundle mainBundle];
++
++    /* With scenes there is no window to draw in yet: sceneDidConnect shows the
++     * launch screen and starts SDL_main. */
++    if (!UIKit_UsesScenes()) {
++        [self showLaunchScreenInScene:nil];
++    }
+ 
+     /* Set working directory to resource path */
+     [[NSFileManager defaultManager] changeCurrentDirectoryPath:[bundle resourcePath]];
+@@ -470,11 +494,26 @@ static UIImage *SDL_LoadLaunchImageNamed(NSString *name, int screenh)
+                         SDL_IdleTimerDisabledChanged, NULL);
+ 
+     SDL_SetMainReady();
+-    [self performSelector:@selector(postFinishLaunch) withObject:nil afterDelay:0.0];
++    if (!UIKit_UsesScenes()) {
++        [self performSelector:@selector(postFinishLaunch) withObject:nil afterDelay:0.0];
++    }
+ 
+     return YES;
+ }
+ 
++- (void)sceneDidConnect:(UIWindowScene *)scene
++{
++    static BOOL started = NO;
++    if (started) {
++        return;
++    }
++    started = YES;
++    [self showLaunchScreenInScene:scene];
++    /* SDL_main blocks inside this call for the life of the app, so it has to
++     * run from the run loop, not from inside the scene connection callback. */
++    [self performSelector:@selector(postFinishLaunch) withObject:nil afterDelay:0.0];
++}
++
+ - (UIWindow *)window
+ {
+     SDL_VideoDevice *_this = SDL_GetVideoDevice();
+@@ -527,6 +566,53 @@ static UIImage *SDL_LoadLaunchImageNamed(NSString *name, int screenh)
+ 
+ @end
+ 
++@implementation SDLUIKitSceneDelegate
++
++- (void)scene:(UIScene *)scene willConnectToSession:(UISceneSession *)session options:(UISceneConnectionOptions *)connectionOptions
++{
++    SDLUIKitDelegate *app = [SDLUIKitDelegate sharedAppDelegate];
++    if (![scene isKindOfClass:[UIWindowScene class]]) {
++        return;
++    }
++    [app sceneDidConnect:(UIWindowScene *)scene];
++    for (UIOpenURLContext *context in connectionOptions.URLContexts) {
++        [app sendDropFileForURL:context.URL];
++    }
++}
++
++- (void)scene:(UIScene *)scene openURLContexts:(NSSet<UIOpenURLContext *> *)URLContexts
++{
++    for (UIOpenURLContext *context in URLContexts) {
++        [[SDLUIKitDelegate sharedAppDelegate] sendDropFileForURL:context.URL];
++    }
++}
++
++#if !TARGET_OS_TV
++/* UIApplicationDidChangeStatusBarOrientationNotification is not posted on iOS 27. */
++#pragma clang diagnostic push
++#pragma clang diagnostic ignored "-Wdeprecated-declarations"
++- (void)windowScene:(UIWindowScene *)windowScene didUpdateCoordinateSpace:(id<UICoordinateSpace>)previousCoordinateSpace interfaceOrientation:(UIInterfaceOrientation)previousInterfaceOrientation traitCollection:(UITraitCollection *)previousTraitCollection
++{
++    if (@available(iOS 27.0, *)) {
++        if (UIKit_GetInterfaceOrientation() != previousInterfaceOrientation) {
++            SDL_OnApplicationDidChangeStatusBarOrientation();
++        }
++    }
++}
++#pragma clang diagnostic pop
++#endif
++
++- (UIWindow *)window
++{
++    return [[SDLUIKitDelegate sharedAppDelegate] window];
++}
++
++- (void)setWindow:(UIWindow *)window
++{
++}
++
++@end
++
+ #endif /* SDL_VIDEO_DRIVER_UIKIT */
+ 
+ /* vi: set ts=4 sw=4 expandtab: */
+diff --git a/src/video/uikit/SDL_uikitmessagebox.m b/src/video/uikit/SDL_uikitmessagebox.m
+index a28f1cf..b20b8d4 100644
+--- a/src/video/uikit/SDL_uikitmessagebox.m
++++ b/src/video/uikit/SDL_uikitmessagebox.m
+@@ -99,7 +99,15 @@ static BOOL UIKit_ShowMessageBoxAlertController(const SDL_MessageBoxData *messag
+     }
+ 
+     if (window == nil || window.rootViewController == nil) {
+-        alertwindow = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
++        if (@available(iOS 13.0, tvOS 13.0, *)) {
++            UIWindowScene *scene = UIKit_GetActiveWindowScene();
++            if (scene) {
++                alertwindow = [[UIWindow alloc] initWithWindowScene:scene];
++            }
++        }
++        if (!alertwindow) {
++            alertwindow = [[UIWindow alloc] initWithFrame:[UIScreen mainScreen].bounds];
++        }
+         alertwindow.rootViewController = [UIViewController new];
+         alertwindow.windowLevel = UIWindowLevelAlert;
+ 
+diff --git a/src/video/uikit/SDL_uikitmodes.m b/src/video/uikit/SDL_uikitmodes.m
+index 97c59c2..c046a71 100644
+--- a/src/video/uikit/SDL_uikitmodes.m
++++ b/src/video/uikit/SDL_uikitmodes.m
+@@ -355,7 +355,7 @@ SDL_bool UIKit_IsDisplayLandscape(UIScreen *uiscreen)
+ {
+ #if !TARGET_OS_TV
+     if (uiscreen == [UIScreen mainScreen]) {
+-        return UIInterfaceOrientationIsLandscape([UIApplication sharedApplication].statusBarOrientation);
++        return UIInterfaceOrientationIsLandscape(UIKit_GetInterfaceOrientation());
+     } else
+ #endif /* !TARGET_OS_TV */
+     {
+@@ -525,7 +525,7 @@ void UIKit_QuitModes(_THIS)
+ #if !TARGET_OS_TV
+ void SDL_OnApplicationDidChangeStatusBarOrientation(void)
+ {
+-    BOOL isLandscape = UIInterfaceOrientationIsLandscape([UIApplication sharedApplication].statusBarOrientation);
++    BOOL isLandscape = UIInterfaceOrientationIsLandscape(UIKit_GetInterfaceOrientation());
+     SDL_VideoDisplay *display = SDL_GetDisplay(0);
+ 
+     if (display) {
+@@ -550,7 +550,7 @@ void SDL_OnApplicationDidChangeStatusBarOrientation(void)
+             currentmode->h = height;
+         }
+ 
+-        switch ([UIApplication sharedApplication].statusBarOrientation) {
++        switch (UIKit_GetInterfaceOrientation()) {
+         case UIInterfaceOrientationPortrait:
+             orientation = SDL_ORIENTATION_PORTRAIT;
+             break;
+diff --git a/src/video/uikit/SDL_uikitvideo.h b/src/video/uikit/SDL_uikitvideo.h
+index 4d3b81a..8ce6ed6 100644
+--- a/src/video/uikit/SDL_uikitvideo.h
++++ b/src/video/uikit/SDL_uikitvideo.h
+@@ -35,6 +35,13 @@
+ 
+ CGRect UIKit_ComputeViewFrame(SDL_Window *window, UIScreen *screen);
+ 
++/* Scene lifecycle (from SDL3): apps built with the iOS 27 SDK must use scenes
++ * or UIKit refuses to launch them. */
++UIWindowScene *UIKit_GetActiveWindowScene(void) API_AVAILABLE(ios(13.0), tvos(13.0));
++#if !TARGET_OS_TV
++UIInterfaceOrientation UIKit_GetInterfaceOrientation(void);
++#endif
++
+ #endif /* __OBJC__ */
+ 
+ void UIKit_SuspendScreenSaver(_THIS);
+diff --git a/src/video/uikit/SDL_uikitvideo.m b/src/video/uikit/SDL_uikitvideo.m
+index f7aa3fd..6f9bc0e 100644
+--- a/src/video/uikit/SDL_uikitvideo.m
++++ b/src/video/uikit/SDL_uikitvideo.m
+@@ -220,7 +220,7 @@ CGRect UIKit_ComputeViewFrame(SDL_Window *window, UIScreen *screen)
+      * https://bugzilla.libsdl.org/show_bug.cgi?id=3505
+      * https://bugzilla.libsdl.org/show_bug.cgi?id=3465
+      * https://forums.developer.apple.com/thread/65337 */
+-    orient = [UIApplication sharedApplication].statusBarOrientation;
++    orient = UIKit_GetInterfaceOrientation();
+     landscape = UIInterfaceOrientationIsLandscape(orient) ||
+                     !(UIKit_GetSupportedOrientations(window) & (UIInterfaceOrientationMaskPortrait | UIInterfaceOrientationMaskPortraitUpsideDown));
+     fullscreen = CGRectEqualToRect(screen.bounds, frame);
+@@ -237,6 +237,43 @@ CGRect UIKit_ComputeViewFrame(SDL_Window *window, UIScreen *screen)
+     return frame;
+ }
+ 
++UIWindowScene *UIKit_GetActiveWindowScene(void)
++{
++    UIWindowScene *inactive = nil, *any = nil;
++    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
++        if (![scene isKindOfClass:[UIWindowScene class]]) {
++            continue;
++        }
++        if (scene.activationState == UISceneActivationStateForegroundActive) {
++            return (UIWindowScene *)scene;
++        }
++        if (scene.activationState == UISceneActivationStateForegroundInactive && !inactive) {
++            inactive = (UIWindowScene *)scene;
++        }
++        if (!any) {
++            any = (UIWindowScene *)scene;
++        }
++    }
++    return inactive ? inactive : any;
++}
++
++#if !TARGET_OS_TV
++/* statusBarOrientation returns Unknown on iOS 27; the scene geometry has it. */
++UIInterfaceOrientation UIKit_GetInterfaceOrientation(void)
++{
++#if __IPHONE_OS_VERSION_MAX_ALLOWED >= 270000
++    if (@available(iOS 27.0, *)) {
++        UIWindowScene *scene = UIKit_GetActiveWindowScene();
++        return scene ? scene.effectiveGeometry.interfaceOrientation : UIInterfaceOrientationUnknown;
++    }
++#endif
++#pragma clang diagnostic push
++#pragma clang diagnostic ignored "-Wdeprecated-declarations"
++    return [UIApplication sharedApplication].statusBarOrientation;
++#pragma clang diagnostic pop
++}
++#endif
++
+ void UIKit_ForceUpdateHomeIndicator(void)
+ {
+ #if !TARGET_OS_TV
+diff --git a/src/video/uikit/SDL_uikitwindow.m b/src/video/uikit/SDL_uikitwindow.m
+index 0e0ea05..3d4e82c 100644
+--- a/src/video/uikit/SDL_uikitwindow.m
++++ b/src/video/uikit/SDL_uikitwindow.m
+@@ -207,7 +207,16 @@ int UIKit_CreateWindow(_THIS, SDL_Window *window)
+ 
+         /* ignore the size user requested, and make a fullscreen window */
+         /* !!! FIXME: can we have a smaller view? */
+-        uiwindow = [[SDL_uikitwindow alloc] initWithFrame:data.uiscreen.bounds];
++        uiwindow = nil;
++        if (@available(iOS 13.0, tvOS 13.0, *)) {
++            UIWindowScene *scene = UIKit_GetActiveWindowScene();
++            if (scene) {
++                uiwindow = [[SDL_uikitwindow alloc] initWithWindowScene:scene];
++            }
++        }
++        if (!uiwindow) {
++            uiwindow = [[SDL_uikitwindow alloc] initWithFrame:data.uiscreen.bounds];
++        }
+ 
+         /* put the window on an external display if appropriate. */
+         if (data.uiscreen != [UIScreen mainScreen]) {

@@ -90,7 +90,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}/deps-ios
-          key: ios-deps-${{ env.SDL_TAG }}-${{ env.GLSLANG_TAG }}-${{ env.MVK_TAG }}-${{ env.IOS_MIN }}-src${{ env.SRC_TAG }}-burst-v1-${{ steps.mvksrc.outputs.sha }}-dbg${{ inputs.mvk_debug }}
+          key: ios-deps-${{ env.SDL_TAG }}-${{ env.GLSLANG_TAG }}-${{ env.MVK_TAG }}-${{ env.IOS_MIN }}-src${{ env.SRC_TAG }}-burst-v1-${{ hashFiles('patches/sdl2-*.diff') }}-${{ steps.mvksrc.outputs.sha }}-dbg${{ inputs.mvk_debug }}
       - name: Build SDL2, glslang and fetch MoltenVK for iOS
         if: steps.deps.outputs.cache-hit != 'true'
         run: |

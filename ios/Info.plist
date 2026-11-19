@@ -14,6 +14,16 @@
 	<key>CFBundleSupportedPlatforms</key><array><string>iPhoneOS</string></array>
 	<key>LSRequiresIPhoneOS</key><true/>
 	<key>MinimumOSVersion</key><string>16.0</string>
+	<!-- Required with the iOS 27 SDK. SDLUIKitSceneDelegate comes from patches/sdl2-uiscene.diff. -->
+	<key>UIApplicationSceneManifest</key><dict>
+		<key>UIApplicationSupportsMultipleScenes</key><false/>
+		<key>UISceneConfigurations</key><dict>
+			<key>UIWindowSceneSessionRoleApplication</key><array><dict>
+				<key>UISceneConfigurationName</key><string>Default</string>
+				<key>UISceneDelegateClassName</key><string>SDLUIKitSceneDelegate</string>
+			</dict></array>
+		</dict>
+	</dict>
 	<key>UIDeviceFamily</key><array><integer>1</integer><integer>2</integer></array>
 	<key>UIRequiredDeviceCapabilities</key><array><string>arm64</string><string>metal</string></array>
 	<key>UILaunchScreen</key><dict/>

@@ -8,6 +8,8 @@ mkdir -p "$work"
 git clone -q --depth 1 -b "${SRC_TAG:-0.2.2}" https://github.com/libsndfile/libsamplerate.git "$work/src"
 git clone -q --depth 1 -b "${SDL_TAG:-release-2.32.10}" https://github.com/libsdl-org/SDL.git "$work/sdl"
 git -C "$work/sdl" apply --whitespace=nowarn "$root/patches/sdl2-queue-probe.diff"
+# UIScene lifecycle (ported from SDL3): apps linked against the iOS 27 SDK are not launched without it.
+git -C "$work/sdl" apply --whitespace=nowarn "$root/patches/sdl2-uiscene.diff"
 for platform in ios host; do
     destination=$prefix
     target=(-DCMAKE_BUILD_TYPE=Release)
